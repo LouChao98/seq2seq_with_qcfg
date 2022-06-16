@@ -1,0 +1,39 @@
+# @package hydra.launcher
+
+defaults:
+  - override /hydra/launcher@_global_.hydra.launcher: submitit_slurm
+
+_target_: hydra_plugins.hydra_submitit_launcher.submitit_launcher.SlurmLauncher
+
+partition: debug
+comment: ner
+
+timeout_min: 60 # 24h
+cpus_per_task: 4
+gpus_per_node: 1
+tasks_per_node: 1
+nodes: 1
+gres: gpu:1
+# mem_per_gpu: 24G
+name: ${hydra.job.name}
+exclude: sist_gpu[55-60]
+
+submitit_folder: logs/submitit/%j
+additional_parameters:
+  mail-type: all
+  mail-user: louchao@shanghaitech.edu.cn
+
+constraint: null
+cpus_per_gpu: null
+mem_per_cpu: null
+# stderr_to_stdout: true
+
+signal_delay_s: 120
+max_num_timeout: 0
+array_parallelism: 256
+setup:
+  - ". /public/software/anaconda3/etc/profile.d/conda.sh"
+  - "while [[ $CONDA_SHLVL -gt 0 ]]; do conda deactivate || break; done"
+  - "conda activate ner"
+  - "export NCCL_DEBUG=INFO"
+  - "export PYTHONFAULTHANDLER=1"

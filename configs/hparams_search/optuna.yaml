@@ -1,0 +1,81 @@
+# @package _global_
+
+# example hyperparameter optimization of some experiment with Optuna:
+# python train.py -m hparams_search=mnist_optuna experiment=example
+
+defaults:
+  - override /hydra/sweeper: optuna
+
+# choose metric which will be optimized by Optuna
+# make sure this is the correct name of some metric logged in lightning module!
+optimized_metric: "val/f1_best"
+
+# here we define Optuna hyperparameter search
+# it optimizes for value returned from function with @hydra.main decorator
+# docs: https://hydra.cc/docs/next/plugins/optuna_sweeper
+hydra:
+  sweeper:
+    _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
+
+    # storage URL to persist optimization results
+    # for example, you can use SQLite if you set 'sqlite:///example.db'
+    storage: "mysql://optuna:L-eabVd7-qqTaBZ4_i@127.0.0.1:28873/optuna"
+
+    # name of the study to persist optimization results
+    study_name: ${name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+
+    # number of parallel workers
+    n_jobs: 1
+
+    # 'minimize' or 'maximize' the objective
+    direction: maximize
+
+    # total number of runs that will be executed
+    n_trials: 200
+
+    # choose Optuna hyperparameter sampler
+    # docs: https://optuna.readthedocs.io/en/stable/reference/samplers.html
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: 12345
+      n_startup_trials: 10 # number of random sampling runs before optimization starts
+
+    # define range of hyperparameters
+    search_space:
+      model.optimizer.args.lr:
+        type: float
+        low: 0.0001
+        high: 0.02
+      model.scheduler.args.num_warmup_steps:
+        type: categorical
+        choices: ["1 epochs", "2 epochs", "3 epochs"]
+      model.lr:
+        type: float
+        low: 0.0001
+        high: 0.2
+      model.encoder.num_hidden_layers:
+        type: categorical
+        choices: [1, 2, 3]
+      model.encoder.num_attention_heads:
+        type: categorical
+        choices: [2, 4, 6, 8, 12]
+      model.encoder.intermediate_size:
+        type: categorical
+        choices: [1024, 1576, 2048, 3072]
+      model.scorer.dropout:
+        type: float
+        low: 0.
+        high: 0.5
+      model.crf.dropout:
+        type: float
+        low: 0.
+        high: 0.5
+      model.span_extractor.module.name:
+        type: categorical
+        choices: ["max_pooling", "self_attentive"]
+      model.crf.iterations:
+        type: categorical
+        choices: [0, 1, 2, 3]
+      trainer.accumulate_grad_batches:
+        type: categorical
+        choices: [1, 2, 4, 8]

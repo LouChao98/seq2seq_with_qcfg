@@ -1,0 +1,33 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: scan.yaml
+  - override /model: scan.yaml
+  - override /callbacks: default.yaml
+  - override /logger: tensorboard
+  - override /trainer: default.yaml
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "scan"
+
+
+# ~17GB
+datamodule:
+  batch_size: 12
+  eval_batch_size: 4
+
+# model:
+#   load_from_checkpoint: '/home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/scan/2022-06-10_19-00-58/checkpoints/last.ckpt'
+
+trainer:
+  max_epochs: 15
+
+# logger:
+#   wandb:
+#     tags: ["mnist", "${name}"]

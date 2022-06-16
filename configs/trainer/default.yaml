@@ -1,0 +1,18 @@
+_target_: pytorch_lightning.Trainer
+
+gpus: 1
+
+min_epochs: 1
+max_epochs: 5
+precision: 32
+weights_summary: full
+accumulate_grad_batches: null
+gradient_clip_val: 1
+track_grad_norm: -1
+# detect_anomaly: true
+
+# number of validation steps to execute at the beginning of the training
+# num_sanity_val_steps: 0
+
+# ckpt path
+resume_from_checkpoint: null

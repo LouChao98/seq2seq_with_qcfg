@@ -1,0 +1,85 @@
+# @package _global_
+
+# example hyperparameter optimization of some experiment with Optuna:
+# python train.py -m hparams_search=mnist_optuna experiment=example
+
+defaults:
+  - override /hydra/sweeper: optuna
+
+# choose metric which will be optimized by Optuna
+# make sure this is the correct name of some metric logged in lightning module!
+optimized_metric: "val/f1_best"
+
+# here we define Optuna hyperparameter search
+# it optimizes for value returned from function with @hydra.main decorator
+# docs: https://hydra.cc/docs/next/plugins/optuna_sweeper
+hydra:
+  sweeper:
+    _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
+
+    # storage URL to persist optimization results
+    # for example, you can use SQLite if you set 'sqlite:///example.db'
+    storage: "mysql://optuna:L-eabVd7-qqTaBZ4_i@127.0.0.1:28873/optuna"
+
+    # name of the study to persist optimization results
+    study_name: ner_fw_no_crf_encoder_lstm
+
+    # number of parallel workers
+    n_jobs: 1
+
+    # 'minimize' or 'maximize' the objective
+    direction: maximize
+
+    # total number of runs that will be executed
+    n_trials: 20
+
+    # choose Optuna hyperparameter sampler
+    # docs: https://optuna.readthedocs.io/en/stable/reference/samplers.html
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: null
+      n_startup_trials: 5 # number of random sampling runs before optimization starts
+
+    # define range of hyperparameters
+    search_space:
+      model.optimizer.args.lr:
+        type: float
+        low: 0.0001
+        high: 0.01
+      model.scheduler.args.num_warmup_steps:
+        type: categorical
+        choices: ["1 epochs", "4 epochs", "8 epochs"]
+      model.scheduler.args.num_cycles:
+        type: float
+        low: 0.5
+        high: 10
+      # model.loss_args.beta:
+      #   type: categorical
+      #   choices: [0.85, 0.875, 0.9, 0.925, 0.95, 0.99, 0.999]
+      # model.loss_args.gamma:
+      #   type: float
+      #   low: 0
+      #   high: 3
+      model.encoder.hidden_size:
+        type: categorical
+        choices: [200, 300, 400]
+      model.encoder.num_layers:
+        type: categorical
+        choices: [1, 2, 3]
+      model.encoder.recurrent_dropout_probability:
+        type: float
+        low: 0.1
+        high: 0.5
+      model.encoder.use_highway:
+        type: categorical
+        choices: [true, false]
+      # model.span_extractor.module.num_width_embeddings:
+      #   type: categorical
+      #   choices: [7, 9, 11, 13, 15]
+      # model.scorer.dropout:
+      #   type: float
+      #   low: 0.
+      #   high: 0.4
+      # model.scorer.n_layers:
+      #   type: categorical
+      #   choices: [2, 3, 4]

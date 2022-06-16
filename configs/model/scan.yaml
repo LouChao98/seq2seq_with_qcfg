@@ -1,0 +1,34 @@
+_target_: src.models.scan.ScanModule
+_recursive_: False
+
+embedding_dim: 256
+
+tree_encoder:
+  _target_: src.models.components.treelstm.BinaryTreeLSTM
+  dim: ${..embedding_dim}
+
+decoder:
+  _target_: src.models.scan.NeuralQCFGTgtParser
+  nt_states: 2    # src_nt_states in origin impl
+  pt_states: 1   # src_pt_states in origin impl
+
+  num_samples: 4
+  check_ppl: True
+
+  cpd_args: ~
+  # cpd_args:
+    # rank: 100
+
+parser:
+  _target_: src.models.scan.NeuralPCFGSrcParser
+
+optimizer:
+  groups: ~
+  args:
+    _target_: torch.optim.AdamW
+    lr: 5.0e-4  #1.0e-3
+    betas: [0.75, 0.999]
+    weight_decay: 1.0e-5
+    eps: 1.0e-6
+
+scheduler: ~
