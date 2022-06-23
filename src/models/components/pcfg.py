@@ -1,3 +1,4 @@
+import math
 from typing import Dict, Union, List
 import torch
 from torch import Tensor
@@ -50,9 +51,20 @@ class PCFG:
         # TODO: check clamp(1e-2) is enough to filter masked rules, and do not harm the sampling too much.
         preds = []
         terms, rules, roots = params["term"], params["rule"], params["root"]
-        terms = terms.exp().clamp(1e-2).cumsum(2).detach().cpu().numpy()
-        rules = rules.exp().clamp(1e-2).view(*rules.shape[:2], -1).cumsum(2).detach().cpu().numpy()
-        roots = roots.exp().clamp(1e-2).cumsum(1).detach().cpu().numpy()
+        terms: torch.Tensor
+        zero = terms.new_full((1, ), -1e9)
+        threshold = terms.new_full((1, ), np.log(1e-2))
+        terms = torch.where(terms > threshold, terms, zero).softmax(2).cumsum(2)
+        rules = torch.where(rules > threshold, rules, zero).view(*rules.shape[:2], -1).softmax(2).cumsum(2)
+        roots = torch.where(roots > threshold, roots, zero).softmax(1).cumsum(1)
+        terms[:, :, -1] += 1  # avoid out of bound
+        rules[:, :, -1] += 1
+        roots[:, -1] += 1
+        
+        terms = terms.detach().cpu().numpy()
+        rules = rules.detach().cpu().numpy()
+        roots = roots.detach().cpu().numpy()
+
         for b in range(len(terms)):
             samples, scores = self.sample(
                 terms[b],
@@ -87,6 +99,8 @@ class PCFG:
         max_actions=100,
         UNK=1,
     ):
+        # TODO: fix scores, rules/terms/roots are cumsum. so current impl is wrong.
+        # NOTE: this debug has no effect if check_ppl=True.
         NT = rules.shape[0]
         PT = terms.shape[0]
         S = NT + PT
@@ -109,7 +123,7 @@ class PCFG:
                 and len(preterminals) < max_length
                 and actions < max_actions
             ):
-                s = nonterminals.pop()
+                s = nonterminals.pop()  # get the last element
                 if s < NT:
                     if use_copy:
                         nt_state = s // nt_num_nodes
@@ -130,6 +144,7 @@ class PCFG:
             terminals: List[Union[str, int]] = []
             for s in preterminals:
                 if isinstance(s, list):
+                    # copy in NT
                     terminals.extend(s)
                 else:
                     src_pt_state = s // pt_num_nodes
@@ -146,7 +161,7 @@ class PCFG:
                         else:
                             terminals.append(sample)
             samples[i] = terminals
-            scores[i] = score
+            scores[i] = score / len(terminals)
         return samples, scores
 
 
@@ -564,11 +579,11 @@ def stripe(x, n, w, offset=(0, 0), dim=1):
 def weighted_random(cumsum):
     # cumsum = np.cumsum(w)
     rdm_unif = np.random.rand(1)
-    return np.searchsorted(cumsum, rdm_unif).item()
+    return np.searchsorted(cumsum, rdm_unif, side='right').item()
 
 if __name__ == "__main__":
     from time import time
-    torch.cuda.random.manual_seed(1)
+    torch.random.manual_seed(1)
 
     B, N, T, NT, r = 4, 5, 3, 7, 2
     device = "cpu"
@@ -585,47 +600,44 @@ if __name__ == "__main__":
         .softmax(-2)
         .requires_grad_(True),
     }
-    params['rule'] = torch.einsum(
-            "bxr,byr,bzr->bxyz", params["head"], params["left"], params["right"]
-        ).log()
     lens = torch.tensor([N, N - 1, N - 1, N - 3], dtype=torch.long, device=device)
 
     pcfg = PCFG()
 
-    t = time()
-    print(pcfg(params, lens))
-    # print(pcfg(params, lens, decode=True))
-    print(time() - t)
+    # t = time()
+    # print(pcfg(params, lens))
+    print(pcfg(params, lens, decode=True))
+    # print(time() - t)
 
-    cfg = FastestTDPCFG()
-    t = time()
-    logZ = cfg(params, lens)
-    print(logZ)
-    print(time() - t)
-    exit(0)
+    # cfg = FastestTDPCFG()
+    # t = time()
+    # logZ = cfg(params, lens)
+    # print(logZ)
+    # print(time() - t)
+    # exit(0)
 
-    print(cfg(params, lens, argmax=True))
-    # logZ.sum().backward()
-    # print(params["head"].grad[0])
+    # print(cfg(params, lens, argmax=True))
+    # # logZ.sum().backward()
+    # # print(params["head"].grad[0])
 
-    # mrg = cfg._inside(params, lens, marginal=True)
-    # print(mrg[0].sum())
+    # # mrg = cfg._inside(params, lens, marginal=True)
+    # # print(mrg[0].sum())
 
-    for k in params.keys():
-        params[k] = params[k].detach().clone()
-    cfg = PCFG()
-    params = (
-        params["term"],
-        torch.einsum(
-            "bxr,byr,bzr->bxyz", params["head"], params["left"], params["right"]
-        ).log(),
-        params["root"],
-    )
-    logZ = -cfg(params, lens)
-    print(logZ)
-    cfg(params, lens, argmax=True)
-    # logZ.sum().backward()
-    # print(params['head'].grad[0])
+    # for k in params.keys():
+    #     params[k] = params[k].detach().clone()
+    # cfg = PCFG()
+    # params = (
+    #     params["term"],
+    #     torch.einsum(
+    #         "bxr,byr,bzr->bxyz", params["head"], params["left"], params["right"]
+    #     ).log(),
+    #     params["root"],
+    # )
+    # logZ = -cfg(params, lens)
+    # print(logZ)
+    # cfg(params, lens, argmax=True)
+    # # logZ.sum().backward()
+    # # print(params['head'].grad[0])
 
-    print("Ok if same")
+    # print("Ok if same")
 

@@ -9,10 +9,11 @@ tree_encoder:
 
 decoder:
   _target_: src.models.scan.NeuralQCFGTgtParser
-  nt_states: 2    # src_nt_states in origin impl
+  nt_states: 10    # src_nt_states in origin impl
   pt_states: 1   # src_pt_states in origin impl
-
-  num_samples: 4
+  rule_constraint_type: 1
+  
+  num_samples: 8
   check_ppl: True
 
   cpd_args: ~

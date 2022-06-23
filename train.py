@@ -7,6 +7,8 @@ from omegaconf import DictConfig
 dotenv.load_dotenv(override=True)
 
 # import torch; torch.autograd.set_detect_anomaly(True)
+# import torch; torch.use_deterministic_algorithms(True)
+# import torch; torch.backends.cudnn.benchmark = False
 
 @hydra.main(config_path="configs/", config_name="train.yaml", version_base="1.1")
 def main(config: DictConfig):

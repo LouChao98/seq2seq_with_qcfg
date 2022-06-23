@@ -1,6 +1,8 @@
 from re import L
 from typing import List, Tuple
+from pytest import xfail
 import torch
+from torch_geometric.data import Data
 
 def spans2tree(spans: List[Tuple[int, int]]):
     spans.sort(key=lambda x: (x[0], -x[1]))
@@ -34,18 +36,18 @@ def spans2tree(spans: List[Tuple[int, int]]):
     return spans, parent
 
 
-def encode_with_gnn(spans: List[List[Tuple[int, int]]], x: torch.Tensor, nn):
+def build_gnn_input(spans_inp: List[List[Tuple[int, int]]], x: torch.Tensor):
     # spans: batch x nspans x 2
     # x: batch x seq_len x hidden
 
     spans, parents, vertices, edges = [], [], [], []
     offset = 0
-    for bidx, spans_inst in enumerate(spans):
+    for bidx, spans_inst in enumerate(spans_inp):
         s, p = spans2tree(spans_inst)
         spans.append(s)
         parents.append(p)
-
-        for i, (span, parent) in enumerate(zip(spans, parents)):
+        for i, (span, parent) in enumerate(zip(s, p)):
+            # rep of span = start + end
             vertices.append(x[bidx, span[0]] + x[bidx, span[1]])
             if parent != -1:
                 edges.append((offset + i, offset + parent))
@@ -53,9 +55,14 @@ def encode_with_gnn(spans: List[List[Tuple[int, int]]], x: torch.Tensor, nn):
 
         offset += len(s)
 
+    return torch.tensor(edges).T, torch.stack(vertices, 0), spans, parents
 
 
 
 if __name__ == '__main__':
-    spans = [[0, 6], [1, 3], [1,2], [4,5]]
-    print(spans2tree(spans))
+    spans_inst = [[0, 6], [1, 3], [1,2], [4,5]]
+    print(spans2tree(spans_inst))
+    spans = [spans_inst, spans_inst]
+    x = torch.randn(2, 7, 5)
+    edges, vs, spans, parents = build_gnn_input(spans, x)
+    breakpoint()

@@ -13,7 +13,7 @@ class Vocabulary:
         if add_pad:
             self.pad_token_id = len(self.id2word)
             self.id2word.append("<pad>")
-        self.id2word += list(count.keys())
+        self.id2word += sorted(list(count.keys()))
         self.word2id = {word: i for i, word in enumerate(self.id2word)}
 
     def convert_ids_to_tokens(self, ids):

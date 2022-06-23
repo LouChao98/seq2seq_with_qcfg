@@ -95,8 +95,9 @@ def annotate_snt_with_brackets(
     post_tokens = [0 for _ in range(len(tokens))]
 
     for l, r, *_ in span:
-        pre_tokens[l] += 1
-        post_tokens[r] += 1
+        if l != r:
+            pre_tokens[l] += 1
+            post_tokens[r] += 1
     
     output = []
     for pre, token, post in zip(pre_tokens, tokens, post_tokens):

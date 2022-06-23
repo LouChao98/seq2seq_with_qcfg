@@ -88,6 +88,7 @@ class BinaryTreeLSTM(nn.Module):
             ptr = 0
             for action in actions:
                 if action == self.SHIFT:
+                    # [(h, c), (left_boundry, right_boundry, ?)]
                     stack.append([(x[b][ptr], None), (ptr, ptr, -1)])
                     ptr += 1
                 else:
