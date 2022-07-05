@@ -3,33 +3,36 @@ _recursive_: False
 
 embedding_dim: 256
 
+parser:
+  _target_: src.models.src_parser.neural_pcfg.NeuralPCFGSrcParser
+  dim: 256
+  pt_states: 20
+  nt_states: 20
+  num_layers: 2
+
 tree_encoder:
-  _target_: src.models.components.treelstm.BinaryTreeLSTM
+  _target_: src.models.tree_encoder.treelstm.BinaryTreeLSTM
   dim: ${..embedding_dim}
 
 decoder:
-  _target_: src.models.scan.NeuralQCFGTgtParser
-  nt_states: 10    # src_nt_states in origin impl
-  pt_states: 1   # src_pt_states in origin impl
+  _target_: src.models.tgt_parser.neural_qcfg.NeuralQCFGTgtParser
+  dim: 256
+  num_layers: 3
+  src_dim: ${..parser.dim}
+  nt_states: 10 # src_nt_states in origin impl
+  pt_states: 1 # src_pt_states in origin impl
   rule_constraint_type: 1
-  
+  use_copy: false
   num_samples: 8
   check_ppl: True
-
-  cpd_args: ~
-  # cpd_args:
-    # rank: 100
-
-parser:
-  _target_: src.models.scan.NeuralPCFGSrcParser
 
 optimizer:
   groups: ~
   args:
     _target_: torch.optim.AdamW
-    lr: 5.0e-4  #1.0e-3
+    lr: 5.0e-4
     betas: [0.75, 0.999]
     weight_decay: 1.0e-5
-    eps: 1.0e-6
+    eps: 1.0e-8
 
 scheduler: ~

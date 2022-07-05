@@ -41,10 +41,6 @@ pytorch_memlab
 matplotlib
 seaborn
 easydict
-pytorch_memlab
 torch-scatter
+torch-geometric
 fairscale
-
-# --------- optional: flash --------- #
-einops
-rotary_embedding_torch

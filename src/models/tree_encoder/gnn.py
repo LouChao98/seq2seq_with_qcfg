@@ -1,6 +1,5 @@
 from re import L
 from typing import List, Tuple
-from pytest import xfail
 import torch
 from torch_geometric.data import Data
 

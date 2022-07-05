@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-
+from .base import TreeEncoderBase
 
 class BinaryTreeLSTMLayer(nn.Module):
     def __init__(self, dim=200):
@@ -36,7 +36,7 @@ class BinaryTreeLSTMLayer(nn.Module):
         return h, c
 
 
-class BinaryTreeLSTM(nn.Module):
+class BinaryTreeLSTM(TreeEncoderBase):
     def __init__(
         self,
         dim=16,
@@ -72,7 +72,7 @@ class BinaryTreeLSTM(nn.Module):
             actions.append(self.REDUCE)
         return actions
 
-    def forward(self, x, lengths, spans=None, token_type=None):
+    def forward(self, x, lengths, spans=None):
         x = x.unsqueeze(2)
         node_features = []
         all_spans = []

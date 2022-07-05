@@ -1,16 +1,18 @@
 import logging
 from collections import Counter
-from typing import Optional
+from typing import List, Optional, Union
 
 import torch
 from torch.utils.data import DataLoader, Dataset
 from src.datamodules.components.vocab import Vocabulary
 from src.datamodules.datamodule import _DataModule
+import numpy as np
+from numba import jit
 
 logger = logging.getLogger(__file__)
 
 
-class SCANDataModule(_DataModule):
+class TSVDataModule(_DataModule):
     def __init__(
         self,
         train_file,
@@ -18,6 +20,7 @@ class SCANDataModule(_DataModule):
         test_file,
         max_src_len: int = 100,
         max_tgt_len: int = 100,
+        enable_copy: bool = False,
         batch_size: int = 64,
         eval_batch_size: int = 64,
         num_workers: int = 0,
@@ -54,14 +57,31 @@ class SCANDataModule(_DataModule):
     def read_file(self, fpath):
         data = []
         for i, d in enumerate(open(fpath, "r")):
-            src, tgt = d.split("IN: ")[1].split(" OUT: ")
-            src = src.strip().split()
-            tgt = tgt.strip().split()
-            if len(src) == 1 or len(tgt) == 1:
-                src = src + src
-                tgt = tgt + tgt
-            data.append({"src": src, "tgt": tgt, "id": i}) 
+            inst = self.process_line(d)
+            inst["id"] = i
+            data.append(inst)
         return data
+
+    @staticmethod
+    @jit
+    def process_line(line: str, process_copy: bool):
+        src, tgt = line.split("\t")
+        src = src.strip().split()
+        tgt = tgt.strip().split()
+        if len(src) == 1 or len(tgt) == 1:
+            src = src + src
+            tgt = tgt + tgt
+        inst = {"src": src, "tgt": tgt}
+        if process_copy:
+            # here only preprocess the data for copy mechanism.
+            # return a 2d tensor, (src x tgt), 1 for copyable. by lexicon indentification
+            copy_m = np.zeros(len(src), len(tgt), dtype=np.bool8)
+            for i, stoken in enumerate(src):
+                for j, ttoken in enumerate(tgt):
+                    if stoken == ttoken:
+                        copy_m[i, j] = 1
+            inst["copy"] = copy_m
+        return inst
 
     def build_vocab(self, data):
         src_vocab_cnt = Counter()
@@ -153,10 +173,11 @@ class SCANDataModule(_DataModule):
 
 if __name__ == "__main__":
 
-    datamodule = SCANDataModule(
-        "data/SCAN/tasks_train_length.txt",
-        "data/SCAN/tasks_test_length.txt",
-        "data/SCAN/tasks_test_length.txt",
+    datamodule = TSVDataModule(
+        "data/StylePTB/AEM/train.tsv",
+        "data/StylePTB/AEM/valid.tsv",
+        "data/StylePTB/AEM/test.tsv",
+        enable_copy=True,
     )
     datamodule.setup()
     print("Loaded.")

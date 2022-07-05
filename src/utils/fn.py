@@ -24,13 +24,11 @@ def extract_parse(span, length, inc=0):
     tree = [(i, str(i)) for i in range(length)]
     tree = dict(tree)
     spans = []
-    N = span.shape[0]
     cover = span.nonzero()
     for i in range(cover.shape[0]):
-        w, r, A = cover[i].tolist()
+        w, l, A = cover[i].tolist()
         w = w + inc
-        r = r + w
-        l = r - w
+        r = l + w
         spans.append((l, r, A))
         if l != r:
             span = "({} {})".format(tree[l], tree[r])
