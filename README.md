@@ -12,4 +12,6 @@ Train a model:
 python train.py experiment=debug
 ```
 
+You can find data in https://github.com/yoonkim/neural-qcfg, which is also the repo I initially forked from.
+
 See `README2.md`, which is the readme file of the above template, for more examples.
