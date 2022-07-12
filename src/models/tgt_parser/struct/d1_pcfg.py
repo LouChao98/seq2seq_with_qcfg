@@ -7,17 +7,30 @@ from torch import Tensor
 from torch.autograd import grad
 
 from ._utils import checkpoint, weighted_random
+import torch_semiring_einsum as tse
 
 
-class FastestTDPCFG:
-    # based on Songlin Yang, Wei Liu and Kewei Tu's work
-    # https://github.com/sustcsonglin/TN-PCFG/blob/main/parser/pcfgs/tdpcfg.py
-    # modification:
-    # 1. use new grad api
-    # 2. remove unecessary tensor.clone()
-    # 3. respect lens
+class D1PCFG:
+    # A[i] -> B[j], C[k]
+    # ================
+    # A[i] -> R
+    # R -> B
+    # R -> C
+    # R, i -> j
+    # R, i -> k
+    # ================
+    # Time complexity: 6
 
-    # sampling: as the code generate samples one by one. I just recover the rules. Memory should be ok.
+    def __init__(self, tgt_nt_states, tgt_pt_states) -> None:
+        self.tgt_nt_states = tgt_nt_states
+        self.tgt_pt_states = tgt_pt_states
+        self.block_size = 32
+
+        self.eq_slr = tse.compile_equation("qrij, qrik->qrijk")
+        self.eq_qnkrj = tse.compile_equation("qnwjr,qnwkr->qnkrj")
+        self.eq_qnri = tse.compile_equation("qnkrj,qrijk->qnri")
+        self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
+        self.eq_tor = tse.compile_equation("xlpi,xrp->xlir")
 
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
         if decode:
@@ -27,45 +40,69 @@ class FastestTDPCFG:
             torch.set_grad_enabled(True)
             # NOTE I assume marginals are only used for decoding.
             params = {k: v.detach() for k, v in params.items()}
-        lens = torch.tensor(lens)
+        if not isinstance(lens, torch.Tensor):
+            lens = torch.tensor(lens)
         assert (
             lens[1:] <= lens[:-1]
         ).all(), "You should sort samples by length descently."
 
-        terms = params["term"]
-        root = params["root"]
+        terms = params["term"]  # (batch, seq_len, PT)
+        root = params["root"]  # (batch, NT)
 
-        # 3d binary rule probabilities tensor decomposes to three 2d matrices after CP decomposition.
-        H = params["head"]  # (batch, NT, r), r:=rank, H->r
-        L = params["left"]  # (batch, NT + T, r), r->L
-        R = params["right"]  # (batch, NT + T, r), r->R
-
-        batch, N, T = terms.shape
-        S = L.shape[1]
-        NT = S - T
+        batch, N, PT = terms.shape
         N += 1
+        NT = root.shape[1]
+        nt_spans = NT // self.tgt_nt_states
+        pt_spans = PT // self.tgt_pt_states
 
-        L_term = L[:, NT:]
-        L_nonterm = L[:, :NT]
-        R_term = R[:, NT:]
-        R_nonterm = R[:, :NT]
+        terms = terms.view(batch, -1, self.tgt_pt_states, pt_spans)
+        root = root.view(batch, self.tgt_nt_states, nt_spans)
 
-        # (m_A, r_A) + (m_B, r_B) -> (r_A, r_B)
-        H = H.transpose(-1, -2)
-        H_L = torch.matmul(H, L_nonterm)
-        H_R = torch.matmul(H, R_nonterm)
+        # {source,target}{left,right}[{nonterminal,preterminal}]
+        H = params["head"]  # (batch, NT, r), A[i] -> R
+        # (batch, r, TGT_NT), R -> B
+        # (batch, r, TGT_PT), R -> B
+        TLNT, TLPT = torch.split(
+            params["left"], (self.tgt_nt_states, self.tgt_pt_states), -1
+        )
+        # (batch, r, TGT_NT), R -> C
+        # (batch, r, TGT_PT), R -> C
+        TRNT, TRPT = torch.split(
+            params["right"], (self.tgt_nt_states, self.tgt_pt_states), -1
+        )
+        R = H.shape[-1]
+        H = H.view(batch, self.tgt_nt_states, nt_spans, R)
 
-        normalizer = terms.new_full((batch, N, N), -1e9)
-        norm = terms.max(-1)[0]
-        diagonal_copy_(normalizer, norm, w=1)
-        terms = (terms - norm.unsqueeze(-1)).exp()
-        left_term = torch.matmul(terms, L_term)
-        right_term = torch.matmul(terms, R_term)
+        # ===== This routine is optimized for src_len < tgt_len =====
 
-        # for caching V^{T}s_{i,k} and W^{T}s_{k+1,j}
-        left_s = terms.new_full((batch, N, N, L.shape[2]), -1e9)
-        right_s = terms.new_full((batch, N, N, L.shape[2]), -1e9)
+        if "slr" in params:
+            SLR = params["slr"]
+        else:
+            SL = params["sl"]  # (batch, r, SRC_NT, SRC_NT), R, i -> j
+            SR = params["sr"]  # (batch, r, SRC_NT, SRC_NT), R, i -> k
+            SLR = tse.log_einsum(self.eq_slr, SL, SR, block_size=self.block_size)
 
+        def merge_without_indicator(Y, Z):
+            qnkrj = tse.log_einsum(self.eq_qnkrj, Y, Z, block_size=self.block_size)
+            qnri = tse.log_einsum(self.eq_qnri, qnkrj, SLR, block_size=self.block_size)
+            qnai = tse.log_einsum(self.eq_qnai, qnri, H, block_size=self.block_size)
+            return qnai
+
+        def merge_with_indicator(Y, Z, indicator):
+            qnkrj = tse.log_einsum(self.eq_qnkrj, Y, Z, block_size=self.block_size)
+            qnri = tse.log_einsum(self.eq_qnri, qnkrj, SLR, block_size=self.block_size)
+            qnai = tse.log_einsum(self.eq_qnai, qnri, H, block_size=self.block_size)
+            qnai = qnai + indicator
+            return qnai
+
+        # ===== End =====
+
+        left_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
+        right_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
+        left_term = tse.log_einsum(self.eq_tor, terms, TLPT, block_size=self.block_size)
+        right_term = tse.log_einsum(
+            self.eq_tor, terms, TRPT, block_size=self.block_size
+        )
         diagonal_copy_(left_s, left_term, w=1)
         diagonal_copy_(right_s, right_term, w=1)
 
@@ -81,70 +118,57 @@ class FastestTDPCFG:
         ).sum(1)
 
         # w: span width
-        final_m = []
-        final_normalizer = []
+        final = []
         for step, w in enumerate(range(2, N)):
 
             # n: the number of spans of width w.
             n = N - w
-            Y = stripe(left_s, n, w - 1, (0, 1))
-            Z = stripe(right_s, n, w - 1, (1, w), 0)
-            Y_normalizer = stripe(normalizer, n, w - 1, (0, 1))
-            Z_normalizer = stripe(normalizer, n, w - 1, (1, w), 0)
+            y = stripe(left_s, n, w - 1, (0, 1))
+            z = stripe(right_s, n, w - 1, (1, w), 0)
             if marginal:
-                x, x_normalizer = merge_with_indicator(
-                    Y,
-                    Z,
-                    Y_normalizer,
-                    Z_normalizer,
-                    span_indicator_running.diagonal(w, 1, 2).unsqueeze(-1),
+                x = merge_with_indicator(
+                    y.clone(),
+                    z.clone(),
+                    span_indicator_running.diagonal(w, 1, 2)
+                    .unsqueeze(-1)
+                    .unsqueeze(-1),
                 )
             else:
-                x, x_normalizer = merge_without_indicator(
-                    Y, Z, Y_normalizer, Z_normalizer
-                )
+                x = merge_without_indicator(y.clone(), z.clone())
 
             unfinished = n_at_position[step + 1]
             current_bsz = n_at_position[step]
 
             if current_bsz - unfinished > 0:
-                final_m.insert(
-                    0,
-                    torch.matmul(
-                        x[unfinished:current_bsz, :1], H[unfinished:current_bsz]
-                    ),
-                )
-                final_normalizer.insert(0, x_normalizer[unfinished:current_bsz, :1])
+                final.insert(0, x[unfinished:current_bsz, :1])
             if unfinished > 0:
                 x = x[:unfinished]
                 left_s = left_s[:unfinished]
                 right_s = right_s[:unfinished]
-                H_L = H_L[:unfinished]
-                H_R = H_R[:unfinished]
-                normalizer = normalizer[:unfinished]
-                x_normalizer = x_normalizer[:unfinished]
+                SLR = SLR[:unfinished]
+                H = H[:unfinished]
+                TLNT = TLNT[:unfinished]
+                TRNT = TRNT[:unfinished]
                 if marginal:
                     span_indicator_running = span_indicator_running[:unfinished]
 
-                left_x = torch.matmul(x, H_L)
-                right_x = torch.matmul(x, H_R)
+                left_x = tse.log_einsum(
+                    self.eq_tor, x, TLNT, block_size=self.block_size
+                )
+                right_x = tse.log_einsum(
+                    self.eq_tor, x, TRNT, block_size=self.block_size
+                )
                 diagonal_copy_(left_s, left_x, w)
                 diagonal_copy_(right_s, right_x, w)
-                diagonal_copy_(normalizer, x_normalizer, w)
 
-        final_m = torch.cat(final_m, dim=0)
-        final_normalizer = torch.cat(final_normalizer, dim=0)
-        final = (final_m + 1e-9).squeeze(1).log() + root
-        logZ = final.logsumexp(-1) + final_normalizer.squeeze(-1)
+        final = torch.cat(final, dim=0)
+
+        final = final.squeeze(1) + root
+        logZ = final.logsumexp((-2, -1))
         if decode:
             spans = self.get_prediction(logZ, span_indicator, lens)
             spans = [[(span[0], span[1] - 1, 0) for span in inst] for inst in spans]
             return spans
-            # trees = []
-            # for spans_inst, l in zip(spans, lens.tolist()):
-            #     tree = self.convert_to_tree(spans_inst, l)
-            #     trees.append(tree)
-            # return trees, spans
         if marginal:
             torch.set_grad_enabled(grad_state)
             return grad(logZ.sum(), [span_indicator])[0]
@@ -165,37 +189,37 @@ class FastestTDPCFG:
         terms: torch.Tensor = params["term"].detach()
         roots: torch.Tensor = params["root"].detach()
         H: torch.Tensor = params["head"].detach()  # (batch, NT, r) r:=rank
-        L: torch.Tensor = params["left"].detach()  # (batch, NT + T, r)
-        R: torch.Tensor = params["right"].detach()  # (batch, NT + T, r)
+        L: torch.Tensor = params["left"].detach()  # (batch, r, TGT_NT + TGT_PT)
+        R: torch.Tensor = params["right"].detach()  # (batch, r, TGT_NT + TGT_PT)
+        SLR: torch.Tensor = params["slr"].detach()
 
         zero = terms.new_full((1,), -1e9)
         threshold = terms.new_full((1,), np.log(1e-2))
         terms = torch.where(terms > threshold, terms, zero).softmax(2).cumsum(2)
         roots = torch.where(roots > threshold, roots, zero).softmax(1).cumsum(1)
+        H = torch.where(H > threshold, H, zero).softmax(2).cumsum(2)
+        L = torch.where(L > threshold, L, zero).softmax(2).cumsum(2)
+        R = torch.where(R > threshold, R, zero).softmax(2).cumsum(2)
+        SLR = (
+            torch.where(SLR > threshold, SLR, zero)
+            .view(*SLR.shape[:2], -1)
+            .softmax(2)
+            .cumsum(2)
+        )
 
-        zero = terms.new_full((1,), 0.0)
-        threshold = terms.new_full((1,), 1e-2)
-        H = torch.where(H > threshold, H, zero)
-        H /= H.sum(2)
-        H = H.cumsum(2)
-        L = torch.where(L > threshold, L, zero)
-        L /= L.sum(1)
-        L = L.cumsum(1)
-        R = torch.where(R > threshold, R, zero)
-        R /= R.sum(1)
-        R = R.cumsum(1)
-
-        terms[:, :, -1] += 1  # avoid out of bound
-        roots[:, -1] += 1
-        H[:, :, -1] += 1
-        L[:, -1] += 1
-        R[:, -1] += 1
+        terms[..., -1] += 1  # avoid out of bound
+        roots[..., -1] += 1
+        H[..., -1] += 1
+        L[..., -1] += 1
+        R[..., -1] += 1
+        SLR[..., -1] += 1
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()
         H = H.cpu().numpy()
         L = L.cpu().numpy()
         R = R.cpu().numpy()
+        SLR = SLR.cpu().numpy()
 
         preds = []
         for b in range(len(terms)):
@@ -204,6 +228,7 @@ class FastestTDPCFG:
                 H[b],
                 L[b],
                 R[b],
+                SLR[b],
                 roots[b],
                 nt_spans[b],
                 src_nt_states,
@@ -225,6 +250,7 @@ class FastestTDPCFG:
         rules_head: np.ndarray,  # nt x r, in normal space
         rules_left: np.ndarray,  # (nt+pt) x r, in normal space
         rules_right: np.ndarray,  # (nt+pt) x r, in normal space
+        rules_src: np.ndarray,  # src x src x src, in normal space
         roots: np.ndarray,  # nt, in normal space
         nt_spans: List[List[str]],
         nt_states: int,
@@ -236,6 +262,7 @@ class FastestTDPCFG:
         max_actions=100,
         UNK=1,
     ):
+        # TODO
         NT = rules_head.shape[0]
         COPY_NT = nt_states - 1
         COPY_PT = pt_states - 1
@@ -266,8 +293,8 @@ class FastestTDPCFG:
                     else:
                         actions += 1
                         head = weighted_random(rules_head[s])
-                        left = weighted_random(rules_left[:, head])
-                        right = weighted_random(rules_right[:, head])
+                        left = weighted_random(rules_left[head])
+                        right = weighted_random(rules_right[head])
                         score += (
                             rules_head[s, head]
                             + rules_left[left, head]
@@ -356,32 +383,6 @@ class FastestTDPCFG:
         return tree[0]
 
 
-@checkpoint
-def merge_with_indicator(Y, Z, y, z, indicator):
-    Y = (Y + 1e-9).log() + y.unsqueeze(-1)
-    Z = (Z + 1e-9).log() + z.unsqueeze(-1)
-    b_n_r = (Y + Z).logsumexp(-2) + indicator
-    normalizer = b_n_r.max(-1)[0]
-    b_n_r = (b_n_r - normalizer.unsqueeze(-1)).exp()
-    return b_n_r, normalizer
-
-
-@checkpoint
-def merge_without_indicator(Y, Z, y, z):
-    """
-    :param Y: shape (batch, n, w, r)
-    :param Z: shape (batch, n, w, r)
-    :return: shape (batch, n, x)
-    """
-    # contract dimension w.
-    Y = (Y + 1e-9).log() + y.unsqueeze(-1)
-    Z = (Z + 1e-9).log() + z.unsqueeze(-1)
-    b_n_r = (Y + Z).logsumexp(-2)
-    normalizer = b_n_r.max(-1)[0]
-    b_n_r = (b_n_r - normalizer.unsqueeze(-1)).exp()
-    return b_n_r, normalizer
-
-
 def diagonal_copy_(x, y, w):
     x, seq_len = x.contiguous(), x.size(1)
     stride, numel = list(x.stride()), x[:, 0, 0].numel()
@@ -442,4 +443,62 @@ def stripe(x, n, w, offset=(0, 0), dim=1):
             stride=stride,
             storage_offset=(offset[0] * seq_len + offset[1]) * numel,
         )
+
+
+if __name__ == "__main__":
+    from .pcfg import PCFG
+
+    torch.autograd.set_detect_anomaly(True)
+    torch.random.manual_seed(1)
+    B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r = 4, 5, 3, 3, 3, 3, 2
+    NT = TGT_NT * SRC_NT
+    T = TGT_PT * SRC_PT
+    device = "cuda"
+
+    slr = (
+        torch.randn(B, r, SRC_NT, SRC_NT, SRC_NT, device=device)
+        .view(B, r * SRC_NT, -1)
+        .log_softmax(-1)
+        .view(B, r, SRC_NT, SRC_NT, SRC_NT)
+    )
+    params = {
+        "term": torch.randn(B, N, T, device=device)
+        .log_softmax(-1)
+        .requires_grad_(True),
+        "root": torch.randn(B, NT, device=device).log_softmax(-1).requires_grad_(True),
+        "head": torch.randn(B, NT, r, device=device)
+        .log_softmax(-1)
+        .requires_grad_(True),
+        "left": torch.randn(B, r, TGT_NT + TGT_PT, device=device)
+        .log_softmax(-1)
+        .requires_grad_(True),
+        "right": torch.randn(B, r, TGT_NT + TGT_PT, device=device)
+        .log_softmax(-1)
+        .requires_grad_(True),
+        "slr": slr,
+    }
+    lens = torch.tensor([N, N - 1, N - 1, N - 3], dtype=torch.long, device=device)
+
+    pcfg = D1PCFG(TGT_NT, TGT_PT)
+
+    print(pcfg(params, lens))
+    m1 = pcfg(params, lens, marginal=True)
+    print(m1.sum((1, 2)))
+
+    head = params["head"].view(B, TGT_NT, SRC_NT, r)
+    rule = torch.einsum(
+        "xair,xrb,xrc,xrijk->xaibjck",
+        head.exp(),
+        params["left"].exp(),
+        params["right"].exp(),
+        params["slr"].exp(),
+    )
+    shape = rule.shape
+    rule = rule.reshape(
+        shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+    ).log()
+
+    params2 = {"term": params["term"], "rule": rule, "root": params["root"]}
+    pcfg2 = PCFG()
+    print(pcfg2(params2, lens))
 

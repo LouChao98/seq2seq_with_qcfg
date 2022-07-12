@@ -233,7 +233,6 @@ class NeuralQCFGTgtParser(TgtParserBase):
             .expand(batch_size, 1, -1)
         )
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
-        # TODO inplace implementation
         roots = torch.where(mask == allowed, roots, roots.new_full((1,), self.neg_huge))
         roots = roots.view(batch_size, -1)
         roots = F.log_softmax(roots, 1)
@@ -252,6 +251,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
 
         # fmt: off
+        # TODO lhs_mask seems to be unnecessary.
         nt_mask = torch.arange(nt_num_nodes, device=rules.device).unsqueeze(0) \
             < torch.tensor(nt_num_nodes_list, device=rules.device).unsqueeze(1)
         pt_mask = torch.arange(pt_num_nodes, device=rules.device).unsqueeze(0) \

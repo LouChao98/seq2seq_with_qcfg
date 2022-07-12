@@ -44,3 +44,4 @@ easydict
 torch-scatter
 torch-geometric
 fairscale
+opt-einsum

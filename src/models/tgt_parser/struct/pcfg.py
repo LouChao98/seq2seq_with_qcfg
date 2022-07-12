@@ -14,7 +14,7 @@ class PCFG:
         if "rule" not in params:
             params["rule"] = torch.einsum(
                 "bxr,byr,bzr->bxyz", params["head"], params["left"], params["right"]
-            ).log()
+            ).clamp(1e-6).log()
             assert not params["rule"].isnan().any()
 
         terms, rules, roots = params["term"], params["rule"], params["root"]
