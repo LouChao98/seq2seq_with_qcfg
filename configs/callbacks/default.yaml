@@ -4,6 +4,7 @@ model_checkpoint:
   mode: "min" # "max" means higher metric value is better, can be also "min"
   save_top_k: 1 # save k best models (determined by above metric)
   save_last: True # additionaly always save model from last epoch
+  every_n_epochs: 5
   verbose: False
   dirpath: "checkpoints/"
   filename: "epoch_{epoch:03d}"

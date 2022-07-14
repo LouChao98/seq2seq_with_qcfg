@@ -120,12 +120,12 @@ class NeuralQCFGTgtParser(TgtParserBase):
                     _ids = [[0, 0]]  # unk, unk
                 _ids.sort(key=lambda x: len(x), reverse=True)
                 _lens = [len(inst) for inst in _ids]
-                _ids_t = torch.full((len(_ids), _lens[0]), tokenizer.pad_token_id)
+                _ids_t = torch.full((len(_ids), _lens[0]), tokenizer.pad_token_id or 0)
                 for j, (snt, length) in enumerate(zip(_ids, _lens)):
                     _ids_t[j, :length] = torch.tensor(snt)
                 _ids_t = _ids_t.to(node_features[0].device)
 
-                batch_size = max(200 // _lens[0], 1)  # ~17gb, 3min
+                batch_size = len(node_features)
                 ppl = []
                 for j in range(0, len(_ids), batch_size):
                     real_batch_size = min(batch_size, len(_ids) - j)

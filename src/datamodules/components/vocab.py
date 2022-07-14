@@ -2,11 +2,12 @@ import torch
 
 
 class Vocabulary:
-    def __init__(self, count, add_unk=True, add_pad=True):
+    def __init__(self, count, add_unk=True, add_pad=True, threshold=1):
         self.count = count
         self.id2word = []
         self.unk_token_id = None
         self.pad_token_id = None
+        self.threshold = threshold
         if add_unk:
             self.unk_token_id = len(self.id2word)
             self.id2word.append("<unk>")
@@ -29,7 +30,8 @@ class Vocabulary:
             output.append(self.convert_ids_to_tokens(item))
         return output
 
-    def convert_tokens_to_ids(self, tokens, threshold=1):
+    def convert_tokens_to_ids(self, tokens, threshold=None):
+        threshold = threshold if threshold is not None else self.threshold 
         assert isinstance(tokens, (list, str)), f"Bad input: {tokens}"
         if isinstance(tokens, str):
             return (

@@ -26,10 +26,12 @@ decoder:
   num_samples: 8
   check_ppl: True
 
+loss_threshold: ~
+
 optimizer:
   groups: ~
   args:
-    _target_: torch.optim.AdamW
+    _target_: torch.optim.Adam
     lr: 5.0e-4
     betas: [0.75, 0.999]
     weight_decay: 1.0e-5

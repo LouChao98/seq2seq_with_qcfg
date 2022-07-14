@@ -1,0 +1,17 @@
+_target_: src.datamodules.tsv_datamodule.TSVDataModule
+
+train_file: ${data_dir}/StylePTB/ATP/train.tsv
+dev_file: ${data_dir}/StylePTB/ATP/valid.tsv
+test_file: ${data_dir}/StylePTB/ATP/test.tsv
+
+# train_file: ${data_dir}/SCAN/debug.txt
+# dev_file: ${data_dir}/SCAN/debug.txt
+# test_file: ${data_dir}/SCAN/debug.txt
+
+batch_size: ${in_debugger:2,20}
+eval_batch_size: ${in_debugger:2,6}
+num_workers: 0 #${in_debugger:0,4}
+pin_memory: false
+
+cache_dir: ${data_dir}/cache
+enable_cache: false

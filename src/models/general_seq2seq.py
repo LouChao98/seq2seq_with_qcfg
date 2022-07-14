@@ -5,29 +5,45 @@ import numpy as np
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
+from torch_scatter import scatter_mean
 from torchmetrics import MinMetric
+from transformers import AutoModel
 
 from src.models.base import ModelBase
 from src.models.src_parser.base import SrcParserBase
 from src.models.tgt_parser.base import TgtParserBase
 from src.models.tree_encoder.base import TreeEncoderBase
-from src.utils.fn import annotate_snt_with_brackets, extract_parses, get_actions, get_tree
-from src.utils.metric import PerplexityMetric, WholeSentMatchAccuracy
+from src.utils.fn import (
+    annotate_snt_with_brackets,
+    extract_parses,
+    get_actions,
+    get_tree,
+)
+from src.utils.metric import PerplexityMetric
 
 log = logging.getLogger(__file__)
-DEBUG = False
 
-class ScanModule(ModelBase):
+
+class GeneralSeq2SeqModule(ModelBase):
+    """ A module for general seq2seq tasks.
+
+    * support pretrained models
+    * encoders
+    * custom test metric
+    """
+
     def __init__(
         self,
-        embedding_dim=None,
+        embedding=None,
+        transformer_pretrained_model=None,
+        encoder=None,
         tree_encoder=None,
         decoder=None,
         parser=None,
         optimizer=None,
         scheduler=None,
+        test_metric=None,
         load_from_checkpoint=None,
-        loss_threshold=None,
     ):
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -36,13 +52,28 @@ class ScanModule(ModelBase):
         super().setup(stage)
         assert datamodule is not None or self.trainer.datamodule is not None
         self.datamodule = datamodule or self.trainer.datamodule
-        self.embedding = nn.Embedding(
-            len(self.datamodule.src_vocab), self.hparams.embedding_dim
+
+        self.embedding = instantiate(
+            self.hparams.encoder
         )
+        self.pretrained = (
+            AutoModel.from_pretrained(self.hparams.transformer_pretrained_model)
+            if self.hparams.transformer_pretrained_model is not None
+            else None
+        )
+        self.encoder = instantiate(
+            self.hparams.encoder,
+            input_dim=0
+            + (0 if self.embedding is None else self.embedding.out_dim)
+            + (0 if self.pretrained is None else self.pretrained.config.hidden_size),
+        )
+
         self.parser: SrcParserBase = instantiate(
             self.hparams.parser, vocab=len(self.datamodule.src_vocab)
         )
-        self.tree_encoder: TreeEncoderBase = instantiate(self.hparams.tree_encoder)
+        self.tree_encoder: TreeEncoderBase = instantiate(
+            self.hparams.tree_encoder, dim=self.encoder.get_output_dim()
+        )
         self.decoder: TgtParserBase = instantiate(
             self.hparams.decoder, vocab=len(self.datamodule.tgt_vocab)
         )
@@ -50,33 +81,38 @@ class ScanModule(ModelBase):
         self.train_metric = PerplexityMetric()
         self.val_metric = PerplexityMetric()
         self.val_best_metric = MinMetric()
-        self.test_metric = WholeSentMatchAccuracy()
+        self.test_metric = instantiate(self.hparams.test_metric)
 
         if self.hparams.load_from_checkpoint is not None:
             state_dict = torch.load(
                 self.hparams.load_from_checkpoint, map_location="cpu"
-            )
-            if "state_dict" in state_dict:
-                state_dict = state_dict["state_dict"]
+            )["state_dict"]
             self.load_state_dict(state_dict)
         else:
             for name, param in self.named_parameters():
                 if param.dim() > 1:
                     nn.init.xavier_uniform_(param)
 
-    def forward(self, batch, _debug=DEBUG):
+    def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        x: torch.Tensor = self.embedding(src_ids)
+        x = []
+        if self.embedding is not None:
+            x.append(h)
+        if self.pretrained is not None:
+            h = self.pretrained(**batch["transformer_inputs"])
+            h = scatter_mean(x, batch["transformer_offset"], 1)[:, 1:]
+            x.append(h)
+        x = torch.cat(x, dim=-1) if len(x) > 1 else x[0]
+        x = self.encoder(x)
 
         dist = self.parser(src_ids, src_lens)
         src_nll = -dist.partition
 
-        if _debug:
-            for i in range(len(src_ids)):
-                _ref_lens = src_lens[i: i+1]
-                _ref_ids = src_ids[i: i+1, :_ref_lens[0]]
-                _ref_dist = self.parser(_ref_ids, _ref_lens)
-                assert torch.isclose(src_nll[i: i+1], -_ref_dist.partition)
+        # for i in range(len(src_ids)):
+        #     _ref_ids = src_ids[i: i+1]
+        #     _ref_lens = src_lens[i: i+1]
+        #     _ref_dist = self.parser(_ref_ids, _ref_lens)
+        #     assert torch.isclose(src_nll[i: i+1], -_ref_dist.partition)
 
         src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist)
         src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
@@ -85,18 +121,19 @@ class ScanModule(ModelBase):
             batch["tgt_ids"], batch["tgt_lens"], node_features, node_spans,
         )
 
-        if _debug:
-            for i in range(len(src_ids)):
-                _ref_node_features, _ref_node_spans = self.tree_encoder(x[i:i+1, :src_lens[i]], src_lens[i:i+1], spans=src_spans[i:i+1])
-                assert all(map(lambda x:torch.allclose(*x), zip(node_features[i:i+1], _ref_node_features)))
-                assert node_spans[i:i+1] == _ref_node_spans
-                _ref_nll = self.decoder(
-                    batch["tgt_ids"][i:i+1, :batch["tgt_lens"][i]],
-                    batch["tgt_lens"][i:i+1],
-                    _ref_node_features,
-                    _ref_node_spans,
-                )
-                assert torch.isclose(tgt_nll[i:i+1], _ref_nll)
+        # # Run this test on CPU
+        # for i in range(len(src_ids)):
+        #     _ref_node_features, _ref_node_spans = self.tree_encoder(x[i:i+1], src_lens[i:i+1], spans=src_spans[i:i+1])
+        #     assert all(map(lambda x:torch.allclose(*x), zip(node_features[i:i+1], _ref_node_features)))
+        #     assert node_spans[i:i+1] == _ref_node_spans
+        #     _ref_nll = self.decoder(
+        #         batch["tgt_ids"][i:i+1],
+        #         batch["tgt_lens"][i:i+1],
+        #         _ref_node_features,
+        #         _ref_node_spans,
+        #         argmax=False,
+        #     )
+        #     assert torch.isclose(tgt_nll[i:i+1], _ref_nll)
 
         with torch.no_grad():
             src_spans_argmax, src_logprob_argmax = self.parser.argmax(
@@ -114,40 +151,12 @@ class ScanModule(ModelBase):
             )
             neg_reward = (tgt_nll - tgt_nll_argmax).detach()
 
-            if _debug:
-                for i in range(len(src_ids)):
-                    _ref_lens = src_lens[i: i+1]
-                    _ref_ids = src_ids[i: i+1, :_ref_lens[0]]
-                    _ref_dist = self.parser(_ref_ids, _ref_lens)
-                    _ref_spans_argmax, _ref_logprob_argmax = self.parser.argmax(
-                        _ref_ids, _ref_lens, _ref_dist
-                    )
-                    _ref_spans_argmax = extract_parses(_ref_spans_argmax[-1], _ref_lens, inc=1)[0]
-                    assert src_spans_argmax[i] == _ref_spans_argmax[0]
-                    assert torch.allclose(src_logprob_argmax[i], _ref_logprob_argmax[0])
-
-        output = {
+        return {
             "decoder": tgt_nll.mean(),
             "encoder": src_nll.mean() + (src_logprob * neg_reward).mean(),
             "tgt_nll": tgt_nll.sum(),
             "src_nll": src_nll.sum(),
-            "reward": -neg_reward,
         }
-
-        if _debug:
-            self.optimizers().zero_grad()
-            (output['decoder'] + output['encoder']).backward(retain_graph=True)
-            grads = {name: param.grad.clone() for name, param in self.named_parameters()}
-            self.optimizers().zero_grad()
-            for i in range(len(src_ids) - 1, -1, -1):
-                (tgt_nll[i] + src_nll[i] + src_logprob[i] * neg_reward[i]).backward(retain_graph=True)
-            for name, param in self.named_parameters():
-                assert torch.allclose(param.grad / len(src_ids), grads[name], atol=1e-6)
-
-        if self.hparams.loss_threshold is not None:
-            output['decoder'].clamp(min=self.hparams.loss_threshold)
-
-        return output
 
     def forward_visualize(self, batch, sample=False):
         # parse and annotate brackets on src and tgt
@@ -205,13 +214,10 @@ class ScanModule(ModelBase):
             node_features, node_spans, self.datamodule.tgt_vocab
         )
 
-        # tgt_nll = self.decoder(
-        #     batch["tgt_ids"],
-        #     batch["tgt_lens"],
-        #     node_features,
-        #     node_spans,
-        # )
-        # tgt_ppl = np.exp(tgt_nll.detach().cpu().numpy() / batch["tgt_lens"])
+        tgt_nll = self.decoder(
+            batch["tgt_ids"], batch["tgt_lens"], node_features, node_spans,
+        )
+        tgt_ppl = np.exp(tgt_nll.detach().cpu().numpy() / batch["tgt_lens"])
 
         return {"pred": [item[0] for item in y_preds]}
 
@@ -220,11 +226,10 @@ class ScanModule(ModelBase):
         loss = output["decoder"] + output["encoder"]
         ppl = self.train_metric(output["tgt_nll"], batch["tgt_lens"])
         self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
-        
-        self.log("train/ppl", ppl, prog_bar=True)
+        self.log("train/ppl", ppl, on_step=False, on_epoch=True, prog_bar=True)
+
         self.log("train/decoder", output["decoder"], prog_bar=True)
         self.log("train/encoder", output["encoder"], prog_bar=True)
-        self.log("train/reward", output["reward"])
 
         if batch_idx == 0:
             single_inst = {key: value[:2] for key, value in batch.items()}

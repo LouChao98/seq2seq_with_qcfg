@@ -45,3 +45,4 @@ torch-scatter
 torch-geometric
 fairscale
 opt-einsum
+numba

@@ -4,29 +4,28 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: scan.yaml
+  - override /datamodule: styleptb.yaml
   - override /model: scan.yaml
   - override /callbacks: default.yaml
-  - override /logger: wandb
+  - override /logger: tensorboard
   - override /trainer: default.yaml
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "scan"
+name: "styleptb"
 
 
 # ~17GB
 datamodule:
-  # batch_size: 1
-  # eval_batch_size: 1
   batch_size: 1
   eval_batch_size: 1
+  # batch_size: 12
+  # eval_batch_size: 4
   max_src_len: 100
 
 model:
-  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/scan/2022-07-13_15-19-13/checkpoints/last.ckpt
   decoder:
     num_samples: 10
 
@@ -34,10 +33,9 @@ trainer:
   max_epochs: 15
   accumulate_grad_batches: 4
   gradient_clip_val: 3
+# logger:
+#   wandb:
+#     tags: ["mnist", "${name}"]
 
-logger:
-  wandb:
-    project: qcfg_scan
-    # tags: ["mnist", "${name}"]
 
 # train: false

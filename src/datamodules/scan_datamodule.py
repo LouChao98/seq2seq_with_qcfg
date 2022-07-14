@@ -60,7 +60,7 @@ class SCANDataModule(_DataModule):
             if len(src) == 1 or len(tgt) == 1:
                 src = src + src
                 tgt = tgt + tgt
-            data.append({"src": src, "tgt": tgt, "id": i}) 
+            data.append({"src": src, "tgt": tgt, "id": i})
         return data
 
     def build_vocab(self, data):
@@ -69,8 +69,8 @@ class SCANDataModule(_DataModule):
         for inst in data:
             src_vocab_cnt.update(inst["src"])
             tgt_vocab_cnt.update(inst["tgt"])
-        src_vocab = Vocabulary(src_vocab_cnt, add_unk=False)
-        tgt_vocab = Vocabulary(tgt_vocab_cnt, add_unk=False)
+        src_vocab = Vocabulary(src_vocab_cnt, add_unk=False, add_pad=False)
+        tgt_vocab = Vocabulary(tgt_vocab_cnt, add_unk=False, add_pad=False)
         return src_vocab, tgt_vocab
 
     def apply_vocab(self, data):
@@ -129,12 +129,8 @@ class SCANDataModule(_DataModule):
         tgt_lens = [len(inst["tgt_ids"]) for inst in data]
         max_src_len = max(src_lens)
         max_tgt_len = max(tgt_lens)
-        batched_src_ids = torch.full(
-            (len(tgt_lens), max_src_len), self.src_vocab.pad_token_id
-        )
-        batched_tgt_ids = torch.full(
-            (len(tgt_lens), max_tgt_len), self.tgt_vocab.pad_token_id
-        )
+        batched_src_ids = torch.full((len(tgt_lens), max_src_len), 0)
+        batched_tgt_ids = torch.full((len(tgt_lens), max_tgt_len), 0)
         for i, inst in enumerate(data):
             s, t = inst["src_ids"], inst["tgt_ids"]
             batched_src_ids[i, : len(s)] = torch.tensor(s)

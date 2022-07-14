@@ -1,7 +1,6 @@
 from torchmetrics import Metric
 import torch
 
-
 class PerplexityMetric(Metric):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -28,3 +27,6 @@ class WholeSentMatchAccuracy(Metric):
 
     def compute(self):
         return self.correct.float() / (self.total + 1e-9)
+
+
+# class BleuMetric
