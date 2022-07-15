@@ -1,4 +1,7 @@
+from typing import List, Optional
+
 import torch.nn as nn
+
 from ...datamodules.components.vocab import Vocabulary
 
 
@@ -12,5 +15,11 @@ class TgtParserBase(nn.Module):
     def parse(self, x, lengths, node_features, spans, **kwargs):
         raise NotImplementedError
 
-    def generate(self, node_features, spans, tokenizer: Vocabulary):
+    def generate(
+        self,
+        node_features,
+        spans,
+        tokenizer: Vocabulary,
+        src: Optional[List[str]] = None,
+    ):
         raise NotImplementedError

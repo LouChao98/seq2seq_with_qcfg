@@ -1,9 +1,10 @@
-from typing import Dict, Union, List
+from typing import Dict, Tuple, Union, List
 import torch
 from torch_struct import SentCFG
 
 import numpy as np
 from ._utils import weighted_random
+from numba import jit, prange
 
 
 class PCFG:
@@ -12,9 +13,13 @@ class PCFG:
         # rules: bsz x nt x (nt+pt) x (nt+pt)
         # roots: bsz x nt
         if "rule" not in params:
-            params["rule"] = torch.einsum(
-                "bxr,byr,bzr->bxyz", params["head"], params["left"], params["right"]
-            ).clamp(1e-6).log()
+            params["rule"] = (
+                torch.einsum(
+                    "bxr,byr,bzr->bxyz", params["head"], params["left"], params["right"]
+                )
+                .clamp(1e-6)
+                .log()
+            )
             assert not params["rule"].isnan().any()
 
         terms, rules, roots = params["term"], params["rule"], params["root"]
@@ -74,32 +79,35 @@ class PCFG:
 
         preds = []
         for b in range(len(terms)):
-            samples, scores = self.sample(
+
+            samples, types, scores = self.sample(
                 terms[b],
                 rules[b],
                 roots[b],
-                nt_spans[b],
+                len(nt_spans[b]),
                 nt_states,
-                pt_spans[b],
+                len(pt_spans[b]),
                 pt_states,
                 use_copy=use_copy,
                 num_samples=num_samples,
                 max_length=max_length,
             )
-            sample_scores = [(sample, score) for sample, score in zip(samples, scores)]
-            sample_scores.sort(key=lambda x: x[1], reverse=True)
+            sample_scores = [
+                (sample, type_, score)
+                for sample, type_, score in zip(samples, types, scores)
+            ]
             preds.append(sample_scores)
         return preds
 
     @staticmethod
-    # @jit(nopython=True, parallel=True)  # TODO solve error
+    @jit(nopython=True)
     def sample(
         terms: np.ndarray,  # pt x t, in normal space
         rules: np.ndarray,  # nt x (nt+pt) x (nt+pt), in normal space
         roots: np.ndarray,  # nt, in normal space
-        nt_spans: List[List[str]],
+        nt_num_nodes: int,
         nt_states: int,
-        pt_spans: List[List[str]],
+        pt_num_nodes: int,
         pt_states: int,
         use_copy=True,
         num_samples=1,
@@ -108,23 +116,23 @@ class PCFG:
         UNK=1,
     ):
         # TODO: fix scores, rules/terms/roots are cumsum. so current impl is wrong.
-        # NOTE: this debug has no effect if check_ppl=True.
+        # NOTE: this bug has no effect if check_ppl=True.
         NT = rules.shape[0]
         PT = terms.shape[0]
         S = NT + PT
         COPY_NT = nt_states - 1
         COPY_PT = pt_states - 1
-        samples = [None for _ in range(num_samples)]
-        scores = [None for _ in range(num_samples)]
-        nt_num_nodes = len(nt_spans)
-        pt_num_nodes = len(pt_spans)
+        samples = [[0] for _ in range(num_samples)]
+        types = [[0] for _ in range(num_samples)]
+        scores = [0.0 for _ in range(num_samples)]
 
         for i in range(num_samples):
             actions = 0
             sample = weighted_random(roots)
             score = roots[sample]
             nonterminals: List[int] = [sample]
-            preterminals: List[Union[List[str], int]] = []
+            preterminals: List[int] = []
+            is_copy_pt: List[bool] = []
 
             while (
                 len(nonterminals) > 0
@@ -137,40 +145,46 @@ class PCFG:
                         nt_state = s // nt_num_nodes
                         if nt_state == COPY_NT:
                             nt_node = s % nt_num_nodes
-                            preterminals.append(nt_spans[nt_node])
+                            preterminals.append(nt_node)
+                            is_copy_pt.append(True)
                             continue
                     actions += 1
                     sample = weighted_random(rules[s])
                     score += rules[s, sample]
-                    left = sample // S
-                    right = sample % S
+                    left, right = divmod(sample, S)
                     nonterminals.extend([left, right])
                 else:
                     preterminals.append(s - NT)
+                    is_copy_pt.append(False)
 
             preterminals = preterminals[::-1]
-            terminals: List[Union[str, int]] = []
-            for s in preterminals:
-                if isinstance(s, list):
-                    # copy in NT
-                    terminals.extend(s)
+            terminals: List[int] = []
+            terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
+            for s, flag in zip(preterminals, is_copy_pt):
+                if flag:
+                    terminals.append(s)
+                    terminal_type.append(1)
                 else:
                     src_pt_state = s // pt_num_nodes
                     if use_copy and src_pt_state == COPY_PT:
                         src_node = s % pt_num_nodes
-                        terminals.extend(pt_spans[src_node])
+                        terminals.append(src_node)
+                        terminal_type.append(2)
                     else:
                         sample = weighted_random(terms[s])
                         score += terms[s, sample]
                         if use_copy and sample == UNK:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
-                            terminals.extend(pt_spans[src_node])
+                            terminals.append(src_node)
+                            terminal_type.append(2)
                         else:
                             terminals.append(sample)
+                            terminal_type.append(0)
             samples[i] = terminals
+            types[i] = terminal_type
             scores[i] = score / len(terminals)
-        return samples, scores
+        return samples, types, scores
 
 
 if __name__ == "__main__":

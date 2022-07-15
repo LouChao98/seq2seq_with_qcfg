@@ -202,7 +202,7 @@ class ScanModule(ModelBase):
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         y_preds = self.decoder.generate(
-            node_features, node_spans, self.datamodule.tgt_vocab
+            node_features, node_spans, self.datamodule.tgt_vocab, batch['src']
         )
 
         # tgt_nll = self.decoder(

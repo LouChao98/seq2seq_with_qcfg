@@ -7,7 +7,7 @@ defaults:
   - override /datamodule: scan.yaml
   - override /model: scan.yaml
   - override /callbacks: default.yaml
-  - override /logger: wandb
+  - override /logger: tensorboard
   - override /trainer: default.yaml
 
 # all parameters below will be merged with parameters from default configurations set above
@@ -26,7 +26,7 @@ datamodule:
   max_src_len: 100
 
 model:
-  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/scan/2022-07-13_15-19-13/checkpoints/last.ckpt
+  load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/scan/2022-07-13_15-19-13/checkpoints/last.ckpt
   decoder:
     num_samples: 10
 
@@ -40,4 +40,4 @@ logger:
     project: qcfg_scan
     # tags: ["mnist", "${name}"]
 
-# train: false
+train: false

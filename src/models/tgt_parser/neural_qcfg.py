@@ -93,7 +93,13 @@ class NeuralQCFGTgtParser(TgtParserBase):
             all_spans_node.append(all_span_node)
         return out, all_spans_node
 
-    def generate(self, node_features, spans, tokenizer: Vocabulary):
+    def generate(
+        self,
+        node_features,
+        spans,
+        tokenizer: Vocabulary,
+        src: Optional[List[str]] = None,
+    ):
         # if check_ppl=True, I will compute ppl for samples, return the one with minimum ppl
         # else, just return the one with the maximum score
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
@@ -109,6 +115,13 @@ class NeuralQCFGTgtParser(TgtParserBase):
             use_copy=self.use_copy,
             max_length=100,
         )
+
+        # TODO handle copy
+        preds_ = []
+        for item in preds:
+            # here just drop types
+            preds_.append((item[0], item[2]))
+        preds = preds_
 
         if self.check_ppl:
             new_preds = []
@@ -148,7 +161,12 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 new_preds.append((_ids[chosen], ppl[chosen]))
             preds = new_preds
         else:
-            preds = [inst[0] for inst in preds]
+            assert False, "Bad impl of score. see sample."
+            preds_ = []
+            for item in preds:
+                item = max(item, key=lambda x: x[1])
+                preds_.append(item)
+            preds = preds_
 
         pred_strings = []
         for pred in preds:

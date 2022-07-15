@@ -1,0 +1,27 @@
+method: grid
+metric:
+  goal: minimize
+  name: val/ppl
+parameters:
+  experiment:
+    value: scan
+  model.optimizer.args._target_:
+    values:
+      - torch.optim.Adam
+      - torch.optim.AdamW
+  model.optimizer.args.betas.0:
+    values:
+      - 0.5
+      - 0.75
+      - 0.9
+  model.optimizer.args.lr:
+    values:
+      - 0.001
+      - 0.0001
+      - 1e-05
+  model.optimizer.args.weight_decay:
+    values:
+      - 0.001
+      - 0.0001
+      - 1e-05
+program: train_wandb_sweep.py
