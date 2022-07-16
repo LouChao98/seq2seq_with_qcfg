@@ -1,13 +1,30 @@
-from typing import Dict, Tuple, Union, List
-import torch
-from torch_struct import SentCFG
+from typing import List
 
 import numpy as np
+import torch
+from numba import jit
+from torch_struct import SentCFG
+
 from ._utils import weighted_random
-from numba import jit, prange
+
+from enum import IntEnum
+
+
+# I don't know how to use IntEnum with numba's jit.
+# So I use this workaround.
+_VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
+
+class TokenType(IntEnum):
+    VOCAB = _VOCAB
+    COPY_NT = _COPY_NT
+    COPY_PT = _COPY_PT
 
 
 class PCFG:
+    VOCAB = 0
+    COPY_PT = 1
+    COPY_NT = 2
+
     def __call__(self, params, lens, decode=False, marginal=False):
         # terms: bsz x seqlen x pt
         # rules: bsz x nt x (nt+pt) x (nt+pt)
@@ -52,14 +69,13 @@ class PCFG:
         num_samples=10,
         max_length=100,
     ):
-        # TODO: benchmark parallelization. on batch or on sample?
-        # TODO: check clamp(1e-2) is enough to filter masked rules, and do not harm the sampling too much.
         terms = params["term"].detach()
         rules = params["rule"].detach()
         roots = params["root"].detach()
 
         terms: torch.Tensor
         zero = terms.new_full((1,), -1e9)
+        # TODO: check clamp(1e-2) is enough to filter masked rules, and do not harm the sampling too much.
         threshold = terms.new_full((1,), np.log(1e-2))
         terms = torch.where(terms > threshold, terms, zero).softmax(2).cumsum(2)
         rules = (
@@ -79,7 +95,6 @@ class PCFG:
 
         preds = []
         for b in range(len(terms)):
-
             samples, types, scores = self.sample(
                 terms[b],
                 rules[b],
@@ -117,6 +132,100 @@ class PCFG:
     ):
         # TODO: fix scores, rules/terms/roots are cumsum. so current impl is wrong.
         # NOTE: this bug has no effect if check_ppl=True.
+        #
+        # Kim's impl derive the rightmost NT first. But I change it to left first.
+        # My order (LL) should be more nature to combine with LM, as the generation order
+        # of mine is left-to-right.
+        # TODO inspect how often the sampling reaches max_length and max_actions.
+        # TODO try bfs.
+        #
+        # Kim's impl seems to be wrong when deriving COPY. The order of left/right PT
+        # appended to the buffer in his impl should be reversed.
+
+        NT = rules.shape[0]
+        PT = terms.shape[0]
+        S = NT + PT
+        COPY_NT = nt_states - 1
+        COPY_PT = pt_states - 1
+        samples = [[0] for _ in range(num_samples)]
+        types = [[0] for _ in range(num_samples)]
+        scores = [0.0 for _ in range(num_samples)]
+
+        for i in range(num_samples):
+            actions = 0
+            sample = weighted_random(roots)
+            score = roots[sample]
+            nonterminals: List[int] = [sample]
+            preterminals: List[int] = []
+            is_copy_pt: List[bool] = []
+
+            while (
+                len(nonterminals) > 0
+                and len(preterminals) < max_length
+                and actions < max_actions
+            ):
+                s = nonterminals.pop()  # get the last element
+                if s < NT:
+                    if use_copy:
+                        nt_state = s // nt_num_nodes
+                        if nt_state == COPY_NT:
+                            nt_node = s % nt_num_nodes
+                            preterminals.append(nt_node)
+                            is_copy_pt.append(True)
+                            continue
+                    actions += 1
+                    sample = weighted_random(rules[s])
+                    score += rules[s, sample]
+                    left, right = divmod(sample, S)
+                    nonterminals.extend([right, left])
+                else:
+                    preterminals.append(s - NT)
+                    is_copy_pt.append(False)
+
+            terminals: List[int] = []
+            terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
+            for s, flag in zip(preterminals, is_copy_pt):
+                if flag:
+                    terminals.append(s)
+                    terminal_type.append(_COPY_NT)
+                else:
+                    src_pt_state = s // pt_num_nodes
+                    if use_copy and src_pt_state == COPY_PT:
+                        src_node = s % pt_num_nodes
+                        terminals.append(src_node)
+                        terminal_type.append(_COPY_PT)
+                    else:
+                        sample = weighted_random(terms[s])
+                        score += terms[s, sample]
+                        if use_copy and sample == UNK:
+                            # force <unk> tokens to copy
+                            src_node = s % pt_num_nodes
+                            terminals.append(src_node)
+                            terminal_type.append(_COPY_PT)
+                        else:
+                            terminals.append(sample)
+                            terminal_type.append(_VOCAB)
+            samples[i] = terminals
+            types[i] = terminal_type
+            scores[i] = score / len(terminals)
+        return samples, types, scores
+
+    @staticmethod
+    @jit(nopython=True)
+    def sample_right_first(
+        terms: np.ndarray,  # pt x t, in normal space
+        rules: np.ndarray,  # nt x (nt+pt) x (nt+pt), in normal space
+        roots: np.ndarray,  # nt, in normal space
+        nt_num_nodes: int,
+        nt_states: int,
+        pt_num_nodes: int,
+        pt_states: int,
+        use_copy=True,
+        num_samples=1,
+        max_length=100,
+        max_actions=100,
+        UNK=1,
+    ):
         NT = rules.shape[0]
         PT = terms.shape[0]
         S = NT + PT
@@ -158,18 +267,20 @@ class PCFG:
                     is_copy_pt.append(False)
 
             preterminals = preterminals[::-1]
+            is_copy_pt = is_copy_pt[::-1]
+
             terminals: List[int] = []
             terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
             for s, flag in zip(preterminals, is_copy_pt):
                 if flag:
                     terminals.append(s)
-                    terminal_type.append(1)
+                    terminal_type.append(_COPY_NT)
                 else:
                     src_pt_state = s // pt_num_nodes
                     if use_copy and src_pt_state == COPY_PT:
                         src_node = s % pt_num_nodes
                         terminals.append(src_node)
-                        terminal_type.append(2)
+                        terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random(terms[s])
                         score += terms[s, sample]
@@ -177,10 +288,10 @@ class PCFG:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
                             terminals.append(src_node)
-                            terminal_type.append(2)
+                            terminal_type.append(_COPY_PT)
                         else:
                             terminals.append(sample)
-                            terminal_type.append(0)
+                            terminal_type.append(_VOCAB)
             samples[i] = terminals
             types[i] = terminal_type
             scores[i] = score / len(terminals)

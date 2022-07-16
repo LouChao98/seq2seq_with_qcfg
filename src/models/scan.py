@@ -11,11 +11,17 @@ from src.models.base import ModelBase
 from src.models.src_parser.base import SrcParserBase
 from src.models.tgt_parser.base import TgtParserBase
 from src.models.tree_encoder.base import TreeEncoderBase
-from src.utils.fn import annotate_snt_with_brackets, extract_parses, get_actions, get_tree
+from src.utils.fn import (
+    annotate_snt_with_brackets,
+    extract_parses,
+    get_actions,
+    get_tree,
+)
 from src.utils.metric import PerplexityMetric, WholeSentMatchAccuracy
 
 log = logging.getLogger(__file__)
 DEBUG = False
+
 
 class ScanModule(ModelBase):
     def __init__(
@@ -27,7 +33,9 @@ class ScanModule(ModelBase):
         optimizer=None,
         scheduler=None,
         load_from_checkpoint=None,
+        param_initializer="xavier_uniform",
         loss_threshold=None,
+        track_param_norm=False,
     ):
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -60,9 +68,18 @@ class ScanModule(ModelBase):
                 state_dict = state_dict["state_dict"]
             self.load_state_dict(state_dict)
         else:
+            init_func = {
+                "xavier_uniform": nn.init.xavier_uniform_,
+                "xavier_normal": nn.init.xavier_normal_,
+                "kaiming_uniform": nn.init.kaiming_uniform_,
+                "kaiming_normal": nn.init.kaiming_normal_,
+            }
+            init_func = init_func[self.hparams.param_initializer]
             for name, param in self.named_parameters():
                 if param.dim() > 1:
-                    nn.init.xavier_uniform_(param)
+                    init_func(param)
+                else:
+                    nn.init.zeros_(param)
 
     def forward(self, batch, _debug=DEBUG):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
@@ -73,10 +90,10 @@ class ScanModule(ModelBase):
 
         if _debug:
             for i in range(len(src_ids)):
-                _ref_lens = src_lens[i: i+1]
-                _ref_ids = src_ids[i: i+1, :_ref_lens[0]]
+                _ref_lens = src_lens[i : i + 1]
+                _ref_ids = src_ids[i : i + 1, : _ref_lens[0]]
                 _ref_dist = self.parser(_ref_ids, _ref_lens)
-                assert torch.isclose(src_nll[i: i+1], -_ref_dist.partition)
+                assert torch.isclose(src_nll[i : i + 1], -_ref_dist.partition)
 
         src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist)
         src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
@@ -87,16 +104,25 @@ class ScanModule(ModelBase):
 
         if _debug:
             for i in range(len(src_ids)):
-                _ref_node_features, _ref_node_spans = self.tree_encoder(x[i:i+1, :src_lens[i]], src_lens[i:i+1], spans=src_spans[i:i+1])
-                assert all(map(lambda x:torch.allclose(*x), zip(node_features[i:i+1], _ref_node_features)))
-                assert node_spans[i:i+1] == _ref_node_spans
+                _ref_node_features, _ref_node_spans = self.tree_encoder(
+                    x[i : i + 1, : src_lens[i]],
+                    src_lens[i : i + 1],
+                    spans=src_spans[i : i + 1],
+                )
+                assert all(
+                    map(
+                        lambda x: torch.allclose(*x),
+                        zip(node_features[i : i + 1], _ref_node_features),
+                    )
+                )
+                assert node_spans[i : i + 1] == _ref_node_spans
                 _ref_nll = self.decoder(
-                    batch["tgt_ids"][i:i+1, :batch["tgt_lens"][i]],
-                    batch["tgt_lens"][i:i+1],
+                    batch["tgt_ids"][i : i + 1, : batch["tgt_lens"][i]],
+                    batch["tgt_lens"][i : i + 1],
                     _ref_node_features,
                     _ref_node_spans,
                 )
-                assert torch.isclose(tgt_nll[i:i+1], _ref_nll)
+                assert torch.isclose(tgt_nll[i : i + 1], _ref_nll)
 
         with torch.no_grad():
             src_spans_argmax, src_logprob_argmax = self.parser.argmax(
@@ -116,36 +142,42 @@ class ScanModule(ModelBase):
 
             if _debug:
                 for i in range(len(src_ids)):
-                    _ref_lens = src_lens[i: i+1]
-                    _ref_ids = src_ids[i: i+1, :_ref_lens[0]]
+                    _ref_lens = src_lens[i : i + 1]
+                    _ref_ids = src_ids[i : i + 1, : _ref_lens[0]]
                     _ref_dist = self.parser(_ref_ids, _ref_lens)
                     _ref_spans_argmax, _ref_logprob_argmax = self.parser.argmax(
                         _ref_ids, _ref_lens, _ref_dist
                     )
-                    _ref_spans_argmax = extract_parses(_ref_spans_argmax[-1], _ref_lens, inc=1)[0]
+                    _ref_spans_argmax = extract_parses(
+                        _ref_spans_argmax[-1], _ref_lens, inc=1
+                    )[0]
                     assert src_spans_argmax[i] == _ref_spans_argmax[0]
                     assert torch.allclose(src_logprob_argmax[i], _ref_logprob_argmax[0])
 
         output = {
             "decoder": tgt_nll.mean(),
             "encoder": src_nll.mean() + (src_logprob * neg_reward).mean(),
-            "tgt_nll": tgt_nll.sum(),
-            "src_nll": src_nll.sum(),
-            "reward": -neg_reward,
+            "tgt_nll": tgt_nll.mean(),
+            "src_nll": src_nll.mean(),
+            "reward": -neg_reward.mean(),
         }
 
         if _debug:
             self.optimizers().zero_grad()
-            (output['decoder'] + output['encoder']).backward(retain_graph=True)
-            grads = {name: param.grad.clone() for name, param in self.named_parameters()}
+            (output["decoder"] + output["encoder"]).backward(retain_graph=True)
+            grads = {
+                name: param.grad.clone() for name, param in self.named_parameters()
+            }
             self.optimizers().zero_grad()
             for i in range(len(src_ids) - 1, -1, -1):
-                (tgt_nll[i] + src_nll[i] + src_logprob[i] * neg_reward[i]).backward(retain_graph=True)
+                (tgt_nll[i] + src_nll[i] + src_logprob[i] * neg_reward[i]).backward(
+                    retain_graph=True
+                )
             for name, param in self.named_parameters():
                 assert torch.allclose(param.grad / len(src_ids), grads[name], atol=1e-6)
 
         if self.hparams.loss_threshold is not None:
-            output['decoder'].clamp(min=self.hparams.loss_threshold)
+            output["decoder"].clamp(min=self.hparams.loss_threshold)
 
         return output
 
@@ -202,7 +234,7 @@ class ScanModule(ModelBase):
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         y_preds = self.decoder.generate(
-            node_features, node_spans, self.datamodule.tgt_vocab, batch['src']
+            node_features, node_spans, self.datamodule.vocab_pair, batch["src"]
         )
 
         # tgt_nll = self.decoder(
@@ -220,7 +252,13 @@ class ScanModule(ModelBase):
         loss = output["decoder"] + output["encoder"]
         ppl = self.train_metric(output["tgt_nll"], batch["tgt_lens"])
         self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
-        
+
+        if ppl > 10000:
+            torch.save(batch, "debug_input.pkl")
+            torch.save(self.state_dict(), "debug_model.ckpt")
+            log.warning("PPL is too high. I saved the input and the model. Exiting.")
+            exit(0)
+
         self.log("train/ppl", ppl, prog_bar=True)
         self.log("train/decoder", output["decoder"], prog_bar=True)
         self.log("train/encoder", output["encoder"], prog_bar=True)
@@ -240,6 +278,27 @@ class ScanModule(ModelBase):
                 )
         return {"loss": loss}
 
+    def on_validation_epoch_start(self) -> None:
+        super().on_validation_epoch_start()
+        if self.hparams.track_param_norm:
+            self.log(
+                "stat/parser_norm",
+                sum(param.norm() ** 2 for param in self.parser.parameters()).item()
+                ** 0.5,
+            )
+            self.log(
+                "stat/encoder_norm",
+                sum(
+                    param.norm() ** 2 for param in self.tree_encoder.parameters()
+                ).item()
+                ** 0.5,
+            )
+            self.log(
+                "stat/decoder_norm",
+                sum(param.norm() ** 2 for param in self.decoder.parameters()).item()
+                ** 0.5,
+            )
+
     def validation_step(self, batch: Any, batch_idx: int):
         output = self(batch)
         loss = output["decoder"] + output["encoder"]
@@ -258,9 +317,7 @@ class ScanModule(ModelBase):
         preds = self.forward_inference(batch)["pred"]
         targets = batch["tgt"]
 
-        # log test metrics
-        acc = self.test_metric(preds, targets)
-        self.log("test/acc", acc, on_step=False, on_epoch=True)
+        self.test_metric(preds, targets)
 
         if batch_idx == 0:
             single_inst = {key: value[:2] for key, value in batch.items()}
@@ -278,7 +335,10 @@ class ScanModule(ModelBase):
         return {"preds": preds, "targets": targets, "id": batch["id"]}
 
     def test_epoch_end(self, outputs) -> None:
-        self.print("test/acc", str(self.test_metric.compute().item()))
+        acc = self.test_metric.compute().item()
+        self.log("test/acc", acc, on_step=False, on_epoch=True)
+        self.print("test/acc", str(acc))
+
         if self.global_rank == 0:
             # TODO check whether pl gather outputs for me
             preds = []

@@ -31,7 +31,7 @@ class Vocabulary:
         return output
 
     def convert_tokens_to_ids(self, tokens, threshold=None):
-        threshold = threshold if threshold is not None else self.threshold 
+        threshold = threshold if threshold is not None else self.threshold
         assert isinstance(tokens, (list, str)), f"Bad input: {tokens}"
         if isinstance(tokens, str):
             return (
@@ -57,3 +57,20 @@ class Vocabulary:
 
     def __len__(self):
         return len(self.id2word)
+
+
+class VocabularyPair:
+    """Store src/tgt vocabularies and their id mappings.
+    """
+
+    def __init__(self, src: Vocabulary, tgt: Vocabulary):
+        self.src = src
+        self.tgt = tgt
+        self.mapping = {}
+
+        for i, w in enumerate(self.src.id2word):
+            if w in self.tgt.word2id:
+                self.mapping[i] = self.tgt.word2id[w]
+
+    def src2tgt(self, src_ids):
+        return [self.mapping[i] for i in src_ids]

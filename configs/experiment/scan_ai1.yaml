@@ -7,7 +7,7 @@ defaults:
   - override /datamodule: scan.yaml
   - override /model: scan.yaml
   - override /callbacks: default.yaml
-  - override /logger: tensorboard
+  - override /logger: wandb
   - override /trainer: default.yaml
 
 # all parameters below will be merged with parameters from default configurations set above
@@ -26,7 +26,6 @@ datamodule:
   max_src_len: 100
 
 model:
-  load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/debug.pkl
   track_param_norm: true
   decoder:
     num_samples: 10
@@ -35,10 +34,12 @@ trainer:
   max_epochs: 10
   accumulate_grad_batches: 4
   gradient_clip_val: 3
+  track_grad_norm: 2
 
 logger:
   wandb:
     project: qcfg_scan
-    # tags: ["mnist", "${name}"]
+    offline: true
+    tags: ["init"]
 
 # train: false

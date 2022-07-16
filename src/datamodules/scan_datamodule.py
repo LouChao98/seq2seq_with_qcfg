@@ -4,7 +4,7 @@ from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader, Dataset
-from src.datamodules.components.vocab import Vocabulary
+from src.datamodules.components.vocab import Vocabulary, VocabularyPair
 from src.datamodules.datamodule import _DataModule
 
 logger = logging.getLogger(__file__)
@@ -30,6 +30,7 @@ class SCANDataModule(_DataModule):
         with self.trace_persistent_variables():
             self.src_vocab: Optional[Vocabulary] = None
             self.tgt_vocab: Optional[Vocabulary] = None
+            self.vocab_pair: Optional[VocabularyPair] = None
 
             self.data_train: Optional[Dataset] = None
             self.data_val: Optional[Dataset] = None
@@ -47,6 +48,7 @@ class SCANDataModule(_DataModule):
         data_test = self.read_file(self.hparams.test_file)
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
+        self.vocab_pair = VocabularyPair(self.src_vocab, self.tgt_vocab)
         self.data_train = self.apply_vocab(data_train)
         self.data_val = self.apply_vocab(data_val)
         self.data_test = self.apply_vocab(data_test)

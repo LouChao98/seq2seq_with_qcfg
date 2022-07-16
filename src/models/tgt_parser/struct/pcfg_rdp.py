@@ -1,9 +1,12 @@
-from typing import Dict, Union, List
-import torch
-from torch_struct import SentCFG
+from typing import Dict, List, Union
 
 import numpy as np
-from ._utils import weighted_random, checkpoint
+import torch
+from torch import Tensor
+from torch_struct import SentCFG
+
+from . import _torch_model_utils as tmu
+from ._utils import checkpoint, weighted_random
 
 
 class PCFG:
@@ -13,25 +16,32 @@ class PCFG:
         # roots: bsz x nt
 
         terms, rules, roots = params["term"], params["rule"], params["root"]
-        dist = SentCFG((terms, rules, roots), lens)
-        if marginal:
-            return dist.marginals
-        elif not decode:
-            return -dist.partition
-        else:
-            spans_onehot = dist.argmax[-1].cpu().numpy()
-            tags = dist.argmax[0].max(-1)[1].cpu().numpy()
-            # lens = lens.cpu().tolist()
-            all_spans = []
-            for b in range(len(spans_onehot)):
-                spans_inst = [(i, i, int(tags[b][i])) for i in range(lens[b])]
-                for width, left, tag in zip(*spans_onehot[b].nonzero()):
-                    spans_inst.append((left, left + width + 1, tag))
-                all_spans.append(spans_inst)
-            return all_spans
+        logZ = self.forward_approx(terms, rules, roots, lens, marginal, 1, 1)
+        # if marginal:
+        #     return dist.marginals
+        # elif not decode:
+        #     return -dist.partition
+        # else:
+        #     spans_onehot = dist.argmax[-1].cpu().numpy()
+        #     tags = dist.argmax[0].max(-1)[1].cpu().numpy()
+        #     # lens = lens.cpu().tolist()
+        #     all_spans = []
+        #     for b in range(len(spans_onehot)):
+        #         spans_inst = [(i, i, int(tags[b][i])) for i in range(lens[b])]
+        #         for width, left, tag in zip(*spans_onehot[b].nonzero()):
+        #             spans_inst.append((left, left + width + 1, tag))
+        #         all_spans.append(spans_inst)
+        #     return all_spans
 
     def forward_approx(
-        self, term: torch.Tensor, rule: torch.Tensor, root: torch.Tensor, lens, marginal, topk, sample_size
+        self,
+        term: torch.Tensor,
+        rule: torch.Tensor,
+        root: torch.Tensor,
+        lens,
+        marginal,
+        topk,
+        sample_size,
     ):
         batch, N, T = term.shape
         N += 1
@@ -40,10 +50,11 @@ class PCFG:
         RS = topk + sample_size
         assert RS <= S, "Trival parameters"
 
-        s = term.new_zeros(batch, N, N, NT).fill_(-1e9)
+        s = term.new_full((batch, N, N, RS), -1e9)
+        s_ind = term.new_zeros(batch, N, N, RS, dtype=torch.long)
+
         NTs = slice(0, NT)
         Ts = slice(NT, S)
-
         X_Y_Z = rule[:, :, NTs, NTs].reshape(batch, NT, NT * NT)
         X_y_Z = rule[:, :, Ts, NTs].reshape(batch, NT, NT * T)
         X_Y_z = rule[:, :, NTs, Ts].reshape(batch, NT, NT * T)
@@ -59,13 +70,10 @@ class PCFG:
             Z_term = term[:, w - 1 :, None, :]
 
             if w == 2:
+                score = Xyz(Y_term, Z_term, X_y_z)  # bsz x n x nt
+
                 diagonal_copy_(
-                    s,
-                    Xyz(Y_term, Z_term, X_y_z)
-                    + span_indicator[:, torch.arange(n), torch.arange(n) + w].unsqueeze(
-                        -1
-                    ),
-                    w,
+                    s, +span_indicator.diagonal(w, 1, 2).unsqueeze(-1), w,
                 )
                 continue
 
@@ -73,39 +81,74 @@ class PCFG:
             x = term.new_zeros(3, batch, n, NT).fill_(-1e9)
 
             Y = stripe(s, n, w - 1, (0, 1)).clone()
+            Y_ind = stripe(s_ind, n, w - 1, (0, 1))
             Z = stripe(s, n, w - 1, (1, w), 0).clone()
+            Z_ind = stripe(s_ind, n, w - 1, (1, w), 0)
 
             if w > 3:
                 x[0].copy_(XYZ(Y, Z, X_Y_Z))
 
-            x[1].copy_(XYz(Y, Z_term, X_Y_z))
-            x[2].copy_(XyZ(Y_term, Z, X_y_Z))
+            x[1].copy_(XYz(Y, Y_ind, Z_term, X_Y_z))
+            x[2].copy_(XyZ(Y_term, Z, Z_ind, X_y_Z))
+            x = x.logsumexp(0)
 
             diagonal_copy_(
                 s,
-                x.logsumexp(dim=0)
-                + span_indicator[:, torch.arange(n), torch.arange(n) + w].unsqueeze(-1),
+                x.logsumexp(dim=0) + span_indicator.diagonal(w, 1, 2).unsqueeze(-1),
                 w,
             )
 
         logZ = (s[torch.arange(batch), 0, lens] + root).logsumexp(-1)
 
-        if viterbi or mbr:
-            prediction = self._get_prediction(logZ, span_indicator, lens, mbr=mbr)
-            return {"partition": logZ, "prediction": prediction}
-        else:
-            return {"partition": logZ}
+        return logZ
 
 
-@checkpoint
-def Xyz(y, z, rule):
-    n = y.shape[1]
-    b_n_yz = (y + z).reshape(batch, n, T * T)
+def sample(score: Tensor, topk: int, sample: int):
+    # I use normalized scores p(l|i,j) as the proposal distribution
+
+    # Get topk for exact marginalization
+    b, n, c = score.shape
+    proposal_p = score.softmax(-1)
+    _, topk_ind = torch.topk(proposal_p, topk, dim=-1)
+    topk_score = tmu.batch_index_select(
+        score.view(b * n, c), topk_ind.view(b * n, -1),
+    ).view(b, n, -1)
+
+    # get renormalized proposal distribution
+    proposal_p = tmu.batch_index_fill(
+        proposal_p.view(b * n, c), topk_ind.view(b * n, -1), 1e-7,
+    )
+    proposal_p /= proposal_p.sum(-1, keepdim=True)
+
+    # sample from the proposal.
+    sampled_ind = torch.multinomial(proposal_p, sample)
+    sample_log_prob = tmu.batch_index_select(proposal_p, sampled_ind)
+    sample_log_prob = (sample_log_prob + 1e-8).log()
+    sampled_score = tmu.batch_index_select(
+        score.view(b * n, -1), sampled_ind.view(b * n, -1),
+    ).view(b, n, sample)
+
+    #  debias sampled emission
+    sampled_ind = sampled_ind.view(b, n, sample)
+    sample_log_prob = sample_log_prob.view(b, n, sample)
+    correction = sample_log_prob + np.log(sample)
+    sampled_score -= correction
+
+    # Combine the emission
+    combined_score = torch.cat([topk_score, sampled_score], dim=-1)
+    combined_ind = torch.cat([topk_ind, sampled_ind], dim=-1)
+    return combined_score, combined_ind
+
+
+# @checkpoint
+def Xyz(y: Tensor, z: Tensor, rule: Tensor):
+    b_n_yz = (y + z).view(*y.shape[:2], -1)
     b_n_x = (b_n_yz.unsqueeze(-2) + rule.unsqueeze(1)).logsumexp(-1)
     return b_n_x
 
-@checkpoint
-def XYZ(Y, Z, rule):
+
+# @checkpoint
+def XYZ(Y: Tensor, Y_ind: Tensor, Z: Tensor, Z_ind: Tensor, rule: Tensor):
     n = Y.shape[1]
     b_n_yz = (
         (Y[:, :, 1:-1, :].unsqueeze(-1) + Z[:, :, 1:-1, :].unsqueeze(-2))
@@ -115,16 +158,18 @@ def XYZ(Y, Z, rule):
     b_n_x = (b_n_yz.unsqueeze(2) + rule.unsqueeze(1)).logsumexp(-1)
     return b_n_x
 
-@checkpoint
-def XYz(Y, z, rule):
+
+# @checkpoint
+def XYz(Y: Tensor, Y_ind: Tensor, z: Tensor, rule: Tensor):
     n = Y.shape[1]
     Y = Y[:, :, -1, :, None]
     b_n_yz = (Y + z).reshape(batch, n, NT * T)
     b_n_x = (b_n_yz.unsqueeze(-2) + rule.unsqueeze(1)).logsumexp(-1)
     return b_n_x
 
-@checkpoint
-def XyZ(y, Z, rule):
+
+# @checkpoint
+def XyZ(y: Tensor, Z: Tensor, Z_ind: Tensor, rule: Tensor):
     n = Z.shape[1]
     Z = Z[:, :, 0, None, :]
     b_n_yz = (y + Z).reshape(batch, n, NT * T)
@@ -174,63 +219,22 @@ def diagonal_copy_(x, y, w):
 
 
 if __name__ == "__main__":
-    from time import time
-
     torch.random.manual_seed(1)
 
-    B, N, T, NT, r = 4, 5, 3, 7, 2
+    B, N, T, NT = 4, 5, 3, 7
     device = "cpu"
     params = {
         "term": torch.randn(B, N, T, device=device)
         .log_softmax(-1)
         .requires_grad_(True),
         "root": torch.randn(B, NT, device=device).log_softmax(-1).requires_grad_(True),
-        "head": torch.randn(B, NT, r, device=device).softmax(-1).requires_grad_(True),
-        "left": torch.randn(B, NT + T, r, device=device)
-        .softmax(-2)
-        .requires_grad_(True),
-        "right": torch.randn(B, NT + T, r, device=device)
-        .softmax(-2)
+        "rule": torch.randn(B, NT, (NT + T) ** 2, device=device)
+        .log_softmax(-1)
+        .view(B, NT, NT + T, NT + T)
         .requires_grad_(True),
     }
     lens = torch.tensor([N, N - 1, N - 1, N - 3], dtype=torch.long, device=device)
 
     pcfg = PCFG()
-
-    # t = time()
-    # print(pcfg(params, lens))
-    print(pcfg(params, lens, decode=True))
-    # print(time() - t)
-
-    # cfg = FastestTDPCFG()
-    # t = time()
-    # logZ = cfg(params, lens)
-    # print(logZ)
-    # print(time() - t)
-    # exit(0)
-
-    # print(cfg(params, lens, argmax=True))
-    # # logZ.sum().backward()
-    # # print(params["head"].grad[0])
-
-    # # mrg = cfg._inside(params, lens, marginal=True)
-    # # print(mrg[0].sum())
-
-    # for k in params.keys():
-    #     params[k] = params[k].detach().clone()
-    # cfg = PCFG()
-    # params = (
-    #     params["term"],
-    #     torch.einsum(
-    #         "bxr,byr,bzr->bxyz", params["head"], params["left"], params["right"]
-    #     ).log(),
-    #     params["root"],
-    # )
-    # logZ = -cfg(params, lens)
-    # print(logZ)
-    # cfg(params, lens, argmax=True)
-    # # logZ.sum().backward()
-    # # print(params['head'].grad[0])
-
-    # print("Ok if same")
+    print(pcfg(params, lens))
 

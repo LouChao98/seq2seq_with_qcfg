@@ -1,5 +1,5 @@
 _target_: src.models.scan.ScanModule
-_recursive_: False
+_recursive_: false
 
 embedding_dim: 256
 
@@ -24,9 +24,11 @@ decoder:
   rule_constraint_type: 1
   use_copy: false
   num_samples: 8
-  check_ppl: True
+  check_ppl: true
 
 loss_threshold: ~
+param_initializer: "xavier_uniform"
+track_param_norm: false
 
 optimizer:
   groups: ~

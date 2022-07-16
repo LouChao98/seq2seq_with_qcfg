@@ -6,10 +6,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
-from ...datamodules.components.vocab import Vocabulary
+from ...datamodules.components.vocab import VocabularyPair
 from ..components.common import MultiResidualLayer
 from .base import TgtParserBase
-from .struct.pcfg import PCFG
+from .struct.pcfg import PCFG, TokenType
 
 
 class NeuralQCFGTgtParser(TgtParserBase):
@@ -41,7 +41,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         self.nt_span_range = nt_span_range
         self.pt_span_range = pt_span_range
         self.num_samples = num_samples
-        self.check_ppl = check_ppl
+        self.check_ppl = check_ppl  # If true, there is a length limitation.
 
         self.src_nt_emb = nn.Parameter(torch.randn(nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -62,13 +62,13 @@ class NeuralQCFGTgtParser(TgtParserBase):
         nn.init.xavier_uniform_(self.src_pt_emb.data)
 
     def forward(self, x, lengths, node_features, spans, copy_position=None):
-        params, *_ = self.get_params(node_features, spans, x, x_str=None)
+        params, *_ = self.get_params(node_features, spans, x, copy_position)
         out = self.pcfg(params, lengths, False)
         return out
 
     def parse(self, x, lengths, node_features, spans, copy_position=None):
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
-            node_features, spans, x, x_str=None
+            node_features, spans, x, copy_position
         )
         out = self.pcfg(params, lengths, True)
 
@@ -97,11 +97,12 @@ class NeuralQCFGTgtParser(TgtParserBase):
         self,
         node_features,
         spans,
-        tokenizer: Vocabulary,
-        src: Optional[List[str]] = None,
+        vocab_pair: VocabularyPair,
+        src_ids: Optional[List[int]] = None,
     ):
         # if check_ppl=True, I will compute ppl for samples, return the one with minimum ppl
         # else, just return the one with the maximum score
+        
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
             node_features, spans
         )
@@ -116,24 +117,43 @@ class NeuralQCFGTgtParser(TgtParserBase):
             max_length=100,
         )
 
-        # TODO handle copy
+        # expand copied spans
         preds_ = []
-        for item in preds:
-            # here just drop types
-            preds_.append((item[0], item[2]))
+        for batch in preds:
+            expanded_batch = []
+            for inst in batch:
+                if self.use_copy:
+                    expanded = []
+                    for v, t in zip(inst[0], inst[1]):
+                        if t == TokenType.VOCAB:
+                            expanded.append(v)
+                        elif t == TokenType.COPY_PT:
+                            span = pt_spans[v]
+                            tokens = vocab_pair.src2tgt(src_ids[span[0] : span[1] + 1])
+                            expanded.extend(tokens)
+                        elif t == TokenType.COPY_NT:
+                            span = nt_spans[v]
+                            tokens = vocab_pair.src2tgt(src_ids[span[0] : span[1] + 1])
+                            expanded.extend(tokens)
+                else:
+                    expanded = inst[0]
+                expanded_batch.append((expanded, inst[2]))
+            preds_.append(expanded_batch)
         preds = preds_
 
         if self.check_ppl:
+            padid = vocab_pair.tgt.pad_token_id or 0
             new_preds = []
             for i, preds_inst in enumerate(preds):
-                _ids = [
-                    inst[0] for inst in preds_inst if 0 < len(inst[0]) < 60
-                ]  # <60: ~20gb
+                _ids = [inst[0] for inst in preds_inst if 0 < len(inst[0]) < 60]
+
                 if len(_ids) == 0:
-                    _ids = [[0, 0]]  # unk, unk
+                    new_preds.append([0, 0], 100)
+                    continue
+
                 _ids.sort(key=lambda x: len(x), reverse=True)
                 _lens = [len(inst) for inst in _ids]
-                _ids_t = torch.full((len(_ids), _lens[0]), tokenizer.pad_token_id or 0)
+                _ids_t = torch.full((len(_ids), _lens[0]), padid)
                 for j, (snt, length) in enumerate(zip(_ids, _lens)):
                     _ids_t[j, :length] = torch.tensor(snt)
                 _ids_t = _ids_t.to(node_features[0].device)
@@ -161,7 +181,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 new_preds.append((_ids[chosen], ppl[chosen]))
             preds = new_preds
         else:
-            assert False, "Bad impl of score. see sample."
+            assert False, "Bad impl of score. see sample()."
             preds_ = []
             for item in preds:
                 item = max(item, key=lambda x: x[1])
@@ -172,9 +192,9 @@ class NeuralQCFGTgtParser(TgtParserBase):
         for pred in preds:
             snt, score = pred
             try:
-                pred_strings.append((tokenizer.convert_ids_to_tokens(snt), score))
+                pred_strings.append((vocab_pair.tgt.convert_ids_to_tokens(snt), score))
             except IndexError:
-                print("bad pred:", snt)
+                print("Bad pred:", snt)
                 pred_strings.append([("", -999)])
         return pred_strings
 
@@ -183,7 +203,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         node_features,
         spans,
         x: Optional[torch.Tensor] = None,
-        x_str: Optional[List[str]] = None,
+        copy_position=None,  # (pt, nt), nt not implemented
         ignore_src=False,
     ):
         batch_size = len(spans)

@@ -2,7 +2,7 @@ from typing import List, Optional
 
 import torch.nn as nn
 
-from ...datamodules.components.vocab import Vocabulary
+from ...datamodules.components.vocab import VocabularyPair
 
 
 class TgtParserBase(nn.Module):
@@ -19,7 +19,7 @@ class TgtParserBase(nn.Module):
         self,
         node_features,
         spans,
-        tokenizer: Vocabulary,
-        src: Optional[List[str]] = None,
+        vocab_pair: VocabularyPair,
+        src_ids: Optional[List[int]] = None,
     ):
         raise NotImplementedError
