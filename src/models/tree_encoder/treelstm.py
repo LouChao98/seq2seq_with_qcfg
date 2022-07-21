@@ -103,3 +103,5 @@ class BinaryTreeLSTM(TreeEncoderBase):
             all_spans.append(spans_b)
         return node_features, all_spans
 
+    def get_output_dim(self):
+        return self.dim

@@ -177,7 +177,7 @@ class ScanModule(ModelBase):
                 assert torch.allclose(param.grad / len(src_ids), grads[name], atol=1e-6)
 
         if self.hparams.loss_threshold is not None:
-            output["decoder"].clamp(min=self.hparams.loss_threshold)
+            output["decoder"] = tgt_nll.clamp(min=self.hparams.loss_threshold).mean() 
 
         return output
 
@@ -237,13 +237,13 @@ class ScanModule(ModelBase):
             node_features, node_spans, self.datamodule.vocab_pair, batch["src"]
         )
 
-        # tgt_nll = self.decoder(
-        #     batch["tgt_ids"],
-        #     batch["tgt_lens"],
-        #     node_features,
-        #     node_spans,
-        # )
-        # tgt_ppl = np.exp(tgt_nll.detach().cpu().numpy() / batch["tgt_lens"])
+        tgt_nll = self.decoder(
+            batch["tgt_ids"],
+            batch["tgt_lens"],
+            node_features,
+            node_spans,
+        )
+        tgt_ppl = np.exp(tgt_nll.detach().cpu().numpy() / batch["tgt_lens"])
 
         return {"pred": [item[0] for item in y_preds]}
 
@@ -253,11 +253,11 @@ class ScanModule(ModelBase):
         ppl = self.train_metric(output["tgt_nll"], batch["tgt_lens"])
         self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
 
-        if ppl > 10000:
-            torch.save(batch, "debug_input.pkl")
-            torch.save(self.state_dict(), "debug_model.ckpt")
-            log.warning("PPL is too high. I saved the input and the model. Exiting.")
-            exit(0)
+        # if ppl > 10000 and self.trainer.global_step > 1000:
+        #     torch.save(batch, "debug_input.pkl")
+        #     torch.save(self.state_dict(), "debug_model.ckpt")
+        #     log.warning("PPL is too high. I saved the input and the model. Exiting.")
+        #     exit(0)
 
         self.log("train/ppl", ppl, prog_bar=True)
         self.log("train/decoder", output["decoder"], prog_bar=True)

@@ -8,3 +8,6 @@ class TreeEncoderBase(nn.Module):
 
     def forward(self, x, lengths, spans=None):
         raise NotImplementedError
+
+    def get_output_dim(self):
+        return 0

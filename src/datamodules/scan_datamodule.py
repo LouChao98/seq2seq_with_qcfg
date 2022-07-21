@@ -49,6 +49,7 @@ class SCANDataModule(_DataModule):
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
         self.vocab_pair = VocabularyPair(self.src_vocab, self.tgt_vocab)
+
         self.data_train = self.apply_vocab(data_train)
         self.data_val = self.apply_vocab(data_val)
         self.data_test = self.apply_vocab(data_test)

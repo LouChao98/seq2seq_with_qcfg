@@ -9,7 +9,6 @@ _hit_debug, debugging = True, False
 
 
 def is_under_debugger():
-    return False
     if os.environ.get("DEBUG_MODE", "").lower() in ("true", "t", "1", "yes", "y"):
         result = True
     else:

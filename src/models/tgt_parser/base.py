@@ -1,5 +1,6 @@
 from typing import List, Optional
 
+import torch
 import torch.nn as nn
 
 from ...datamodules.components.vocab import VocabularyPair
@@ -20,6 +21,6 @@ class TgtParserBase(nn.Module):
         node_features,
         spans,
         vocab_pair: VocabularyPair,
-        src_ids: Optional[List[int]] = None,
+        src_ids: torch.Tensor,
     ):
         raise NotImplementedError

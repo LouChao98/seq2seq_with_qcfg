@@ -5,7 +5,7 @@
 
 defaults:
   - override /datamodule: styleptb.yaml
-  - override /model: scan.yaml
+  - override /model: styleptb.yaml
   - override /callbacks: default.yaml
   - override /logger: tensorboard
   - override /trainer: default.yaml
@@ -23,11 +23,13 @@ datamodule:
   eval_batch_size: 1
   # batch_size: 12
   # eval_batch_size: 4
-  max_src_len: 100
+  max_src_len: 20
 
 model:
+  load_from_checkpoint: '/home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb/2022-07-21_12-07-10/checkpoints/last.ckpt'
   decoder:
-    num_samples: 10
+    num_samples: 1000
+    check_ppl_batch_size: 1
 
 trainer:
   max_epochs: 15
@@ -38,4 +40,4 @@ trainer:
 #     tags: ["mnist", "${name}"]
 
 
-# train: false
+train: false

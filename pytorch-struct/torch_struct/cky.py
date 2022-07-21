@@ -9,7 +9,11 @@ class CKY(_Struct):
         semiring = self.semiring
 
         # Checks
-        terms, rules, roots = scores
+        if len(scores) == 3:
+            terms, rules, roots = scores
+            copy_nts = None
+        else:
+            terms, rules, roots, copy_nts = scores
         rules.requires_grad_(True)
         ssize = semiring.size()
         batch, N, T = terms.shape
@@ -67,7 +71,11 @@ class CKY(_Struct):
                 X4 = matmul(times(Y_term, Z_term).view(*v2), X_Y1_Z1)
                 all_span.append(X4)
 
-            span[w] = semiring.sum(torch.stack(all_span, dim=-1))
+            data = semiring.sum(torch.stack(all_span, dim=-1))
+            if copy_nts is not None:
+                value, mask = copy_nts[w - 1]
+                data = torch.where(mask, value, data)
+            span[w] = data
             beta[A][: N - w, w, :] = span[w]
             beta[B][w:N, N - w - 1, :] = span[w]
 
@@ -91,7 +99,7 @@ class CKY(_Struct):
             spans: bxNxT terms, (bxNTx(NT+S)x(NT+S)) rules, bxNT roots
 
         """
-        terms, rules, roots = scores
+        terms, rules, *_ = scores
         batch, N, T = terms.shape
         _, NT, _, _ = rules.shape
 

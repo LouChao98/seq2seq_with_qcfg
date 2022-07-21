@@ -2,8 +2,9 @@ from typing import List
 
 import numpy as np
 import torch
-from numba import jit
+from numba import jit, prange
 from torch_struct import SentCFG
+from torch import Tensor
 
 from ._utils import weighted_random
 
@@ -13,6 +14,7 @@ from enum import IntEnum
 # I don't know how to use IntEnum with numba's jit.
 # So I use this workaround.
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
+
 
 class TokenType(IntEnum):
     VOCAB = _VOCAB
@@ -26,21 +28,17 @@ class PCFG:
     COPY_NT = 2
 
     def __call__(self, params, lens, decode=False, marginal=False):
+        # TODO remove pytorch-struct
         # terms: bsz x seqlen x pt
         # rules: bsz x nt x (nt+pt) x (nt+pt)
         # roots: bsz x nt
-        if "rule" not in params:
-            params["rule"] = (
-                torch.einsum(
-                    "bxr,byr,bzr->bxyz", params["head"], params["left"], params["right"]
-                )
-                .clamp(1e-6)
-                .log()
-            )
-            assert not params["rule"].isnan().any()
 
         terms, rules, roots = params["term"], params["rule"], params["root"]
-        dist = SentCFG((terms, rules, roots), lens)
+        if "copy_nt" in params:
+            params = (terms, rules, roots, params["copy_nt"])
+        else:
+            params = (terms, rules, roots)
+        dist = SentCFG(params, lens)
         if marginal:
             return dist.marginals
         elif not decode:
@@ -141,6 +139,9 @@ class PCFG:
         #
         # Kim's impl seems to be wrong when deriving COPY. The order of left/right PT
         # appended to the buffer in his impl should be reversed.
+        #
+        # TODO check this sampling impl
+        # https://gist.github.com/jph00/30cfed589a8008325eae8f36e2c5b087
 
         NT = rules.shape[0]
         PT = terms.shape[0]

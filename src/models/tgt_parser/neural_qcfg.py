@@ -1,3 +1,4 @@
+import copy
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -27,6 +28,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         pt_span_range=[1, 1],
         num_samples=10,
         check_ppl=False,
+        check_ppl_batch_size=None,
     ):
         super(NeuralQCFGTgtParser, self).__init__()
         self.neg_huge = -1e5
@@ -42,6 +44,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         self.pt_span_range = pt_span_range
         self.num_samples = num_samples
         self.check_ppl = check_ppl  # If true, there is a length limitation.
+        self.check_ppl_batch_size = check_ppl_batch_size
 
         self.src_nt_emb = nn.Parameter(torch.randn(nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -94,18 +97,15 @@ class NeuralQCFGTgtParser(TgtParserBase):
         return out, all_spans_node
 
     def generate(
-        self,
-        node_features,
-        spans,
-        vocab_pair: VocabularyPair,
-        src_ids: Optional[List[int]] = None,
+        self, node_features, spans, vocab_pair: VocabularyPair, src_ids: torch.Tensor,
     ):
         # if check_ppl=True, I will compute ppl for samples, return the one with minimum ppl
         # else, just return the one with the maximum score
-        
+
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
             node_features, spans
         )
+        max_length = 100
         preds = self.pcfg.sampled_decoding(
             params,
             nt_spans,
@@ -114,62 +114,110 @@ class NeuralQCFGTgtParser(TgtParserBase):
             self.pt_states,
             num_samples=self.num_samples,
             use_copy=self.use_copy,
-            max_length=100,
+            max_length=max_length,
         )
 
-        # expand copied spans
+        # expand copied spans and build copy_position
         preds_ = []
-        for batch in preds:
-            expanded_batch = []
-            for inst in batch:
-                if self.use_copy:
+        copy_positions = []
+        device = node_features[0].device
+        src_ids = src_ids.tolist()
+        for batch, pt_spans_inst, nt_spans_inst, src_ids_inst in zip(
+            preds, pt_spans, nt_spans, src_ids
+        ):
+            if self.use_copy:
+                expanded_batch = []
+                copy_pts = []
+                copy_nts = []
+                for inst in batch:
                     expanded = []
+                    copy_pt = np.zeros((len(src_ids_inst), max_length), dtype=np.bool8)
+                    copy_nt = [[] for _ in range(max_length)]  # no need to prune
                     for v, t in zip(inst[0], inst[1]):
                         if t == TokenType.VOCAB:
                             expanded.append(v)
                         elif t == TokenType.COPY_PT:
-                            span = pt_spans[v]
-                            tokens = vocab_pair.src2tgt(src_ids[span[0] : span[1] + 1])
+                            span = pt_spans_inst[v]
+                            tokens = vocab_pair.src2tgt(
+                                src_ids_inst[span[0] : span[1] + 1]
+                            )
+                            copy_pt[span[0], len(expanded)] = True
                             expanded.extend(tokens)
                         elif t == TokenType.COPY_NT:
-                            span = nt_spans[v]
-                            tokens = vocab_pair.src2tgt(src_ids[span[0] : span[1] + 1])
+                            span = nt_spans_inst[v]
+                            tokens = vocab_pair.src2tgt(
+                                src_ids_inst[span[0] : span[1] + 1]
+                            )
+                            copy_nt[span[1] - span[0] - 1].append(
+                                (span[0], len(expanded))
+                            )  # copy_nt starts from w=2
                             expanded.extend(tokens)
-                else:
-                    expanded = inst[0]
-                expanded_batch.append((expanded, inst[2]))
-            preds_.append(expanded_batch)
+                    expanded_batch.append((expanded, inst[2]))
+                    copy_pts.append(copy_pt)
+                    copy_nts.append(copy_nt)
+                copy_pts = torch.from_numpy(np.stack(copy_pts, axis=0)).to(device)
+                copy_positions.append((copy_pts, copy_nts))
+                preds_.append(expanded_batch)
+            else:
+                expanded_batch = []
+                for inst in batch:
+                    expanded_batch.append((inst[0], inst[2]))
+                copy_positions.append((None, None))
+                preds_.append(expanded_batch)
         preds = preds_
 
         if self.check_ppl:
             padid = vocab_pair.tgt.pad_token_id or 0
             new_preds = []
-            for i, preds_inst in enumerate(preds):
-                _ids = [inst[0] for inst in preds_inst if 0 < len(inst[0]) < 60]
+            for i, (preds_inst, (copy_pt, copy_nt)) in enumerate(
+                zip(preds, copy_positions)
+            ):
+                to_keep = [0 < len(inst[0]) < 60 for inst in preds_inst]
+                _ids = [inst[0] for inst, flag in zip(preds_inst, to_keep) if flag]
 
                 if len(_ids) == 0:
-                    new_preds.append([0, 0], 100)
+                    new_preds.append(([0, 0], 100))
                     continue
 
-                _ids.sort(key=lambda x: len(x), reverse=True)
+                sort_id = list(range(len(_ids)))
+                sort_id.sort(key=lambda x: len(_ids[x]), reverse=True)
+                _ids = [_ids[i] for i in sort_id]
                 _lens = [len(inst) for inst in _ids]
                 _ids_t = torch.full((len(_ids), _lens[0]), padid)
                 for j, (snt, length) in enumerate(zip(_ids, _lens)):
                     _ids_t[j, :length] = torch.tensor(snt)
                 _ids_t = _ids_t.to(node_features[0].device)
 
-                batch_size = len(node_features)
+                if copy_pt is not None:
+                    copy_pt = copy_pt[to_keep]
+                    copy_pt = copy_pt[sort_id]
+                    copy_nt = [item for item, flag in zip(copy_nt, to_keep) if flag]
+                    copy_nt = [copy_nt[i] for i in sort_id]
+
+                batch_size = (
+                    len(node_features)
+                    if self.check_ppl_batch_size is None
+                    else self.check_ppl_batch_size
+                )
                 ppl = []
                 for j in range(0, len(_ids), batch_size):
                     real_batch_size = min(batch_size, len(_ids) - j)
                     _node_ft = [node_features[i] for _ in range(real_batch_size)]
                     _spans = [spans[i] for _ in range(real_batch_size)]
+                    if copy_pt is not None:
+                        _copy = (
+                            copy_pt[j : j + batch_size, :, : _ids_t.shape[1]],
+                            copy_nt[j : j + batch_size],
+                        )
+                    else:
+                        _copy = None
                     nll = (
                         self(
                             _ids_t[j : j + batch_size],
                             _lens[j : j + batch_size],
                             _node_ft,
                             _spans,
+                            _copy,
                         )
                         .detach()
                         .cpu()
@@ -206,6 +254,9 @@ class NeuralQCFGTgtParser(TgtParserBase):
         copy_position=None,  # (pt, nt), nt not implemented
         ignore_src=False,
     ):
+        if copy_position is None:
+            copy_position = (None, None)
+
         batch_size = len(spans)
 
         # seperate nt and pt features according to span width
@@ -320,37 +371,54 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         # A->a
         terms = F.log_softmax(self.vocab_out(pt_emb), 2)
+        copy_nt = None
 
         if x is not None:
             n = x.size(1)
             terms = terms.unsqueeze(1).expand(batch_size, n, pt, terms.size(2))
             x_expand = x.unsqueeze(2).expand(batch_size, n, pt).unsqueeze(3)
             terms = torch.gather(terms, 3, x_expand).squeeze(3)
-            if self.use_copy:
-                copy_pt = (
-                    torch.zeros(batch_size, n, pt).fill_(self.neg_huge * 0.1).to(device)
+            if copy_position[0] is not None:
+                terms = terms.view(batch_size, n, self.pt_states, -1)
+                terms[:, :, -1] = (
+                    0.1 * self.neg_huge * ~copy_position[0].transpose(1, 2)
                 )
-                copy_pt_view = copy_pt[:, :, :pt].view(
-                    batch_size, n, self.pt_states, pt_num_nodes
-                )
-                for b in range(batch_size):
-                    for c, s in enumerate(pt_spans[b]):
-                        if s[-1] == None:
+                terms = terms.view(batch_size, n, -1)
+            if copy_position[1] is not None:
+                # mask True= will set to value
+                # TODO this waste memory to store TGT * SRC. Does this matter?
+                copy_nt = [
+                    np.full(
+                        (batch_size, n - w, self.nt_states, nt_num_nodes),
+                        self.neg_huge,
+                        dtype=np.float32,
+                    )
+                    for w in range(1, n)
+                ]
+                for batch_idx, (nt_spans_inst, possible_copy) in enumerate(
+                    zip(nt_spans, copy_position[1])
+                ):
+                    for l, r, _ in nt_spans_inst:
+                        w = r - l - 1
+                        t = None
+                        if w >= len(possible_copy):
                             continue
-                        copy_str = " ".join(s[-1])
-                        for j in range(n):
-                            if x_str[b][j] == copy_str:
-                                copy_pt_view[:, j, -1, c] = 0.0
-                copy_mask = torch.zeros_like(copy_pt)
-                copy_mask_view = copy_mask[:, :, :pt].view(
-                    batch_size, n, self.pt_states, pt_num_nodes
-                )
-                # COPY is a special nonterminal
-                copy_mask_view[:, :, -1].fill_(1.0)
-                # copy_pt has binary weight
-                terms = terms * (1 - copy_mask) + copy_pt * copy_mask
+                        for possible_s, possible_t in possible_copy[w]:
+                            if possible_s == l:
+                                t = possible_t
+                                break
+                        if t is not None:
+                            copy_nt[w][batch_idx, t, -1, l] = 0
+                copy_nt_ = []
+                for item in copy_nt:
+                    mask = np.zeros_like(item, dtype=np.bool8)
+                    mask[:, :, -1] = True
+                    item = torch.from_numpy(item.reshape(item.shape[:2] + (-1,)))
+                    mask = torch.from_numpy(mask.reshape(item.shape))
+                    copy_nt_.append((item.to(terms.device), mask.to(terms.device)))
+                copy_nt = copy_nt_
 
-        params = {"term": terms, "root": roots, "rule": rules}
+        params = {"term": terms, "root": roots, "rule": rules, "copy_nt": copy_nt}
         return params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes
 
     def get_rules_mask1(

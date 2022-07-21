@@ -5,7 +5,7 @@ from typing import List, Optional, Union
 import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer
-from src.datamodules.components.vocab import Vocabulary
+from src.datamodules.components.vocab import Vocabulary, VocabularyPair
 from src.datamodules.datamodule import _DataModule
 import numpy as np
 from numba import jit
@@ -21,7 +21,7 @@ class TSVDataModule(_DataModule):
         test_file,
         max_src_len: int = 100,
         max_tgt_len: int = 100,
-        enable_copy: bool = False,
+        copy_mode: str = "none",
         transformer_tokenizer_name: str = None,
         batch_size: int = 64,
         eval_batch_size: int = 64,
@@ -29,12 +29,14 @@ class TSVDataModule(_DataModule):
         pin_memory: bool = False,
         **kwargs,
     ):
+        assert copy_mode in ("none", "token", "phrase")
         super().__init__(**kwargs)
         self.save_hyperparameters(logger=False)
 
         with self.trace_persistent_variables():
             self.src_vocab: Optional[Vocabulary] = None
             self.tgt_vocab: Optional[Vocabulary] = None
+            self.vocab_pair: Optional[VocabularyPair] = None
             self.use_transformer_tokenizer = transformer_tokenizer_name is not None
             if transformer_tokenizer_name is not None:
                 self.transformer_tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
@@ -56,7 +58,12 @@ class TSVDataModule(_DataModule):
         data_val = self.read_file(self.hparams.dev_file)
         data_test = self.read_file(self.hparams.test_file)
 
+        data_train = self.process_all_copy(data_train)
+        data_val = self.process_all_copy(data_val)
+
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
+        self.vocab_pair = VocabularyPair(self.src_vocab, self.tgt_vocab)
+
         self.data_train = self.apply_vocab(data_train)
         self.data_val = self.apply_vocab(data_val)
         self.data_test = self.apply_vocab(data_test)
@@ -69,13 +76,12 @@ class TSVDataModule(_DataModule):
     def read_file(self, fpath):
         data = []
         for i, d in enumerate(open(fpath, "r")):
-            inst = self.process_line(d, self.hparams.enable_copy)
+            inst = self.process_line(d)
             inst["id"] = i
             data.append(inst)
         return data
 
-    @staticmethod
-    def process_line(line: str, process_copy: bool):
+    def process_line(self, line: str):
         src, tgt = line.split("\t")
         src = src.strip().split()
         tgt = tgt.strip().split()
@@ -83,18 +89,58 @@ class TSVDataModule(_DataModule):
             src = src + src
             tgt = tgt + tgt
         inst = {"src": src, "tgt": tgt}
-        if process_copy:
-            # Here only preprocess the data for copy mechanism.
-            # Return a 2d tensor, (src x tgt), 1 for copyable. by lexicon indentification
-            # TODO Review whether we need phrase level copy mechanism in kim's paper.
-            #      I vote for yes because NEs are usually NP.   
-            copy_m = np.zeros((len(src), len(tgt)), dtype=np.bool8)
-            for i, stoken in enumerate(src):
-                for j, ttoken in enumerate(tgt):
-                    if stoken == ttoken:
-                        copy_m[i, j] = 1
-            inst["copy"] = copy_m
         return inst
+
+    def process_all_copy(self, data):
+        # none = do nothing
+        # token = token
+        # phrase = token + phrase
+        if self.hparams.copy_mode == "none":
+            return data
+        for item in data:
+            self.process_token_copy(item)
+        if self.hparams.copy_mode == "phrase":
+            for item in data:
+                self.process_phrase_copy(item)
+        return data
+
+    def process_token_copy(self, inst):
+        src = inst["src"]  # do not use ids, because src/tgt have diff vocab
+        tgt = inst["tgt"]
+        copy_m = np.zeros((len(src), len(tgt)), dtype=np.bool8)
+        for i, stoken in enumerate(src):
+            for j, ttoken in enumerate(tgt):
+                if stoken == ttoken:
+                    copy_m[i, j] = True
+        inst["copy_token"] = copy_m
+
+    def process_phrase_copy(self, inst):
+        # generate a list of bool vectors from width 2 to len(tgt)-1.
+        # NOTE this assume phrases are at least length 2
+        src = inst["src"]
+        tgt = inst["tgt"]
+        output = []
+
+        # width = 2
+        copy_position = []
+        for i in range(len(src) - 1):
+            for j in range(len(tgt) - 1):
+                if src[i : i + 2] == tgt[j : j + 2]:
+                    copy_position.append((i, j))
+        previous = copy_position
+        output.append(copy_position)
+
+        # width > 2
+        for w in range(3, len(tgt) + 2):
+            copy_position = []
+            for i, j in previous:
+                if i > len(src) - w or j > len(tgt) - w:
+                    continue
+                if src[i + w - 1] == tgt[j + w - 1]:
+                    copy_position.append((i, j))
+            previous = copy_position
+            output.append(copy_position)
+        inst["copy_phrase"] = output
 
     def build_vocab(self, data):
         src_vocab_cnt = Counter()
@@ -102,6 +148,10 @@ class TSVDataModule(_DataModule):
         for inst in data:
             src_vocab_cnt.update(inst["src"])
             tgt_vocab_cnt.update(inst["tgt"])
+        if self.hparams.copy_mode != "none":
+            logger.warning("I set src tokens in tgt vocab due to copy mode.")
+            for inst in data:
+                tgt_vocab_cnt.update(inst["src"])
         src_vocab = Vocabulary(src_vocab_cnt)
         tgt_vocab = Vocabulary(tgt_vocab_cnt)
         return src_vocab, tgt_vocab
@@ -184,12 +234,20 @@ class TSVDataModule(_DataModule):
         batched["src_lens"] = src_lens
         batched["tgt_lens"] = tgt_lens
 
-        if 'copy' in data[0]:
-            copy_matrix = torch.zeros(len(src), max(src_lens), max(tgt_lens), dtype=torch.bool)
+        copy_token = None
+        if "copy_token" in data[0]:
+            copy_token = torch.zeros(
+                len(src), max(src_lens), max(tgt_lens), dtype=torch.bool
+            )
             for i, inst in enumerate(data):
-                inst = torch.from_numpy(inst['copy'])
-                copy_matrix[i, :inst.shape[0], :inst.shape[1]] = inst
-            batched['copy'] = copy_matrix
+                inst = torch.from_numpy(inst["copy_token"])
+                copy_token[i, : inst.shape[0], : inst.shape[1]] = inst
+
+        copy_phrase = None
+        if "copy_phrase" in data[0]:
+            copy_phrase = [item["copy_phrase"] for item in data]
+
+        batched["copy_position"] = (copy_token, copy_phrase)
 
         if self.use_transformer_tokenizer:
             transformer_inp = self.transformer_tokenizer(

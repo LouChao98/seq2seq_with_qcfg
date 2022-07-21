@@ -19,6 +19,8 @@ name: "scan"
 
 # ~17GB
 datamodule:
+
+  test_file: ${data_dir}/SCAN/tasks_train_length.txt
   # batch_size: 1
   # eval_batch_size: 1
   batch_size: 1
@@ -26,7 +28,7 @@ datamodule:
   max_src_len: 100
 
 model:
-  load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/debug.pkl
+  load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/epoch_004.ckpt
   track_param_norm: true
   decoder:
     num_samples: 10
@@ -41,4 +43,4 @@ logger:
     project: qcfg_scan
     # tags: ["mnist", "${name}"]
 
-# train: false
+train: false
