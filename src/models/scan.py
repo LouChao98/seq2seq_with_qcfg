@@ -177,7 +177,7 @@ class ScanModule(ModelBase):
                 assert torch.allclose(param.grad / len(src_ids), grads[name], atol=1e-6)
 
         if self.hparams.loss_threshold is not None:
-            output["decoder"] = tgt_nll.clamp(min=self.hparams.loss_threshold).mean() 
+            output["decoder"] = tgt_nll.clamp(min=self.hparams.loss_threshold).mean()
 
         return output
 
@@ -234,14 +234,15 @@ class ScanModule(ModelBase):
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         y_preds = self.decoder.generate(
-            node_features, node_spans, self.datamodule.vocab_pair, batch["src"]
+            node_features,
+            node_spans,
+            self.datamodule.vocab_pair,
+            batch["src_ids"],
+            batch["src"],
         )
 
         tgt_nll = self.decoder(
-            batch["tgt_ids"],
-            batch["tgt_lens"],
-            node_features,
-            node_spans,
+            batch["tgt_ids"], batch["tgt_lens"], node_features, node_spans,
         )
         tgt_ppl = np.exp(tgt_nll.detach().cpu().numpy() / batch["tgt_lens"])
 

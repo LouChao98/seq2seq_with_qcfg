@@ -22,5 +22,6 @@ class TgtParserBase(nn.Module):
         spans,
         vocab_pair: VocabularyPair,
         src_ids: torch.Tensor,
+        src: List[List[str]],
     ):
         raise NotImplementedError

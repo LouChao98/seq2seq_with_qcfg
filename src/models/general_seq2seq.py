@@ -131,7 +131,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
-        
+
         tgt_nll = self.decoder(
             batch["tgt_ids"],
             batch["tgt_lens"],
@@ -219,12 +219,16 @@ class GeneralSeq2SeqModule(ModelBase):
         dist = self.parser(src_ids, src_lens)
         src_spans = self.parser.argmax(src_ids, src_lens, dist)[0]
         src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
-        
+
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         y_preds = self.decoder.generate(
-            node_features, node_spans, self.datamodule.vocab_pair, batch["src_ids"],
+            node_features,
+            node_spans,
+            self.datamodule.vocab_pair,
+            batch["src_ids"],
+            batch["src"],
         )
 
         # tgt_nll = self.decoder(

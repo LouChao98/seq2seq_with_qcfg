@@ -97,7 +97,12 @@ class NeuralQCFGTgtParser(TgtParserBase):
         return out, all_spans_node
 
     def generate(
-        self, node_features, spans, vocab_pair: VocabularyPair, src_ids: torch.Tensor,
+        self,
+        node_features,
+        spans,
+        vocab_pair: VocabularyPair,
+        src_ids: torch.Tensor,
+        src: List[List[str]],
     ):
         # if check_ppl=True, I will compute ppl for samples, return the one with minimum ppl
         # else, just return the one with the maximum score
@@ -129,10 +134,12 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 expanded_batch = []
                 copy_pts = []
                 copy_nts = []
+                copy_unks = []
                 for inst in batch:
                     expanded = []
                     copy_pt = np.zeros((len(src_ids_inst), max_length), dtype=np.bool8)
                     copy_nt = [[] for _ in range(max_length)]  # no need to prune
+                    copy_unk = {}  # record position if copy unk token
                     for v, t in zip(inst[0], inst[1]):
                         if t == TokenType.VOCAB:
                             expanded.append(v)
@@ -142,6 +149,8 @@ class NeuralQCFGTgtParser(TgtParserBase):
                                 src_ids_inst[span[0] : span[1] + 1]
                             )
                             copy_pt[span[0], len(expanded)] = True
+                            if tokens[0] == vocab_pair.tgt.unk_token_id:
+                                copy_unk[len(expanded)] = span[0]
                             expanded.extend(tokens)
                         elif t == TokenType.COPY_NT:
                             span = nt_spans_inst[v]
@@ -151,25 +160,29 @@ class NeuralQCFGTgtParser(TgtParserBase):
                             copy_nt[span[1] - span[0] - 1].append(
                                 (span[0], len(expanded))
                             )  # copy_nt starts from w=2
+                            for i, token in enumerate(tokens):
+                                if token == vocab_pair.tgt.unk_token_id:
+                                    copy_unk[len(expanded) + i] = span[0] + i
                             expanded.extend(tokens)
                     expanded_batch.append((expanded, inst[2]))
                     copy_pts.append(copy_pt)
                     copy_nts.append(copy_nt)
+                    copy_unks.append(copy_unk)
                 copy_pts = torch.from_numpy(np.stack(copy_pts, axis=0)).to(device)
-                copy_positions.append((copy_pts, copy_nts))
+                copy_positions.append((copy_pts, copy_nts, copy_unks))
                 preds_.append(expanded_batch)
             else:
                 expanded_batch = []
                 for inst in batch:
                     expanded_batch.append((inst[0], inst[2]))
-                copy_positions.append((None, None))
+                copy_positions.append((None, None, None))
                 preds_.append(expanded_batch)
         preds = preds_
 
         if self.check_ppl:
             padid = vocab_pair.tgt.pad_token_id or 0
             new_preds = []
-            for i, (preds_inst, (copy_pt, copy_nt)) in enumerate(
+            for i, (preds_inst, (copy_pt, copy_nt, copy_unk)) in enumerate(
                 zip(preds, copy_positions)
             ):
                 to_keep = [0 < len(inst[0]) < 60 for inst in preds_inst]
@@ -193,6 +206,8 @@ class NeuralQCFGTgtParser(TgtParserBase):
                     copy_pt = copy_pt[sort_id]
                     copy_nt = [item for item, flag in zip(copy_nt, to_keep) if flag]
                     copy_nt = [copy_nt[i] for i in sort_id]
+                    copy_unk = [item for item, flag in zip(copy_unk, to_keep) if flag]
+                    copy_unk = [copy_unk[i] for i in sort_id]
 
                 batch_size = (
                     len(node_features)
@@ -226,7 +241,13 @@ class NeuralQCFGTgtParser(TgtParserBase):
                     ppl.append(np.exp(nll / np.array(_lens[j : j + batch_size])))
                 ppl = np.concatenate(ppl, 0)
                 chosen = np.argmin(ppl)
-                new_preds.append((_ids[chosen], ppl[chosen]))
+                new_preds.append(
+                    (
+                        _ids[chosen],
+                        ppl[chosen],
+                        None if copy_pt is None else copy_unk[chosen],
+                    )
+                )
             preds = new_preds
         else:
             assert False, "Bad impl of score. see sample()."
@@ -237,10 +258,14 @@ class NeuralQCFGTgtParser(TgtParserBase):
             preds = preds_
 
         pred_strings = []
-        for pred in preds:
-            snt, score = pred
+        for pred, src_sent in zip(preds, src):
+            snt, score, copy_unk = pred
             try:
-                pred_strings.append((vocab_pair.tgt.convert_ids_to_tokens(snt), score))
+                sent = vocab_pair.tgt.convert_ids_to_tokens(snt)
+                if copy_unk is not None:
+                    for t, s in copy_unk.items():
+                        sent[t] = src_sent[s]
+                pred_strings.append((sent, score))
             except IndexError:
                 print("Bad pred:", snt)
                 pred_strings.append([("", -999)])
