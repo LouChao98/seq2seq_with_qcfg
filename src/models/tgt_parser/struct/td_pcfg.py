@@ -1,3 +1,4 @@
+from enum import IntEnum
 from typing import Dict, List, Union
 
 import numpy as np
@@ -7,6 +8,14 @@ from torch import Tensor
 from torch.autograd import grad
 
 from ._utils import checkpoint, weighted_random
+
+_VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
+
+
+class TokenType(IntEnum):
+    VOCAB = _VOCAB
+    COPY_NT = _COPY_NT
+    COPY_PT = _COPY_PT
 
 
 class FastestTDPCFG:
@@ -26,7 +35,9 @@ class FastestTDPCFG:
             grad_state = torch.is_grad_enabled()
             torch.set_grad_enabled(True)
             # NOTE I assume marginals are only used for decoding.
-            params = {k: v.detach() for k, v in params.items()}
+            params = {
+                k: v.detach() if isinstance(v, Tensor) else v for k, v in params.items()
+            }
         lens = torch.tensor(lens)
         assert (
             lens[1:] <= lens[:-1]
@@ -199,36 +210,38 @@ class FastestTDPCFG:
 
         preds = []
         for b in range(len(terms)):
-            samples, scores = self.sample(
+            samples, types, scores = self.sample(
                 terms[b],
                 H[b],
                 L[b],
                 R[b],
                 roots[b],
-                nt_spans[b],
+                len(nt_spans[b]),
                 src_nt_states,
-                pt_spans[b],
+                len(pt_spans[b]),
                 src_pt_states,
                 use_copy=use_copy,
                 num_samples=num_samples,
                 max_length=max_length,
             )
-            sample_scores = [(sample, score) for sample, score in zip(samples, scores)]
-            sample_scores.sort(key=lambda x: x[1], reverse=True)
+            sample_scores = [
+                (sample, type_, score)
+                for sample, type_, score in zip(samples, types, scores)
+            ]
             preds.append(sample_scores)
         return preds
 
+    @staticmethod
     @jit(nopython=True, parallel=True)
     def sample(
-        self,
         terms: np.ndarray,  # seqlen x pt, in normal space
         rules_head: np.ndarray,  # nt x r, in normal space
         rules_left: np.ndarray,  # (nt+pt) x r, in normal space
         rules_right: np.ndarray,  # (nt+pt) x r, in normal space
         roots: np.ndarray,  # nt, in normal space
-        nt_spans: List[List[str]],
+        nt_num_nodes: int,
         nt_states: int,
-        pt_spans: List[List[str]],
+        pt_num_nodes: int,
         pt_states: int,
         use_copy=True,
         num_samples=1,
@@ -239,17 +252,17 @@ class FastestTDPCFG:
         NT = rules_head.shape[0]
         COPY_NT = nt_states - 1
         COPY_PT = pt_states - 1
-        samples = [None for _ in range(num_samples)]
-        scores = [None for _ in range(num_samples)]
-        nt_num_nodes = len(nt_spans)
-        pt_num_nodes = len(pt_spans)
+        samples = [[0] for _ in range(num_samples)]
+        types = [[0] for _ in range(num_samples)]
+        scores = [0.0 for _ in range(num_samples)]
 
         for i in prange(num_samples):
             actions = 0
             sample = weighted_random(roots)
             score = roots[sample]
             nonterminals: List[int] = [sample]
-            preterminals: List[Union[List[str], int]] = []
+            preterminals: List[int] = []
+            is_copy_pt: List[bool] = []
 
             while (
                 len(nonterminals) > 0
@@ -262,43 +275,50 @@ class FastestTDPCFG:
                         nt_state = s // nt_num_nodes
                         if nt_state == COPY_NT:
                             nt_node = s % nt_num_nodes
-                            preterminals.append(nt_spans[nt_node])
-                    else:
-                        actions += 1
-                        head = weighted_random(rules_head[s])
-                        left = weighted_random(rules_left[:, head])
-                        right = weighted_random(rules_right[:, head])
-                        score += (
-                            rules_head[s, head]
-                            + rules_left[left, head]
-                            + rules_right[right, head]
-                        )
-                        nonterminals.extend([left, right])
+                            preterminals.append(nt_node)
+                            is_copy_pt.append(True)
+                            continue
+                    actions += 1
+                    head = weighted_random(rules_head[s])
+                    left = weighted_random(rules_left[:, head])
+                    right = weighted_random(rules_right[:, head])
+                    score += (
+                        rules_head[s, head]
+                        + rules_left[left, head]
+                        + rules_right[right, head]
+                    )
+                    nonterminals.extend([right, left])
                 else:
                     preterminals.append(s - NT)
+                    is_copy_pt.append(False)
 
-            preterminals = preterminals[::-1]
-            terminals: List[Union[str, int]] = []
-            for s in preterminals:
-                if isinstance(s, list):
-                    terminals.extend(s)
+            terminals: List[int] = []
+            terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
+            for s, flag in zip(preterminals, is_copy_pt):
+                if flag:
+                    terminals.append(s)
+                    terminal_type.append(_COPY_NT)
                 else:
                     src_pt_state = s // pt_num_nodes
                     if use_copy and src_pt_state == COPY_PT:
                         src_node = s % pt_num_nodes
-                        terminals.extend(pt_spans[src_node])
+                        terminals.append(src_node)
+                        terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random(terms[s])
                         score += terms[s, sample]
                         if use_copy and sample == UNK:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
-                            terminals.extend(pt_spans[src_node])
+                            terminals.append(src_node)
+                            terminal_type.append(_COPY_PT)
                         else:
                             terminals.append(sample)
+                            terminal_type.append(_VOCAB)
             samples[i] = terminals
+            types[i] = terminal_type
             scores[i] = score / len(terminals)
-        return samples, scores
+        return samples, types, scores
 
     def get_prediction(self, logZ, span_indicator, lens):
         batch, seq_len = span_indicator.shape[:2]
@@ -340,7 +360,7 @@ class FastestTDPCFG:
             return [(i, j)] + ltree + rtree
 
         p = p.tolist()
-        lens = lens.tolist()
+        # lens = lens.tolist()
         spans = [backtrack(p[i], 0, length) for i, length in enumerate(lens)]
         for spans_inst in spans:
             spans_inst.sort(key=lambda x: x[1] - x[0])
@@ -442,4 +462,37 @@ def stripe(x, n, w, offset=(0, 0), dim=1):
             stride=stride,
             storage_offset=(offset[0] * seq_len + offset[1]) * numel,
         )
+
+
+if __name__ == "__main__":
+    from .pcfg import PCFG
+
+    torch.random.manual_seed(1)
+
+    B, N, T, NT, r = 4, 5, 3, 7, 2
+    device = "cpu"
+    params = {
+        "term": torch.randn(B, N, T, device=device)
+        .log_softmax(-1)
+        .requires_grad_(True),
+        "root": torch.randn(B, NT, device=device).log_softmax(-1).requires_grad_(True),
+        "head": torch.randn(B, NT, r, device=device).softmax(-1).requires_grad_(True),
+        "left": torch.randn(B, NT + T, r, device=device)
+        .softmax(-2)
+        .requires_grad_(True),
+        "right": torch.randn(B, NT + T, r, device=device)
+        .softmax(-2)
+        .requires_grad_(True),
+    }
+    lens = torch.tensor([N, N - 1, N - 1, N - 3], dtype=torch.long, device=device)
+
+    # pcfg = PCFG()
+
+    # print(pcfg(params, lens))
+    # print(pcfg(params, lens, decode=True))
+
+    cfg = FastestTDPCFG()
+
+    logZ = cfg(params, lens)
+    print(logZ)
 

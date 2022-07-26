@@ -11,9 +11,10 @@ from ...datamodules.components.vocab import VocabularyPair
 from ..components.common import MultiResidualLayer
 from .base import TgtParserBase
 from .struct.pcfg import PCFG, TokenType
+from .struct.pcfg_rdp import PCFGRandomizedDP
 
 
-class NeuralQCFGTgtParser(TgtParserBase):
+class NeuralQCFGRDPTgtParser(TgtParserBase):
     def __init__(
         self,
         vocab=100,
@@ -29,14 +30,16 @@ class NeuralQCFGTgtParser(TgtParserBase):
         num_samples=10,
         check_ppl=False,
         check_ppl_batch_size=None,
+        rdp_topk=5,
+        rdp_sample_size=5,
     ):
-        super(NeuralQCFGTgtParser, self).__init__()
-        self.neg_huge = -1e9
-        self.pcfg = PCFG()
+        super(NeuralQCFGRDPTgtParser, self).__init__()
+        self.neg_huge = -1e5
+        self.pcfg_inside = PCFGRandomizedDP(rdp_topk, rdp_sample_size)
+        self.pcfg_decode = PCFG()
         self.vocab = vocab
         self.dim = dim
         self.src_dim = src_dim
-        self.num_layers = num_layers
         self.nt_states = nt_states
         self.pt_states = pt_states
         self.rule_constraint_type = rule_constraint_type
@@ -46,7 +49,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         self.num_samples = num_samples
         self.check_ppl = check_ppl  # If true, there is a length limitation.
         self.check_ppl_batch_size = check_ppl_batch_size
-        
+
         self.src_nt_emb = nn.Parameter(torch.randn(nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
         self.src_pt_emb = nn.Parameter(torch.randn(pt_states, dim))
@@ -67,14 +70,14 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
     def forward(self, x, lengths, node_features, spans, copy_position=None):
         params, *_ = self.get_params(node_features, spans, x, copy_position)
-        out = self.pcfg(params, lengths, False)
+        out = self.pcfg_inside(params, lengths, False)
         return out
 
     def parse(self, x, lengths, node_features, spans, copy_position=None):
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
             node_features, spans, x, copy_position
         )
-        out = self.pcfg(params, lengths, True)
+        out = self.pcfg_inside(params, lengths, True)
 
         # out: list of list, containing spans (i, j, label)
         src_nt_states = self.nt_states * nt_num_nodes
@@ -111,8 +114,8 @@ class NeuralQCFGTgtParser(TgtParserBase):
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
             node_features, spans
         )
-        max_length = 100
-        preds = self.pcfg.sampled_decoding(
+        max_len = 100
+        preds = self.pcfg_decode.sampled_decoding(
             params,
             nt_spans,
             self.nt_states,
@@ -120,7 +123,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
             self.pt_states,
             num_samples=self.num_samples,
             use_copy=self.use_copy,
-            max_length=max_length,
+            max_length=max_len,
         )
 
         # expand copied spans and build copy_position
@@ -138,8 +141,8 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 copy_unks = []
                 for inst in batch:
                     expanded = []
-                    copy_pt = np.zeros((len(src_ids_inst), max_length), dtype=np.bool8)
-                    copy_nt = [[] for _ in range(max_length)]  # no need to prune
+                    copy_pt = np.zeros((len(src_ids_inst), 2 * max_len), dtype=np.bool8)
+                    copy_nt = [[] for _ in range(max_len)]  # no need to prune
                     copy_unk = {}  # record position if copy unk token
                     for v, t in zip(inst[0], inst[1]):
                         if t == TokenType.VOCAB:
@@ -278,7 +281,6 @@ class NeuralQCFGTgtParser(TgtParserBase):
         spans,
         x: Optional[torch.Tensor] = None,
         copy_position=None,  # (pt, nt), nt not implemented
-        ignore_src=False,
     ):
         if copy_position is None:
             copy_position = (None, None)
@@ -324,16 +326,12 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         # e = u + h
         src_nt_node_emb = self.src_nt_node_mlp(nt_node_features)
-        if ignore_src:
-            src_nt_node_emb.zero_()
         src_nt_emb = self.src_nt_emb.expand(batch_size, self.nt_states, self.dim)
         src_nt_emb = src_nt_emb.unsqueeze(2) + src_nt_node_emb.unsqueeze(1)
         src_nt_emb = src_nt_emb.view(batch_size, self.nt_states * nt_num_nodes, -1)
         nt_emb = src_nt_emb
 
         src_pt_node_emb = self.src_pt_node_mlp(pt_node_features)
-        if ignore_src:
-            src_pt_node_emb.zero_()
         src_pt_emb = self.src_pt_emb.expand(batch_size, self.pt_states, self.dim)
         src_pt_emb = src_pt_emb.unsqueeze(2) + src_pt_node_emb.unsqueeze(1)
         src_pt_emb = src_pt_emb.view(batch_size, self.pt_states * pt_num_nodes, -1)

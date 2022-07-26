@@ -10,37 +10,10 @@ from .struct.td_pcfg import FastestTDPCFG
 
 
 class NeuralQCFGDecomp1TgtParser(NeuralQCFGTgtParser):
-    def __init__(
-        self,
-        vocab=100,
-        dim=256,
-        num_layers=3,
-        src_dim=256,
-        nt_states=10,
-        pt_states=1,
-        rule_constraint_type=0,
-        use_copy=False,
-        nt_span_range=[2, 1000],
-        pt_span_range=[1, 1],
-        num_samples=10,
-        check_ppl=False,
-        cpd_rank=32,
-    ):
-        super().__init__(
-            vocab,
-            dim,
-            num_layers,
-            src_dim,
-            nt_states,
-            pt_states,
-            rule_constraint_type,
-            use_copy,
-            nt_span_range,
-            pt_span_range,
-            num_samples,
-            check_ppl,
-        )
-
+    def __init__(self, cpd_rank, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        dim = self.dim
+        self.cpd_rank = cpd_rank
         self.pcfg = FastestTDPCFG()
         self.rank_proj_head = nn.Sequential(
             nn.LeakyReLU(), nn.Linear(dim, cpd_rank), nn.LayerNorm(cpd_rank)

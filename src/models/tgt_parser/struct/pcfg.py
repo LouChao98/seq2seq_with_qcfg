@@ -1,18 +1,17 @@
+from enum import IntEnum
 from typing import List
 
 import numpy as np
 import torch
 from numba import jit, prange
-from torch_struct import SentCFG
 from torch import Tensor
+from torch_struct import SentCFG
 
 from ._utils import weighted_random
 
-from enum import IntEnum
-
-
 # I don't know how to use IntEnum with numba's jit.
 # So I use this workaround.
+# TODO can we move this to _utils but not break numba? not tested.
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
 
 

@@ -1,68 +1,63 @@
+import math
 from typing import Dict, List, Union
 
 import numpy as np
 import torch
 from torch import Tensor
-import math
+from torch.autograd import grad
 
-class PCFG:
+from .td_pcfg import FastestTDPCFG
+from .pcfg import PCFG
+
+class PCFGRandomizedDP(FastestTDPCFG):
+    def __init__(self, topk, sample_size):
+        self.topk = topk
+        self.sample_size = sample_size
+
     def __call__(self, params, lens, decode=False, marginal=False):
         # terms: bsz x seqlen x pt
         # rules: bsz x nt x (nt+pt) x (nt+pt)
         # roots: bsz x nt
 
-        terms, rules, roots = params["term"], params["rule"], params["root"]
-        logZ = self.forward_approx(terms, rules, roots, lens, marginal, 3, 3)
-        if marginal:
-            return dist.marginals
-        elif not decode:
-            return -logZ
-        else:
-            spans_onehot = dist.argmax[-1].cpu().numpy()
-            tags = dist.argmax[0].max(-1)[1].cpu().numpy()
-            # lens = lens.cpu().tolist()
-            all_spans = []
-            for b in range(len(spans_onehot)):
-                spans_inst = [(i, i, int(tags[b][i])) for i in range(lens[b])]
-                for width, left, tag in zip(*spans_onehot[b].nonzero()):
-                    spans_inst.append((left, left + width + 1, tag))
-                all_spans.append(spans_inst)
-            return all_spans
-
-    def forward_approx(
-        self,
-        term: torch.Tensor,
-        rule: torch.Tensor,
-        root: torch.Tensor,
-        lens,
-        marginal,
-        topk,
-        sample_size,
-    ):
-        batch, N, T = term.shape
+        topk, sample_size = self.topk, self.sample_size
+        batch, N, T = params["term"].shape
         N += 1
-        NT = rule.shape[1]
+        NT = params["rule"].shape[1]
         S = NT + T
         RS = topk + sample_size
-        assert RS <= S, "Trival parameters"
+        
+        if RS >= S:
+            return PCFG()(params, lens, decode, marginal)
 
-        s = term.new_full((batch, N, N, RS), -1e9)
-        s_ind = term.new_zeros(batch, N, N, RS, dtype=torch.long)
+        if decode:
+            marginal = True  # MBR decoding
+        if marginal:
+            grad_state = torch.is_grad_enabled()
+            torch.set_grad_enabled(True)
+            # NOTE I assume marginals are only used for decoding.
+            params = {
+                k: v.detach() if isinstance(v, Tensor) else v for k, v in params.items()
+            }
+
+        terms, rules, roots = params["term"], params["rule"], params["root"]
+
+        s = terms.new_full((batch, N, N, RS), -1e9)
+        s_ind = terms.new_zeros(batch, N, N, RS, dtype=torch.long)
 
         NTs = slice(0, NT)
         Ts = slice(NT, S)
-        rXYZ = rule[:, :, NTs, NTs].contiguous()
-        rXyZ = rule[:, :, Ts, NTs].contiguous()
-        rXYz = rule[:, :, NTs, Ts].contiguous()
-        rXyz = rule[:, :, Ts, Ts].contiguous()
+        rXYZ = rules[:, :, NTs, NTs].contiguous()
+        rXyZ = rules[:, :, Ts, NTs].contiguous()
+        rXYz = rules[:, :, NTs, Ts].contiguous()
+        rXyz = rules[:, :, Ts, Ts].contiguous()
 
-        span_indicator = rule.new_zeros(batch, N, N, requires_grad=marginal)
+        span_indicator = rules.new_zeros(batch, N, N, requires_grad=marginal)
 
         for w in range(2, N):
             n = N - w
 
-            Y_term = term[:, :n, :, None]
-            Z_term = term[:, w - 1 :, None, :]
+            Y_term = terms[:, :n, :, None]
+            Z_term = terms[:, w - 1 :, None, :]
             indicator = span_indicator.diagonal(w, 1, 2).unsqueeze(-1)
 
             if w == 2:
@@ -72,12 +67,12 @@ class PCFG:
                 diagonal_copy_(s_ind, ind, w)
                 continue
 
-            x = term.new_zeros(3, batch, n, NT).fill_(-1e9)
+            x = terms.new_zeros(3, batch, n, NT).fill_(-1e9)
 
             Y = stripe(s, n, w - 1, (0, 1)).clone()
-            Y_ind = stripe(s_ind, n, w - 1, (0, 1))
+            Y_ind = stripe(s_ind, n, w - 1, (0, 1)).clone()  # why need clone here
             Z = stripe(s, n, w - 1, (1, w), 0).clone()
-            Z_ind = stripe(s_ind, n, w - 1, (1, w), 0)
+            Z_ind = stripe(s_ind, n, w - 1, (1, w), 0).clone()
 
             if w > 3:
                 x[0].copy_(XYZ(Y, Y_ind, Z, Z_ind, rXYZ))
@@ -91,13 +86,27 @@ class PCFG:
             diagonal_copy_(s, x + indicator, w)
             diagonal_copy_(s_ind, ind, w)
 
-        b_ind = torch.arange(batch, device=root.device)
-        lens = lens.to(device=root.device)
+        b_ind = torch.arange(batch, device=roots.device)
+        if isinstance(lens, list):
+            lens = torch.tensor(lens)
+        lens = lens.to(roots.device)
         root_ind = s_ind[b_ind, 0, lens]
-        root = root.gather(1, root_ind)
-        logZ = (s[b_ind, 0, lens] + root).logsumexp(-1)
+        roots = roots.gather(1, root_ind)
+        logZ = (s[b_ind, 0, lens] + roots).logsumexp(-1)
 
-        return logZ
+        if decode:
+            spans = self.get_prediction(logZ, span_indicator, lens)
+            spans = [[(span[0], span[1] - 1, 0) for span in inst] for inst in spans]
+            return spans
+            # trees = []
+            # for spans_inst, l in zip(spans, lens.tolist()):
+            #     tree = self.convert_to_tree(spans_inst, l)
+            #     trees.append(tree)
+            # return trees, spans
+        if marginal:
+            torch.set_grad_enabled(grad_state)
+            return grad(logZ.sum(), [span_indicator])[0]
+        return -logZ
 
 
 def sample(score: Tensor, topk: int, sample: int):
@@ -105,7 +114,7 @@ def sample(score: Tensor, topk: int, sample: int):
 
     # Get topk for exact marginalization
     b, n, c = score.shape
-    proposal_p = score.softmax(-1)
+    proposal_p = score.detach().softmax(-1)
     _, topk_ind = torch.topk(proposal_p, topk, dim=-1, sorted=False)
     topk_score = score.gather(-1, topk_ind)
 
@@ -117,8 +126,8 @@ def sample(score: Tensor, topk: int, sample: int):
     b_ind = b_ind.unsqueeze(-1).expand(b, n * topk).flatten()
     n_ind = torch.arange(n, device=score.device)
     n_ind = n_ind.view(1, n, 1).expand(b, n, topk).flatten()
-    proposal_p[b_ind, n_ind, topk_ind.flatten()] = 1e-6
-    proposal_p /= proposal_p.sum(-1, keepdim=True) 
+    proposal_p[b_ind, n_ind, topk_ind.flatten()] = 0
+    proposal_p /= (proposal_p.sum(-1, keepdim=True) + 1e-6)
 
     # sample from the proposal.
     sampled_ind = torch.multinomial(proposal_p.view(-1, c), sample).view(b, n, sample)
@@ -126,7 +135,7 @@ def sample(score: Tensor, topk: int, sample: int):
     sample_log_prob = (sample_log_prob + 1e-8).log()
     sampled_score = score.gather(-1, sampled_ind)
 
-    #  debias sampled emission
+    # debias sampled emission
     sampled_ind = sampled_ind.view(b, n, sample)
     sample_log_prob = sample_log_prob.view(b, n, sample)
     correction = sample_log_prob + np.log(sample)
@@ -156,7 +165,7 @@ def XYZ(Y: Tensor, Y_ind: Tensor, Z: Tensor, Z_ind: Tensor, rule: Tensor):
     rule = rule.view(b, 1, 1, NT, NT, NT).expand(-1, n, w, -1, -1, -1)
     rule = rule.gather(4, Y_ind).gather(5, Z_ind)
 
-    b_n_yz = (Y[:, :, 1:-1, :].unsqueeze(-1) + Z[:, :, 1:-1, :].unsqueeze(-2))
+    b_n_yz = Y[:, :, 1:-1, :].unsqueeze(-1) + Z[:, :, 1:-1, :].unsqueeze(-2)
     b_n_x = (b_n_yz.unsqueeze(3) + rule).logsumexp((2, 4, 5))
     return b_n_x
 
@@ -253,14 +262,15 @@ if __name__ == "__main__":
     }
     lens = torch.tensor([N, N - 1, N - 1, N - 3], dtype=torch.long, device=device)
 
-    pcfg = PCFG()
+    pcfg = PCFGRandomizedDP(3, 3)
     out = torch.zeros(B)
     print(pcfg(params, lens))
-    for _ in range(1000):
+    for _ in range(100):
         out += pcfg(params, lens)
-    print(out / 1000)
+    print(out / 100)
 
     from .pcfg import PCFG as PCFG_ref
+
     pcfg = PCFG_ref()
     print(pcfg(params, lens))
-
+    print(pcfg(params, lens, decode=True))

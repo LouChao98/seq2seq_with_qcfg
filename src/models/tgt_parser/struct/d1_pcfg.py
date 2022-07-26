@@ -1,13 +1,22 @@
+from enum import IntEnum
 from typing import Dict, List, Union
 
 import numpy as np
 import torch
+import torch_semiring_einsum as tse
 from numba import jit, prange
 from torch import Tensor
 from torch.autograd import grad
 
 from ._utils import checkpoint, weighted_random
-import torch_semiring_einsum as tse
+
+_VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
+
+
+class TokenType(IntEnum):
+    VOCAB = _VOCAB
+    COPY_NT = _COPY_NT
+    COPY_PT = _COPY_PT
 
 
 class D1PCFG:
@@ -21,6 +30,7 @@ class D1PCFG:
     # ================
     # Time complexity: 6
 
+    # TODO fix nt_spans, and pt_spans. this impl assume nt_spans = pt_spans.
     def __init__(self, tgt_nt_states, tgt_pt_states) -> None:
         self.tgt_nt_states = tgt_nt_states
         self.tgt_pt_states = tgt_pt_states
@@ -39,7 +49,9 @@ class D1PCFG:
             grad_state = torch.is_grad_enabled()
             torch.set_grad_enabled(True)
             # NOTE I assume marginals are only used for decoding.
-            params = {k: v.detach() for k, v in params.items()}
+            params = {
+                k: v.detach() if isinstance(v, Tensor) else v for k, v in params.items()
+            }
         if not isinstance(lens, torch.Tensor):
             lens = torch.tensor(lens)
         assert (
@@ -202,7 +214,7 @@ class D1PCFG:
         R = torch.where(R > threshold, R, zero).softmax(2).cumsum(2)
         SLR = (
             torch.where(SLR > threshold, SLR, zero)
-            .view(*SLR.shape[:2], -1)
+            .flatten(3)
             .softmax(2)
             .cumsum(2)
         )
@@ -223,38 +235,40 @@ class D1PCFG:
 
         preds = []
         for b in range(len(terms)):
-            samples, scores = self.sample(
+            samples, types, scores = self.sample(
                 terms[b],
                 H[b],
                 L[b],
                 R[b],
                 SLR[b],
                 roots[b],
-                nt_spans[b],
+                len(nt_spans[b]),
                 src_nt_states,
-                pt_spans[b],
+                len(pt_spans[b]),
                 src_pt_states,
                 use_copy=use_copy,
                 num_samples=num_samples,
                 max_length=max_length,
             )
-            sample_scores = [(sample, score) for sample, score in zip(samples, scores)]
-            sample_scores.sort(key=lambda x: x[1], reverse=True)
+            sample_scores = [
+                (sample, type_, score)
+                for sample, type_, score in zip(samples, types, scores)
+            ]
             preds.append(sample_scores)
         return preds
 
+    @staticmethod
     @jit(nopython=True, parallel=True)
     def sample(
-        self,
         terms: np.ndarray,  # seqlen x pt, in normal space
         rules_head: np.ndarray,  # nt x r, in normal space
         rules_left: np.ndarray,  # (nt+pt) x r, in normal space
         rules_right: np.ndarray,  # (nt+pt) x r, in normal space
-        rules_src: np.ndarray,  # src x src x src, in normal space
+        rules_src: np.ndarray,  # r x src x src x src, in normal space
         roots: np.ndarray,  # nt, in normal space
-        nt_spans: List[List[str]],
+        nt_num_nodes: int,
         nt_states: int,
-        pt_spans: List[List[str]],
+        pt_num_nodes: int,
         pt_states: int,
         use_copy=True,
         num_samples=1,
@@ -262,21 +276,20 @@ class D1PCFG:
         max_actions=100,
         UNK=1,
     ):
-        # TODO
         NT = rules_head.shape[0]
         COPY_NT = nt_states - 1
         COPY_PT = pt_states - 1
-        samples = [None for _ in range(num_samples)]
-        scores = [None for _ in range(num_samples)]
-        nt_num_nodes = len(nt_spans)
-        pt_num_nodes = len(pt_spans)
+        samples = [[0] for _ in range(num_samples)]
+        types = [[0] for _ in range(num_samples)]
+        scores = [0.0 for _ in range(num_samples)]
 
         for i in prange(num_samples):
             actions = 0
             sample = weighted_random(roots)
             score = roots[sample]
             nonterminals: List[int] = [sample]
-            preterminals: List[Union[List[str], int]] = []
+            preterminals: List[int] = []
+            is_copy_pt: List[bool] = []
 
             while (
                 len(nonterminals) > 0
@@ -285,47 +298,58 @@ class D1PCFG:
             ):
                 s = nonterminals.pop()
                 if s < NT:
+                    nt_state, nt_node = divmod(s, nt_num_nodes)
                     if use_copy:
-                        nt_state = s // nt_num_nodes
                         if nt_state == COPY_NT:
-                            nt_node = s % nt_num_nodes
-                            preterminals.append(nt_spans[nt_node])
-                    else:
-                        actions += 1
-                        head = weighted_random(rules_head[s])
-                        left = weighted_random(rules_left[head])
-                        right = weighted_random(rules_right[head])
-                        score += (
-                            rules_head[s, head]
-                            + rules_left[left, head]
-                            + rules_right[right, head]
-                        )
-                        nonterminals.extend([left, right])
+                            preterminals.append(nt_node)
+                            is_copy_pt.append(True)
+                            continue
+                    actions += 1
+                    r = weighted_random(rules_head[s])
+                    left = weighted_random(rules_left[r])
+                    right = weighted_random(rules_right[r])
+                    jk = weighted_random(rules_src[r, i])
+                    j, k = divmod(jk, nt_num_nodes)
+                    score += (
+                        rules_head[s, r]
+                        + rules_left[r, left]
+                        + rules_right[r, right]
+                        + rules_src[r, i, jk]
+                    )
+                    nonterminals.extend(
+                        [right * nt_num_nodes + k, left * nt_num_nodes + j]
+                    )
                 else:
                     preterminals.append(s - NT)
+                    is_copy_pt.append(False)
 
-            preterminals = preterminals[::-1]
-            terminals: List[Union[str, int]] = []
-            for s in preterminals:
-                if isinstance(s, list):
-                    terminals.extend(s)
+            terminals: List[int] = []
+            terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
+            for s, flag in zip(preterminals, is_copy_pt):
+                if flag:
+                    terminals.append(s)
+                    terminal_type.append(_COPY_NT)
                 else:
                     src_pt_state = s // pt_num_nodes
                     if use_copy and src_pt_state == COPY_PT:
                         src_node = s % pt_num_nodes
-                        terminals.extend(pt_spans[src_node])
+                        terminals.append(src_node)
+                        terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random(terms[s])
                         score += terms[s, sample]
                         if use_copy and sample == UNK:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
-                            terminals.extend(pt_spans[src_node])
+                            terminals.append(src_node)
+                            terminal_type.append(_COPY_PT)
                         else:
                             terminals.append(sample)
+                            terminal_type.append(_VOCAB)
             samples[i] = terminals
+            types[i] = terminal_type
             scores[i] = score / len(terminals)
-        return samples, scores
+        return samples, types, scores
 
     def get_prediction(self, logZ, span_indicator, lens):
         batch, seq_len = span_indicator.shape[:2]
@@ -446,11 +470,12 @@ def stripe(x, n, w, offset=(0, 0), dim=1):
 
 
 if __name__ == "__main__":
+
     from .pcfg import PCFG
 
     torch.autograd.set_detect_anomaly(True)
     torch.random.manual_seed(1)
-    B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r = 4, 5, 3, 3, 3, 3, 2
+    B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r = 2, 4, 3, 3, 3, 3, 2
     NT = TGT_NT * SRC_NT
     T = TGT_PT * SRC_PT
     device = "cuda"
@@ -477,7 +502,7 @@ if __name__ == "__main__":
         .requires_grad_(True),
         "slr": slr,
     }
-    lens = torch.tensor([N, N - 1, N - 1, N - 3], dtype=torch.long, device=device)
+    lens = torch.tensor([N, N - 1], dtype=torch.long, device=device)
 
     pcfg = D1PCFG(TGT_NT, TGT_PT)
 
