@@ -1,5 +1,4 @@
-import copy
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import torch
@@ -7,17 +6,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
-from ...datamodules.components.vocab import VocabularyPair
 from ..components.common import MultiResidualLayer
-from .base import TgtParserBase
-from .struct.pcfg import PCFG, TokenType
-from .struct.d1_pcfg import D1PCFG
 from .neural_qcfg import NeuralQCFGTgtParser
+from .struct.d1_pcfg import D1PCFG
+from .struct.pcfg import PCFG
 
 
 def get_nn(dim, cpd_rank):
     return nn.Sequential(
-        nn.LeakyReLU(), nn.Linear(dim, cpd_rank), nn.LayerNorm(cpd_rank)
+        nn.LeakyReLU(), nn.Linear(dim, cpd_rank) #, nn.LayerNorm(cpd_rank)
     )
 
 
@@ -37,24 +34,17 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         self.r_c_nn = get_nn(dim, cpd_rank)
         self.r_jk_nn = get_nn(dim, cpd_rank)
 
+    def forward(self, x, lengths, node_features, spans, copy_position=None):
+        params, *_ = self.get_params(node_features, spans, x, copy_position)
+        out = self.pcfg(params, lengths, False)
+        return out
+
     def parse(self, x, lengths, node_features, spans, copy_position=None):
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
             node_features, spans, x, copy_position
         )
 
-        head = params["head"].view(len(x), self.nt_states, -1, self.cpd_rank)
-        rule = torch.einsum(
-            "xair,xrb,xrc,xrijk->xaibjck",
-            head.exp(),
-            params["left"].exp(),
-            params["right"].exp(),
-            params["slr"].exp(),
-        )
-        shape = rule.shape
-        rule = rule.reshape(
-            shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
-        ).log()
-        params2 = {"term": params["term"], "rule": rule, "root": params["root"]}
+        params2 = D1PCFG.get_pcfg_rules(params, self.nt_states)
         out = PCFG()(params2, lengths, decode=True)
         # out = self.pcfg(params, lengths, True)
 
@@ -77,7 +67,7 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
                     else:
                         all_span_node.append([-1, -1, label - src_nt_states])
             all_spans_node.append(all_span_node)
-        return out, all_spans_node
+        return out, all_spans_node, pt_spans, nt_spans
 
     def get_params(
         self,
@@ -178,7 +168,6 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         )
 
         # fmt: off
-        # TODO lhs_mask seems to be unnecessary.
         nt_mask = torch.arange(nt_num_nodes, device=i.device).unsqueeze(0) \
             < torch.tensor(nt_num_nodes_list, device=i.device).unsqueeze(1)
         pt_mask = torch.arange(pt_num_nodes, device=i.device).unsqueeze(0) \
@@ -227,8 +216,9 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
             x_expand = x.unsqueeze(2).expand(batch_size, n, pt).unsqueeze(3)
             terms = torch.gather(terms, 3, x_expand).squeeze(3)
             if copy_position[0] is not None:
+                # TODO sanity check: pt_spans begin with (0,0), (1,1) ... (n-1,n-1)
                 terms = terms.view(batch_size, n, self.pt_states, -1)
-                terms[:, :, -1] = (
+                terms[:, :, -1, :copy_position[0].shape[1]] = (
                     0.1 * self.neg_huge * ~copy_position[0].transpose(1, 2)
                 )
                 terms = terms.view(batch_size, n, -1)
@@ -246,23 +236,23 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
                 for batch_idx, (nt_spans_inst, possible_copy) in enumerate(
                     zip(nt_spans, copy_position[1])
                 ):
-                    for l, r, _ in nt_spans_inst:
+                    for i, (l, r, _) in enumerate(nt_spans_inst):
                         w = r - l - 1
                         t = None
-                        if w >= len(possible_copy):
+                        if w >= len(possible_copy) or w <= 0:
                             continue
                         for possible_s, possible_t in possible_copy[w]:
                             if possible_s == l:
                                 t = possible_t
                                 break
                         if t is not None:
-                            copy_nt[w][batch_idx, t, -1, l] = 0
+                            copy_nt[w][batch_idx, t, -1, i] = 0
                 copy_nt_ = []
                 for item in copy_nt:
                     mask = np.zeros_like(item, dtype=np.bool8)
                     mask[:, :, -1] = True
-                    item = torch.from_numpy(item.reshape(item.shape[:2] + (-1,)))
-                    mask = torch.from_numpy(mask.reshape(item.shape))
+                    item = torch.from_numpy(item)
+                    mask = torch.from_numpy(mask)
                     copy_nt_.append((item.to(terms.device), mask.to(terms.device)))
                 copy_nt = copy_nt_
 
@@ -273,6 +263,7 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
             "right": rule_right,
             "head": rule_head,
             "slr": rule_slr,
+            "copy_nt": copy_nt
         }
         return params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes
 

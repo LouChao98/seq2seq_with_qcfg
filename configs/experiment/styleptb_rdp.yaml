@@ -14,7 +14,7 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb"
+name: "styleptb_rdp"
 
 
 # ~17GB
@@ -26,7 +26,7 @@ datamodule:
   max_src_len: 20
 
 model:
-  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb/last.ckpt
+  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb_rdp/2022-07-31_05-11-27/checkpoints/last.ckpt
   decoder:
     num_samples: 10
     check_ppl_batch_size: 1  
@@ -39,7 +39,8 @@ trainer:
 
 logger:
   wandb:
-    tags: ["rdp" ]
-
+    name: "styleptb"
+    tags: ["rdp"]
+    offline: true
 
 # train: false

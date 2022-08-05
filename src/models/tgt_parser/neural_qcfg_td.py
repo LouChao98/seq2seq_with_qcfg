@@ -128,6 +128,7 @@ class NeuralQCFGDecomp1TgtParser(NeuralQCFGTgtParser):
             x_expand = x.unsqueeze(2).expand(batch_size, n, pt).unsqueeze(3)
             terms = torch.gather(terms, 3, x_expand).squeeze(3)
             if self.use_copy:
+                raise NotImplementedError
                 copy_pt = (
                     torch.zeros(batch_size, n, pt).fill_(self.neg_huge * 0.1).to(device)
                 )

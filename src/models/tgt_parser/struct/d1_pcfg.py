@@ -60,6 +60,7 @@ class D1PCFG:
 
         terms = params["term"]  # (batch, seq_len, PT)
         root = params["root"]  # (batch, NT)
+        copy_nts = params.get('copy_nt')
 
         batch, N, PT = terms.shape
         N += 1
@@ -94,19 +95,6 @@ class D1PCFG:
             SR = params["sr"]  # (batch, r, SRC_NT, SRC_NT), R, i -> k
             SLR = tse.log_einsum(self.eq_slr, SL, SR, block_size=self.block_size)
 
-        def merge_without_indicator(Y, Z):
-            qnkrj = tse.log_einsum(self.eq_qnkrj, Y, Z, block_size=self.block_size)
-            qnri = tse.log_einsum(self.eq_qnri, qnkrj, SLR, block_size=self.block_size)
-            qnai = tse.log_einsum(self.eq_qnai, qnri, H, block_size=self.block_size)
-            return qnai
-
-        def merge_with_indicator(Y, Z, indicator):
-            qnkrj = tse.log_einsum(self.eq_qnkrj, Y, Z, block_size=self.block_size)
-            qnri = tse.log_einsum(self.eq_qnri, qnkrj, SLR, block_size=self.block_size)
-            qnai = tse.log_einsum(self.eq_qnai, qnri, H, block_size=self.block_size)
-            qnai = qnai + indicator
-            return qnai
-
         # ===== End =====
 
         left_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
@@ -135,18 +123,20 @@ class D1PCFG:
 
             # n: the number of spans of width w.
             n = N - w
-            y = stripe(left_s, n, w - 1, (0, 1))
-            z = stripe(right_s, n, w - 1, (1, w), 0)
+            y = stripe(left_s, n, w - 1, (0, 1)).clone()
+            z = stripe(right_s, n, w - 1, (1, w), 0).clone()
+             
+            qnkrj = tse.log_einsum(self.eq_qnkrj, y, z, block_size=self.block_size)
+            qnri = tse.log_einsum(self.eq_qnri, qnkrj, SLR, block_size=self.block_size)
+            x = tse.log_einsum(self.eq_qnai, qnri, H, block_size=self.block_size)
+
+            if copy_nts is not None:
+                value, mask = copy_nts[step]
+                x = torch.where(mask, value, x)
+
             if marginal:
-                x = merge_with_indicator(
-                    y.clone(),
-                    z.clone(),
-                    span_indicator_running.diagonal(w, 1, 2)
-                    .unsqueeze(-1)
-                    .unsqueeze(-1),
-                )
-            else:
-                x = merge_without_indicator(y.clone(), z.clone())
+                indicator = span_indicator_running.diagonal(w, 1, 2)[..., None, None]
+                x += indicator
 
             unfinished = n_at_position[step + 1]
             current_bsz = n_at_position[step]
@@ -212,12 +202,7 @@ class D1PCFG:
         H = torch.where(H > threshold, H, zero).softmax(2).cumsum(2)
         L = torch.where(L > threshold, L, zero).softmax(2).cumsum(2)
         R = torch.where(R > threshold, R, zero).softmax(2).cumsum(2)
-        SLR = (
-            torch.where(SLR > threshold, SLR, zero)
-            .flatten(3)
-            .softmax(2)
-            .cumsum(2)
-        )
+        SLR = torch.where(SLR > threshold, SLR, zero).flatten(3).softmax(2).cumsum(2)
 
         terms[..., -1] += 1  # avoid out of bound
         roots[..., -1] += 1
@@ -308,13 +293,13 @@ class D1PCFG:
                     r = weighted_random(rules_head[s])
                     left = weighted_random(rules_left[r])
                     right = weighted_random(rules_right[r])
-                    jk = weighted_random(rules_src[r, i])
+                    jk = weighted_random(rules_src[r, nt_node])
                     j, k = divmod(jk, nt_num_nodes)
                     score += (
                         rules_head[s, r]
                         + rules_left[r, left]
                         + rules_right[r, right]
-                        + rules_src[r, i, jk]
+                        + rules_src[r, nt_node, jk]
                     )
                     nonterminals.extend(
                         [right * nt_num_nodes + k, left * nt_num_nodes + j]
@@ -405,6 +390,24 @@ class D1PCFG:
                 span = "({} {})".format(tree[l], tree[r])
                 tree[r] = tree[l] = span
         return tree[0]
+
+    @staticmethod
+    def get_pcfg_rules(params, nt_states):
+        head = params["head"]
+        b, _, r = head.shape
+        head = params["head"].view(b, nt_states, -1, r)
+        rule = torch.einsum(
+            "xair,xrb,xrc,xrijk->xaibjck",
+            head.exp(),
+            params["left"].exp(),
+            params["right"].exp(),
+            params["slr"].exp(),
+        )
+        shape = rule.shape
+        rule = rule.reshape(
+            shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+        ).log()
+        return {"term": params["term"], "rule": rule, "root": params["root"]}
 
 
 def diagonal_copy_(x, y, w):

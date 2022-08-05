@@ -112,7 +112,7 @@ class PCFG:
         return preds
 
     @staticmethod
-    @jit(nopython=True)
+    # @jit(nopython=True)
     def sample(
         terms: np.ndarray,  # pt x t, in normal space
         rules: np.ndarray,  # nt x (nt+pt) x (nt+pt), in normal space

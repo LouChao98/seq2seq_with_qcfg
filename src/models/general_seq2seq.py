@@ -137,7 +137,7 @@ class GeneralSeq2SeqModule(ModelBase):
             batch["tgt_lens"],
             node_features,
             node_spans,
-            batch["copy_position"],
+            (batch.get("copy_token"), batch.get("copy_phrase")),
         )
 
         with torch.no_grad():
@@ -153,7 +153,7 @@ class GeneralSeq2SeqModule(ModelBase):
                 batch["tgt_lens"],
                 node_features_argmax,
                 node_spans_argmax,
-                batch["copy_position"],
+                (batch.get("copy_token"), batch.get("copy_phrase")),
             )
             neg_reward = (tgt_nll - tgt_nll_argmax).detach()
 
@@ -180,29 +180,44 @@ class GeneralSeq2SeqModule(ModelBase):
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
-        tgt_spans, aligned_spans = self.decoder.parse(
+        tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(
             batch["tgt_ids"],
             batch["tgt_lens"],
             node_features,
             node_spans,
-            batch["copy_position"],
+            (batch.get("copy_token"), batch.get("copy_phrase")),
         )
         tgt_annotated = []
         for snt, tgt_spans_inst in zip(batch["tgt"], tgt_spans):
             tree = annotate_snt_with_brackets(snt, tgt_spans_inst)
             tgt_annotated.append(tree)
+
+        num_pt_spans = max(len(item) for item in pt_spans)
+        num_nt_spans = max(len(item) for item in nt_spans)
+
         alignments = []
-        for tgt_spans_inst, tgt_snt, aligned_spans_inst, src_snt in zip(
+        for (tgt_spans_inst, tgt_snt, aligned_spans_inst, src_snt,) in zip(
             tgt_spans, batch["tgt"], aligned_spans, batch["src"]
         ):
             alignments_inst = []
             for tgt_span, src_span in zip(tgt_spans_inst, aligned_spans_inst):
+                is_copy = False
+                if getattr(self.decoder, "use_copy"):
+                    if tgt_span[0] == tgt_span[1]:
+                        is_copy = (
+                            tgt_span[2] // num_pt_spans == self.decoder.pt_states - 1
+                        )
+                    else:
+                        is_copy = (
+                            tgt_span[2] // num_nt_spans == self.decoder.nt_states - 1
+                        )
                 alignments_inst.append(
                     (
                         " ".join(src_snt[src_span[0] : src_span[1] + 1])
                         + f" ({src_span[0]}, {src_span[1]+1})",
                         " ".join(tgt_snt[tgt_span[0] : tgt_span[1] + 1])
                         + f" ({tgt_span[0]}, {tgt_span[1]+1})",
+                        "COPY" if is_copy else "",
                     )
                 )
             alignments.append(alignments_inst)
@@ -236,7 +251,7 @@ class GeneralSeq2SeqModule(ModelBase):
         #     batch["tgt_lens"],
         #     node_features,
         #     node_spans,
-        #     batch['copy_position'],
+        #     (batch.get('copy_token'), batch.get('copy_phrase')),
         # )
         # tgt_ppl = np.exp(tgt_nll.detach().cpu().numpy() / batch["tgt_lens"])
 
@@ -262,7 +277,8 @@ class GeneralSeq2SeqModule(ModelBase):
                 self.print("Src:", src)
                 self.print("Tgt:", tgt)
                 self.print(
-                    "Alg:\n" + "\n".join(map(lambda x: f"  {x[0]}, {x[1]}", alg))
+                    "Alg:\n"
+                    + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
                 )
         return {"loss": loss}
 
@@ -317,7 +333,8 @@ class GeneralSeq2SeqModule(ModelBase):
                 self.print("Src:", src)
                 self.print("Tgt:", tgt)
                 self.print(
-                    "Alg:\n" + "\n".join(map(lambda x: f"  {x[0]}, {x[1]}", alg))
+                    "Alg:\n"
+                    + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
                 )
 
         return {"preds": preds, "targets": targets, "id": batch["id"]}

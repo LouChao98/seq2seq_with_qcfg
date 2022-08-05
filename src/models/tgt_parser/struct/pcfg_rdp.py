@@ -8,25 +8,28 @@ from torch.autograd import grad
 
 from .td_pcfg import FastestTDPCFG
 from .pcfg import PCFG
+from ._utils import checkpoint
+
 
 class PCFGRandomizedDP(FastestTDPCFG):
-    def __init__(self, topk, sample_size):
+    def __init__(self, topk, sample_size, smooth):
         self.topk = topk
         self.sample_size = sample_size
+        self.smooth = smooth
 
     def __call__(self, params, lens, decode=False, marginal=False):
         # terms: bsz x seqlen x pt
         # rules: bsz x nt x (nt+pt) x (nt+pt)
         # roots: bsz x nt
 
-        topk, sample_size = self.topk, self.sample_size
+        topk, sample_size, smooth = self.topk, self.sample_size, self.smooth
         batch, N, T = params["term"].shape
         N += 1
         NT = params["rule"].shape[1]
         S = NT + T
         RS = topk + sample_size
-        
-        if RS >= S:
+
+        if RS >= NT:
             return PCFG()(params, lens, decode, marginal)
 
         if decode:
@@ -40,6 +43,7 @@ class PCFGRandomizedDP(FastestTDPCFG):
             }
 
         terms, rules, roots = params["term"], params["rule"], params["root"]
+        copy_nts = params.get("copy_nt")
 
         s = terms.new_full((batch, N, N, RS), -1e9)
         s_ind = terms.new_zeros(batch, N, N, RS, dtype=torch.long)
@@ -53,7 +57,7 @@ class PCFGRandomizedDP(FastestTDPCFG):
 
         span_indicator = rules.new_zeros(batch, N, N, requires_grad=marginal)
 
-        for w in range(2, N):
+        for step, w in enumerate(range(2, N)):
             n = N - w
 
             Y_term = terms[:, :n, :, None]
@@ -62,7 +66,7 @@ class PCFGRandomizedDP(FastestTDPCFG):
 
             if w == 2:
                 score = Xyz(Y_term, Z_term, rXyz)
-                score, ind = sample(score, topk, sample_size)
+                score, ind = sample(score, topk, sample_size, smooth)
                 diagonal_copy_(s, score + indicator, w)
                 diagonal_copy_(s_ind, ind, w)
                 continue
@@ -81,7 +85,13 @@ class PCFGRandomizedDP(FastestTDPCFG):
             x[2].copy_(XyZ(Y_term, Z, Z_ind, rXyZ))
             x = x.logsumexp(0)
 
-            x, ind = sample(x, topk, sample_size)
+            x, ind = sample(x, topk, sample_size, smooth)
+
+            if copy_nts is not None:
+                value, mask = copy_nts[step]
+                value = value.gather(2, ind)
+                mask = mask.gather(2, ind)
+                x = torch.where(mask, value, x)
 
             diagonal_copy_(s, x + indicator, w)
             diagonal_copy_(s_ind, ind, w)
@@ -109,7 +119,7 @@ class PCFGRandomizedDP(FastestTDPCFG):
         return -logZ
 
 
-def sample(score: Tensor, topk: int, sample: int):
+def sample(score: Tensor, topk: int, sample: int, smooth: float):
     # I use normalized scores p(l|i,j) as the proposal distribution
 
     # Get topk for exact marginalization
@@ -126,8 +136,9 @@ def sample(score: Tensor, topk: int, sample: int):
     b_ind = b_ind.unsqueeze(-1).expand(b, n * topk).flatten()
     n_ind = torch.arange(n, device=score.device)
     n_ind = n_ind.view(1, n, 1).expand(b, n, topk).flatten()
+    proposal_p += smooth
     proposal_p[b_ind, n_ind, topk_ind.flatten()] = 0
-    proposal_p /= (proposal_p.sum(-1, keepdim=True) + 1e-6)
+    proposal_p /= proposal_p.sum(-1, keepdim=True) + 1e-6
 
     # sample from the proposal.
     sampled_ind = torch.multinomial(proposal_p.view(-1, c), sample).view(b, n, sample)
@@ -147,7 +158,7 @@ def sample(score: Tensor, topk: int, sample: int):
     return combined_score, combined_ind
 
 
-# @checkpoint
+@checkpoint
 def Xyz(y: Tensor, z: Tensor, rule: Tensor):
     b, n, t, _ = y.shape
     b_n_yz = (y + z).view(*y.shape[:2], -1)
@@ -160,17 +171,23 @@ def XYZ(Y: Tensor, Y_ind: Tensor, Z: Tensor, Z_ind: Tensor, rule: Tensor):
     b, n, w, nt = Y.shape
     w -= 2
     NT = rule.shape[1]
-    Y_ind = Y_ind[:, :, 1:-1, None, :, None].expand(-1, -1, -1, NT, -1, NT)
-    Z_ind = Z_ind[:, :, 1:-1, None, None, :].expand(-1, -1, -1, NT, nt, -1)
-    rule = rule.view(b, 1, 1, NT, NT, NT).expand(-1, n, w, -1, -1, -1)
-    rule = rule.gather(4, Y_ind).gather(5, Z_ind)
+
+    ind = Y_ind[:, :, 1:-1, :, None] * NT + Z_ind[:, :, 1:-1, None, :]
+    ind = ind.flatten(3)[:, :, :, None].expand(-1, -1, -1, NT, -1)
+    rule = rule.view(b, 1, 1, NT, -1).expand(-1, n, w, -1, -1)
+    rule = rule.gather(4, ind).view(b, n, w, NT, nt, nt)
+
+    # Y_ind = Y_ind[:, :, 1:-1, None, :, None].expand(-1, -1, -1, NT, -1, NT)
+    # Z_ind = Z_ind[:, :, 1:-1, None, None, :].expand(-1, -1, -1, NT, nt, -1)
+    # rule1 = rule.view(b, 1, 1, NT, NT, NT).expand(-1, n, w, -1, -1, -1)
+    # rule1 = rule1.gather(4, Y_ind).gather(5, Z_ind)
 
     b_n_yz = Y[:, :, 1:-1, :].unsqueeze(-1) + Z[:, :, 1:-1, :].unsqueeze(-2)
     b_n_x = (b_n_yz.unsqueeze(3) + rule).logsumexp((2, 4, 5))
     return b_n_x
 
 
-# @checkpoint
+@checkpoint
 def XYz(Y: Tensor, Y_ind: Tensor, z: Tensor, rule: Tensor):
     b, n, _, nt = Y.shape
     t = z.shape[-1]
@@ -187,7 +204,7 @@ def XYz(Y: Tensor, Y_ind: Tensor, z: Tensor, rule: Tensor):
     return b_n_x
 
 
-# @checkpoint
+@checkpoint
 def XyZ(y: Tensor, Z: Tensor, Z_ind: Tensor, rule: Tensor):
     b, n, _, nt = Z.shape
     t = y.shape[-2]

@@ -14,7 +14,7 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb"
+name: "styleptb_d1"
 
 
 # ~17GB
@@ -24,23 +24,24 @@ datamodule:
   # batch_size: 12
   # eval_batch_size: 4
   max_src_len: 20
-  copy_mode: 'none'
+  # copy_mode: 'none'
 
 model:
-  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb/2022-07-25_16-51-45/checkpoints/last.ckpt
+  load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb_d1/2022-07-31_02-36-47/checkpoints/last.ckpt
   decoder:
-    num_samples: 10
+    num_samples: 1000
     check_ppl_batch_size: 1
-    use_copy: false
+
 trainer:
   max_epochs: 15
   accumulate_grad_batches: 4
   gradient_clip_val: 3
-  # detect_anomaly: true
 
-# logger:
-#   wandb:
-#     tags: ["d1" ]
+logger:
+  wandb:
+    name: "styleptb"
+    tags: ["d1"]
+    offline: true
 
 
-# train: false
+train: false

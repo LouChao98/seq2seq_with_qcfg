@@ -32,8 +32,8 @@ decoder:
   use_copy: true
   num_samples: 8
   check_ppl: true
-  rdp_topk: 10
-  rdp_sample_size: 10
+  rdp_topk: 6
+  rdp_sample_size: 6
 
 test_metric:
   _target_: src.utils.metric.MultiMetric

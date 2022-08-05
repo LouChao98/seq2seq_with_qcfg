@@ -60,6 +60,7 @@ class TSVDataModule(_DataModule):
 
         data_train = self.process_all_copy(data_train)
         data_val = self.process_all_copy(data_val)
+        data_test = self.process_all_copy(data_test)
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
         self.vocab_pair = VocabularyPair(self.src_vocab, self.tgt_vocab)
@@ -242,12 +243,12 @@ class TSVDataModule(_DataModule):
             for i, inst in enumerate(data):
                 inst = torch.from_numpy(inst["copy_token"])
                 copy_token[i, : inst.shape[0], : inst.shape[1]] = inst
+            batched["copy_token"] = copy_token
 
         copy_phrase = None
         if "copy_phrase" in data[0]:
             copy_phrase = [item["copy_phrase"] for item in data]
-
-        batched["copy_position"] = (copy_token, copy_phrase)
+            batched["copy_phrase"] = copy_phrase
 
         if self.use_transformer_tokenizer:
             transformer_inp = self.transformer_tokenizer(

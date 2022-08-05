@@ -46,7 +46,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         self.num_samples = num_samples
         self.check_ppl = check_ppl  # If true, there is a length limitation.
         self.check_ppl_batch_size = check_ppl_batch_size
-        
+
         self.src_nt_emb = nn.Parameter(torch.randn(nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
         self.src_pt_emb = nn.Parameter(torch.randn(pt_states, dim))
@@ -95,7 +95,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
                     else:
                         all_span_node.append([-1, -1, label - src_nt_states])
             all_spans_node.append(all_span_node)
-        return out, all_spans_node
+        return out, all_spans_node, pt_spans, nt_spans
 
     def generate(
         self,
@@ -111,7 +111,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
             node_features, spans
         )
-        max_length = 100
+        max_len = 100
         preds = self.pcfg.sampled_decoding(
             params,
             nt_spans,
@@ -120,7 +120,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
             self.pt_states,
             num_samples=self.num_samples,
             use_copy=self.use_copy,
-            max_length=max_length,
+            max_length=max_len,
         )
 
         # expand copied spans and build copy_position
@@ -132,62 +132,74 @@ class NeuralQCFGTgtParser(TgtParserBase):
             preds, pt_spans, nt_spans, src_ids
         ):
             if self.use_copy:
-                expanded_batch = []
-                copy_pts = []
-                copy_nts = []
-                copy_unks = []
-                for inst in batch:
-                    expanded = []
-                    copy_pt = np.zeros((len(src_ids_inst), max_length), dtype=np.bool8)
-                    copy_nt = [[] for _ in range(max_length)]  # no need to prune
-                    copy_unk = {}  # record position if copy unk token
-                    for v, t in zip(inst[0], inst[1]):
-                        if t == TokenType.VOCAB:
-                            expanded.append(v)
-                        elif t == TokenType.COPY_PT:
-                            span = pt_spans_inst[v]
-                            tokens = vocab_pair.src2tgt(
-                                src_ids_inst[span[0] : span[1] + 1]
-                            )
-                            copy_pt[span[0], len(expanded)] = True
-                            if tokens[0] == vocab_pair.tgt.unk_token_id:
-                                copy_unk[len(expanded)] = span[0]
-                            expanded.extend(tokens)
-                        elif t == TokenType.COPY_NT:
-                            span = nt_spans_inst[v]
-                            tokens = vocab_pair.src2tgt(
-                                src_ids_inst[span[0] : span[1] + 1]
-                            )
-                            copy_nt[span[1] - span[0] - 1].append(
-                                (span[0], len(expanded))
-                            )  # copy_nt starts from w=2
-                            for i, token in enumerate(tokens):
-                                if token == vocab_pair.tgt.unk_token_id:
-                                    copy_unk[len(expanded) + i] = span[0] + i
-                            expanded.extend(tokens)
-                    expanded_batch.append((expanded, inst[2]))
-                    copy_pts.append(copy_pt)
-                    copy_nts.append(copy_nt)
-                    copy_unks.append(copy_unk)
-                copy_pts = torch.from_numpy(np.stack(copy_pts, axis=0)).to(device)
-                copy_positions.append((copy_pts, copy_nts, copy_unks))
-                preds_.append(expanded_batch)
+                try:
+                    expanded_batch = []
+                    copy_pts = []
+                    copy_nts = []
+                    copy_unks = []
+                    for inst in batch:
+                        expanded = []
+                        copy_pt = np.zeros((len(src_ids_inst), max_len), dtype=np.bool8)
+                        copy_nt = [[] for _ in range(max_len)]  # no need to prune
+                        copy_unk = {}  # record position if copy unk token
+                        for v, t in zip(inst[0], inst[1]):
+                            if t == TokenType.VOCAB:
+                                expanded.append(v)
+                            elif t == TokenType.COPY_PT:
+                                span = pt_spans_inst[v]
+                                tokens = vocab_pair.src2tgt(
+                                    src_ids_inst[span[0] : span[1] + 1]
+                                )
+                                copy_pt[span[0], len(expanded)] = True
+                                if tokens[0] == vocab_pair.tgt.unk_token_id:
+                                    copy_unk[len(expanded)] = span[0]
+                                expanded.extend(tokens)
+                            elif t == TokenType.COPY_NT:
+                                span = nt_spans_inst[v]
+                                tokens = vocab_pair.src2tgt(
+                                    src_ids_inst[span[0] : span[1] + 1]
+                                )
+                                copy_nt[span[1] - span[0] - 1].append(
+                                    (span[0], len(expanded))
+                                )  # copy_nt starts from w=2
+                                for i, token in enumerate(tokens):
+                                    if token == vocab_pair.tgt.unk_token_id:
+                                        copy_unk[len(expanded) + i] = span[0] + i
+                                expanded.extend(tokens)
+                        expanded_batch.append((expanded, inst[2]))
+                        copy_pts.append(copy_pt)
+                        copy_nts.append(copy_nt)
+                        copy_unks.append(copy_unk)
+                    copy_pts = torch.from_numpy(np.stack(copy_pts, axis=0)).to(device)
+                    copy_positions.append((copy_pts, copy_nts, copy_unks))
+                    preds_.append(expanded_batch)
+                except IndexError:
+                    continue
             else:
                 expanded_batch = []
                 for inst in batch:
                     expanded_batch.append((inst[0], inst[2]))
                 copy_positions.append((None, None, None))
                 preds_.append(expanded_batch)
+
+        preds = []
+        for preds_one_inp in preds_: 
+            cleaned = []
+            for pred in preds_one_inp:
+                if max(pred[0]) < len(vocab_pair.tgt):
+                    cleaned.append(pred)
+            preds.append(batch)
+
         preds = preds_
 
         if self.check_ppl:
             padid = vocab_pair.tgt.pad_token_id or 0
             new_preds = []
-            for i, (preds_inst, (copy_pt, copy_nt, copy_unk)) in enumerate(
+            for i, (preds_one_inp, (copy_pt, copy_nt, copy_unk)) in enumerate(
                 zip(preds, copy_positions)
             ):
-                to_keep = [0 < len(inst[0]) < 60 for inst in preds_inst]
-                _ids = [inst[0] for inst, flag in zip(preds_inst, to_keep) if flag]
+                to_keep = [0 < len(inst[0]) < 60 for inst in preds_one_inp]
+                _ids = [inst[0] for inst, flag in zip(preds_one_inp, to_keep) if flag]
 
                 if len(_ids) == 0:
                     new_preds.append(([0, 0], 100))
@@ -287,6 +299,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         # seperate nt and pt features according to span width
         # TODO sanity check: the root node must be the last element of nt_spans.
+        #      because of root rules.
         # NOTE TreeLSTM guarantees this.
         pt_node_features, nt_node_features = [], []
         pt_spans, nt_spans = [], []
@@ -366,7 +379,6 @@ class NeuralQCFGTgtParser(TgtParserBase):
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
 
         # fmt: off
-        # TODO lhs_mask seems to be unnecessary.
         nt_mask = torch.arange(nt_num_nodes, device=rules.device).unsqueeze(0) \
             < torch.tensor(nt_num_nodes_list, device=rules.device).unsqueeze(1)
         pt_mask = torch.arange(pt_num_nodes, device=rules.device).unsqueeze(0) \
@@ -424,7 +436,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 for batch_idx, (nt_spans_inst, possible_copy) in enumerate(
                     zip(nt_spans, copy_position[1])
                 ):
-                    for l, r, _ in nt_spans_inst:
+                    for i, (l, r, _) in enumerate(nt_spans_inst):
                         w = r - l - 1
                         t = None
                         if w >= len(possible_copy):
@@ -434,8 +446,9 @@ class NeuralQCFGTgtParser(TgtParserBase):
                                 t = possible_t
                                 break
                         if t is not None:
-                            copy_nt[w][batch_idx, t, -1, l] = 0
+                            copy_nt[w][batch_idx, t, -1, i] = 0
                 copy_nt_ = []
+                # TODO mask can use expand
                 for item in copy_nt:
                     mask = np.zeros_like(item, dtype=np.bool8)
                     mask[:, :, -1] = True
@@ -469,10 +482,10 @@ class NeuralQCFGTgtParser(TgtParserBase):
             for i, parent_span in enumerate(nt_span):
                 for j, child_span in enumerate(nt_span):
                     if not (is_parent(parent_span, child_span)):
-                        nt_node_mask[b, i, j].fill_(0.0)
+                        nt_node_mask[b, i, j] = False
                 for j, child_span in enumerate(pt_span):
                     if not (is_parent(parent_span, child_span)):
-                        pt_node_mask[b, i, j].fill_(0.0)
+                        pt_node_mask[b, i, j] = False
 
         nt_node_mask = (
             nt_node_mask[:, None, :, None, :]

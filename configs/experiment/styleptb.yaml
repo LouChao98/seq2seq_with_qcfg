@@ -26,18 +26,19 @@ datamodule:
   max_src_len: 20
 
 model:
-  load_from_checkpoint: '/home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb/2022-07-21_12-07-10/checkpoints/last.ckpt'
+  load_from_checkpoint: '/home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb/2022-07-31_01-17-13/checkpoints/last.ckpt'
   decoder:
-    num_samples: 1000
+    num_samples: 10
     check_ppl_batch_size: 1
 
 trainer:
   max_epochs: 15
   accumulate_grad_batches: 4
   gradient_clip_val: 3
-# logger:
-#   wandb:
-#     tags: ["mnist", "${name}"]
 
+logger:
+  wandb:
+    tags: ["baseline"]
+    offline: true
 
 train: false
