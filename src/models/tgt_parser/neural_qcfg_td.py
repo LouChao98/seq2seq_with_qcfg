@@ -34,39 +34,16 @@ class NeuralQCFGDecomp1TgtParser(NeuralQCFGTgtParser):
     ):
         batch_size = len(spans)
 
-        # seperate nt and pt features according to span width
-        pt_node_features, nt_node_features = [], []
-        pt_spans, nt_spans = [], []
-        for spans_inst, node_features_inst in zip(spans, node_features):
-            pt_node_feature = []
-            nt_node_feature = []
-            pt_span = []
-            nt_span = []
-            for i, s in enumerate(spans_inst):
-                s_len = s[1] - s[0] + 1
-                if s_len >= self.nt_span_range[0] and s_len <= self.nt_span_range[1]:
-                    nt_node_feature.append(node_features_inst[i])
-                    nt_span.append(s)
-                if s_len >= self.pt_span_range[0] and s_len <= self.pt_span_range[1]:
-                    pt_node_feature.append(node_features_inst[i])
-                    pt_span.append(s)
-            if len(nt_node_feature) == 0:
-                nt_node_feature.append(node_features_inst[-1])
-                nt_span.append(spans_inst[-1])
-            pt_node_features.append(torch.stack(pt_node_feature))
-            nt_node_features.append(torch.stack(nt_node_feature))
-            pt_spans.append(pt_span)
-            nt_spans.append(nt_span)
-        nt_num_nodes_list = [len(inst) for inst in nt_node_features]
-        pt_num_nodes_list = [len(inst) for inst in pt_node_features]
-        nt_node_features = pad_sequence(
-            nt_node_features, batch_first=True, padding_value=0.0
-        )
-        pt_node_features = pad_sequence(
-            pt_node_features, batch_first=True, padding_value=0.0
-        )
-        pt_num_nodes = pt_node_features.size(1)
-        nt_num_nodes = nt_node_features.size(1)
+        (
+            nt_spans,
+            nt_num_nodes_list,
+            nt_num_nodes,
+            nt_node_features,
+            pt_spans,
+            pt_num_nodes_list,
+            pt_num_nodes,
+            pt_node_features,
+        ) = self.build_src_features(spans, node_features)
         device = nt_node_features.device
 
         # e = u + h

@@ -22,8 +22,8 @@ class NeuralQCFGRDPTgtParser(NeuralQCFGTgtParser):
         return super().forward(x, lengths, node_features, spans, copy_position)
 
     def parse(self, x, lengths, node_features, spans, copy_position=None):
-        # self.pcfg = self.pcfg_decode
-        self.pcfg = self.pcfg_inside
+        self.pcfg = self.pcfg_decode
+        # self.pcfg = self.pcfg_inside
         return super().parse(x, lengths, node_features, spans, copy_position)
 
     def generate(

@@ -107,7 +107,8 @@ class PCFG:
             sample_scores = [
                 (sample, type_, score)
                 for sample, type_, score in zip(samples, types, scores)
-            ]
+                if len(sample) > 0
+            ]  # len=0 when max_actions is reached but no PT rules applied
             preds.append(sample_scores)
         return preds
 

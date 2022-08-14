@@ -46,3 +46,4 @@ torch-geometric
 fairscale
 opt-einsum
 numba
+torch_semiring_einsum

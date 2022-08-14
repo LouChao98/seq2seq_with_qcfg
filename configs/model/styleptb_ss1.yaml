@@ -1,4 +1,4 @@
-_target_: src.models.general_seq2seq.GeneralSeq2SeqModule
+_target_: src.models.gseq2seq_src_span_v1.GSeq2seqSrcSpanV1
 _recursive_: false
 
 embedding:
@@ -23,7 +23,7 @@ tree_encoder:
   _target_: src.models.tree_encoder.treelstm.BinaryTreeLSTM
 
 decoder:
-  _target_: src.models.tgt_parser.neural_qcfg_d1.NeuralQCFGD1TgtParser
+  _target_: src.models.tgt_parser.neural_qcfg.NeuralQCFGTgtParser
   num_layers: 3
   dim: 512
   nt_states: 8 # src_nt_states in origin impl
@@ -32,9 +32,6 @@ decoder:
   use_copy: true
   num_samples: 8
   check_ppl: true
-  cpd_rank: 256
-  nt_span_range: [1, 1000]
-  pt_span_range: [1, 1000]
 
 test_metric:
   _target_: src.utils.metric.MultiMetric
@@ -56,7 +53,7 @@ test_metric:
     compute_on_step: false
 
 
-param_initializer: "kaiming_uniform"
+param_initializer: "xavier_uniform"
 track_param_norm: false
 
 optimizer:

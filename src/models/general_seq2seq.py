@@ -20,6 +20,7 @@ from src.utils.fn import (
 )
 from src.utils.metric import PerplexityMetric
 
+
 log = logging.getLogger(__file__)
 
 
@@ -342,18 +343,6 @@ class GeneralSeq2SeqModule(ModelBase):
     def test_epoch_end(self, outputs) -> None:
         acc = self.test_metric.compute()
         self.log_dict({"test/" + k: v for k, v in acc.items()})
-        self.print(acc)
-
-        if self.global_rank == 0:
-            # TODO check whether pl gather outputs for me
-            preds = []
-            for inst in outputs:
-                preds_batch = inst["preds"]
-                id_batch = inst["id"].tolist()
-                preds.extend(zip(id_batch, preds_batch))
-            preds.sort(key=lambda x: x[0])
-
-            with open("predict_on_test.txt", "w") as f:
-                for _, inst in preds:
-                    f.write(" ".join(inst))
-                    f.write("\n")
+        # self.print(acc)
+        self.save_predictions(outputs)
+        

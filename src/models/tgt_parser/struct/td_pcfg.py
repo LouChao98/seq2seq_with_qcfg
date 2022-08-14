@@ -7,7 +7,7 @@ from numba import jit, prange
 from torch import Tensor
 from torch.autograd import grad
 
-from ._utils import checkpoint, weighted_random
+from ._utils import checkpoint, weighted_random, reorder
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
 
@@ -27,7 +27,7 @@ class FastestTDPCFG:
     # 3. respect lens
 
     # sampling: as the code generate samples one by one. I just recover the rules. Memory should be ok.
-
+    @reorder
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
         if decode:
             marginal = True  # MBR decoding
@@ -227,7 +227,8 @@ class FastestTDPCFG:
             sample_scores = [
                 (sample, type_, score)
                 for sample, type_, score in zip(samples, types, scores)
-            ]
+            if len(sample) > 0
+            ]  # len=0 when max_actions is reached but no PT rules applied
             preds.append(sample_scores)
         return preds
 

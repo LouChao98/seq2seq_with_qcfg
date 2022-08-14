@@ -166,7 +166,7 @@ def Xyz(y: Tensor, z: Tensor, rule: Tensor):
     return b_n_x
 
 
-# @checkpoint
+@checkpoint
 def XYZ(Y: Tensor, Y_ind: Tensor, Z: Tensor, Z_ind: Tensor, rule: Tensor):
     b, n, w, nt = Y.shape
     w -= 2

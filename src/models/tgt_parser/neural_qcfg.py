@@ -1,4 +1,6 @@
 import copy
+import logging
+import random
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,6 +13,8 @@ from ...datamodules.components.vocab import VocabularyPair
 from ..components.common import MultiResidualLayer
 from .base import TgtParserBase
 from .struct.pcfg import PCFG, TokenType
+
+log = logging.getLogger(__file__)
 
 
 class NeuralQCFGTgtParser(TgtParserBase):
@@ -127,19 +131,23 @@ class NeuralQCFGTgtParser(TgtParserBase):
         preds_ = []
         copy_positions = []
         device = node_features[0].device
+        src_lens = (src_ids != vocab_pair.src.pad_token_id).sum(1).tolist()
         src_ids = src_ids.tolist()
-        for batch, pt_spans_inst, nt_spans_inst, src_ids_inst in zip(
-            preds, pt_spans, nt_spans, src_ids
+        for batch, pt_spans_inst, nt_spans_inst, src_ids_inst, src_len in zip(
+            preds, pt_spans, nt_spans, src_ids, src_lens
         ):
             if self.use_copy:
-                try:
-                    expanded_batch = []
-                    copy_pts = []
-                    copy_nts = []
-                    copy_unks = []
-                    for inst in batch:
+                expanded_batch = []
+                copy_pts = []
+                copy_nts = []
+                copy_unks = []
+                for inst in batch:
+                    # if len(inst[0]) == 1:
+                    #     inst[0] = inst[0] + inst[0]
+                    #     inst[1] = inst[1] + inst[1]
+                    try:
                         expanded = []
-                        copy_pt = np.zeros((len(src_ids_inst), max_len), dtype=np.bool8)
+                        copy_pt = np.zeros((src_len, max_len), dtype=np.bool8)
                         copy_nt = [[] for _ in range(max_len)]  # no need to prune
                         copy_unk = {}  # record position if copy unk token
                         for v, t in zip(inst[0], inst[1]):
@@ -166,29 +174,25 @@ class NeuralQCFGTgtParser(TgtParserBase):
                                     if token == vocab_pair.tgt.unk_token_id:
                                         copy_unk[len(expanded) + i] = span[0] + i
                                 expanded.extend(tokens)
-                        expanded_batch.append((expanded, inst[2]))
-                        copy_pts.append(copy_pt)
-                        copy_nts.append(copy_nt)
-                        copy_unks.append(copy_unk)
-                    copy_pts = torch.from_numpy(np.stack(copy_pts, axis=0)).to(device)
-                    copy_positions.append((copy_pts, copy_nts, copy_unks))
-                    preds_.append(expanded_batch)
-                except IndexError:
-                    continue
+                    except IndexError:
+                        # generated seq may exceed max_len
+                        continue
+                    if max(expanded) >= len(vocab_pair.tgt):
+                        # some may go to masked rules due to incomplete masking
+                        continue
+                    expanded_batch.append((expanded, inst[2]))
+                    copy_pts.append(copy_pt)
+                    copy_nts.append(copy_nt)
+                    copy_unks.append(copy_unk)
+                copy_pts = torch.from_numpy(np.stack(copy_pts, axis=0)).to(device)
+                copy_positions.append((copy_pts, copy_nts, copy_unks))
+                preds_.append(expanded_batch)
             else:
                 expanded_batch = []
                 for inst in batch:
                     expanded_batch.append((inst[0], inst[2]))
                 copy_positions.append((None, None, None))
                 preds_.append(expanded_batch)
-
-        preds = []
-        for preds_one_inp in preds_: 
-            cleaned = []
-            for pred in preds_one_inp:
-                if max(pred[0]) < len(vocab_pair.tgt):
-                    cleaned.append(pred)
-            preds.append(batch)
 
         preds = preds_
 
@@ -198,11 +202,11 @@ class NeuralQCFGTgtParser(TgtParserBase):
             for i, (preds_one_inp, (copy_pt, copy_nt, copy_unk)) in enumerate(
                 zip(preds, copy_positions)
             ):
-                to_keep = [0 < len(inst[0]) < 60 for inst in preds_one_inp]
+                to_keep = [1 < len(inst[0]) <= 60 for inst in preds_one_inp]
                 _ids = [inst[0] for inst, flag in zip(preds_one_inp, to_keep) if flag]
 
                 if len(_ids) == 0:
-                    new_preds.append(([0, 0], 100))
+                    new_preds.append(([0, 0], 100, None))
                     continue
 
                 sort_id = list(range(len(_ids)))
@@ -239,6 +243,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
                         )
                     else:
                         _copy = None
+                    max_len = max(_lens[j : j + batch_size])
                     nll = (
                         self(
                             _ids_t[j : j + batch_size],
@@ -297,42 +302,16 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         batch_size = len(spans)
 
-        # seperate nt and pt features according to span width
-        # TODO sanity check: the root node must be the last element of nt_spans.
-        #      because of root rules.
-        # NOTE TreeLSTM guarantees this.
-        pt_node_features, nt_node_features = [], []
-        pt_spans, nt_spans = [], []
-        for spans_inst, node_features_inst in zip(spans, node_features):
-            pt_node_feature = []
-            nt_node_feature = []
-            pt_span = []
-            nt_span = []
-            for i, s in enumerate(spans_inst):
-                s_len = s[1] - s[0] + 1
-                if s_len >= self.nt_span_range[0] and s_len <= self.nt_span_range[1]:
-                    nt_node_feature.append(node_features_inst[i])
-                    nt_span.append(s)
-                if s_len >= self.pt_span_range[0] and s_len <= self.pt_span_range[1]:
-                    pt_node_feature.append(node_features_inst[i])
-                    pt_span.append(s)
-            if len(nt_node_feature) == 0:
-                nt_node_feature.append(node_features_inst[-1])
-                nt_span.append(spans_inst[-1])
-            pt_node_features.append(torch.stack(pt_node_feature))
-            nt_node_features.append(torch.stack(nt_node_feature))
-            pt_spans.append(pt_span)
-            nt_spans.append(nt_span)
-        nt_num_nodes_list = [len(inst) for inst in nt_node_features]
-        pt_num_nodes_list = [len(inst) for inst in pt_node_features]
-        nt_node_features = pad_sequence(
-            nt_node_features, batch_first=True, padding_value=0.0
-        )
-        pt_node_features = pad_sequence(
-            pt_node_features, batch_first=True, padding_value=0.0
-        )
-        pt_num_nodes = pt_node_features.size(1)
-        nt_num_nodes = nt_node_features.size(1)
+        (
+            nt_spans,
+            nt_num_nodes_list,
+            nt_num_nodes,
+            nt_node_features,
+            pt_spans,
+            pt_num_nodes_list,
+            pt_num_nodes,
+            pt_node_features,
+        ) = self.build_src_features(spans, node_features)
         device = nt_node_features.device
 
         # e = u + h
@@ -459,6 +438,65 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         params = {"term": terms, "root": roots, "rule": rules, "copy_nt": copy_nt}
         return params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes
+
+    def build_src_features(self, spans, node_features):
+
+        # seperate nt and pt features according to span width
+        # TODO sanity check: the root node must be the last element of nt_spans.
+        #      because of root rules.
+        # NOTE TreeLSTM guarantees this.
+        pt_node_features, nt_node_features = [], []
+        pt_spans, nt_spans = [], []
+        for spans_inst, node_features_inst in zip(spans, node_features):
+
+            pt_node_feature = []
+            nt_node_feature = []
+            pt_span = []
+            nt_span = []
+
+            # indices = list(range(len(spans_inst)))
+            # shuffle_start = (len(spans_inst) + 1)//2
+            # shuffle_parts = indices[shuffle_start:]
+            # random.shuffle(shuffle_parts)
+            # indices = indices[:shuffle_start] + shuffle_parts
+            # spans_inst = [spans_inst[i] for i in indices]
+            # node_features_inst = [node_features_inst[i] for i in indices]
+
+            for s, f in zip(spans_inst, node_features_inst):
+                s_len = s[1] - s[0] + 1
+                if s_len >= self.nt_span_range[0] and s_len <= self.nt_span_range[1]:
+                    nt_node_feature.append(f)
+                    nt_span.append(s)
+                if s_len >= self.pt_span_range[0] and s_len <= self.pt_span_range[1]:
+                    pt_node_feature.append(f)
+                    pt_span.append(s)
+            if len(nt_node_feature) == 0:
+                nt_node_feature.append(node_features_inst[-1])
+                nt_span.append(spans_inst[-1])
+            pt_node_features.append(torch.stack(pt_node_feature))
+            nt_node_features.append(torch.stack(nt_node_feature))
+            pt_spans.append(pt_span)
+            nt_spans.append(nt_span)
+        nt_num_nodes_list = [len(inst) for inst in nt_node_features]
+        pt_num_nodes_list = [len(inst) for inst in pt_node_features]
+        nt_node_features = pad_sequence(
+            nt_node_features, batch_first=True, padding_value=0.0
+        )
+        pt_node_features = pad_sequence(
+            pt_node_features, batch_first=True, padding_value=0.0
+        )
+        pt_num_nodes = pt_node_features.size(1)
+        nt_num_nodes = nt_node_features.size(1)
+        return (
+            nt_spans,
+            nt_num_nodes_list,
+            nt_num_nodes,
+            nt_node_features,
+            pt_spans,
+            pt_num_nodes_list,
+            pt_num_nodes,
+            pt_node_features,
+        )
 
     def get_rules_mask1(
         self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device

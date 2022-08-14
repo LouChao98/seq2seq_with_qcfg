@@ -1,4 +1,3 @@
-import random
 from typing import Optional
 
 import numpy as np
@@ -9,7 +8,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from ..components.common import MultiResidualLayer
 from .neural_qcfg import NeuralQCFGTgtParser
-from .struct.d1_pcfg import D1PCFG
+from .struct.d2_pcfg import D2PCFG
 from .struct.pcfg import PCFG
 
 
@@ -19,14 +18,14 @@ def get_nn(dim, cpd_rank):
     )
 
 
-class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
+class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
     def __init__(self, cpd_rank, *args, **kwargs):
         super().__init__(*args, **kwargs)
         assert self.nt_states == self.pt_states
         dim = self.dim
         num_layers = self.num_layers
         self.cpd_rank = cpd_rank
-        self.pcfg = D1PCFG(self.nt_states, self.pt_states)
+        self.pcfg = D2PCFG(self.nt_states, self.pt_states)
         self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)
@@ -45,7 +44,7 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
             node_features, spans, x, copy_position
         )
 
-        params2 = D1PCFG.get_pcfg_rules(params, self.nt_states)
+        params2 = D2PCFG.get_pcfg_rules(params, self.nt_states)
         out = PCFG()(params2, lengths, decode=True)
         # out = self.pcfg(params, lengths, True)
 
@@ -81,6 +80,7 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
             copy_position = (None, None)
 
         batch_size = len(spans)
+
         (
             nt_spans,
             nt_num_nodes_list,
@@ -121,11 +121,13 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         rule_head = self.ai_r_nn(
             self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))
         ).log_softmax(-1)
+
+        combined_emb = node_emb[:, :, None] + state_emb[:, None, :]
         rule_left = (
-            self.r_b_nn(self.rule_mlp_left(state_emb)).transpose(1, 2).log_softmax(-1)
+            self.r_b_nn(self.rule_mlp_left(combined_emb)).movedim(3, 1).log_softmax(-1)
         )
         rule_right = (
-            self.r_c_nn(self.rule_mlp_right(state_emb)).transpose(1, 2).log_softmax(-1)
+            self.r_c_nn(self.rule_mlp_right(combined_emb)).movedim(3, 1).log_softmax(-1)
         )
 
         i = self.root_mlp_i(node_emb)
@@ -214,7 +216,7 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
                     for i, (l, r, _) in enumerate(nt_spans_inst):
                         w = r - l - 1
                         t = None
-                        if w >= len(possible_copy) or w < 0:
+                        if w >= len(possible_copy) or w <= 0:
                             continue
                         for possible_s, possible_t in possible_copy[w]:
                             if possible_s == l:

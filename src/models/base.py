@@ -5,6 +5,7 @@ from typing import Any, List, Optional
 
 import pytorch_lightning as pl
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from hydra.utils import instantiate
 
@@ -76,3 +77,44 @@ class ModelBase(pl.LightningModule):
             },
         }
 
+    def save_predictions(self, outputs):
+        if dist.is_initialized() and (ws := dist.get_world_size()):
+            if len(self.datamodule.data_test) % ws != 0:
+                # TODO should I warn when detect duplicates?
+                log.warning(
+                    "Do NOT report the above metrics because you are using"
+                    "DDP and the size of the testset is odd, which means"
+                    "there is one sample counted twice due to the"
+                    "DistributedSampler. Run evaluation on the"
+                    "predict_on_test.txt file"
+                )
+            merged = [None] * ws
+            dist.all_gather_object(merged, outputs)
+            if self.global_rank == 0:
+                outputs = sum(merged, [])
+
+        if self.global_rank == 0:
+            preds = []
+            for inst in outputs:
+                preds_batch = inst["preds"]
+                id_batch = inst["id"].tolist()
+                preds.extend(zip(id_batch, preds_batch))
+            preds.sort(key=lambda x: x[0])
+
+            # remove duplicate
+            to_remove = []
+            for i in range(1, len(preds)):
+                if preds[i - 1][0] == preds[i][0]:
+                    to_remove.append(i)
+            for i in reversed(to_remove):
+                del preds[i]
+
+            # check missing
+            if not (preds[0][0] == 0 and preds[-1][0] == len(preds) - 1):
+                log.warning("There are some missing examples.")
+
+            with open(f"predict_on_test.txt", "w") as f:
+                for id_, inst in preds:
+                    f.write(f"{id_}:\t")
+                    f.write(" ".join(inst))
+                    f.write("\n")

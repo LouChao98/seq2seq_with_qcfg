@@ -5,7 +5,7 @@
 
 defaults:
   - override /datamodule: styleptb.yaml
-  - override /model: styleptb_rdp.yaml
+  - override /model: styleptb_d2.yaml
   - override /callbacks: default.yaml
   - override /logger: tensorboard
   - override /trainer: default.yaml
@@ -14,7 +14,7 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb_rdp"
+name: "styleptb_d1"
 
 
 # ~17GB
@@ -24,9 +24,10 @@ datamodule:
   # batch_size: 12
   # eval_batch_size: 4
   max_src_len: 60
+  # copy_mode: 'none'
 
 model:
-  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb_rdp/2022-07-31_05-11-27/checkpoints/last.ckpt
+  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/ai1_download_1659754809/runs/styleptb_d1/2022-08-06_05-59-05/checkpoints/epoch_014.ckpt
   decoder:
     num_samples: 100
     check_ppl_batch_size: 1
@@ -35,12 +36,12 @@ trainer:
   max_epochs: 25
   accumulate_grad_batches: 1
   gradient_clip_val: 3
-  # detect_anomaly: true
 
 logger:
   wandb:
     project: "styleptb"
-    tags: ["rdp"]
+    tags: ["d2"]
     offline: true
+
 
 # train: false

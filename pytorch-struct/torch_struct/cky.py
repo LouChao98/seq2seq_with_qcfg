@@ -10,11 +10,17 @@ class CKY(_Struct):
         semiring = self.semiring
 
         # Checks
+        constraint_scores, lse_scores, add_scores = None, None, None
+
         if len(scores) == 3:
             terms, rules, roots = scores
-            copy_nts = None
-        else:
-            terms, rules, roots, copy_nts = scores
+        elif len(scores) == 4:
+            terms, rules, roots, constraint_scores = scores
+        elif len(scores) == 5:
+            terms, rules, roots, constraint_scores, lse_scores = scores
+        elif len(scores) == 6:
+            terms, rules, roots, constraint_scores, lse_scores, add_scores = scores
+
         rules.requires_grad_(True)
         ssize = semiring.size()
         batch, N, T = terms.shape
@@ -73,9 +79,17 @@ class CKY(_Struct):
                 all_span.append(X4)
 
             data = semiring.sum(torch.stack(all_span, dim=-1))
-            if copy_nts is not None:
-                value, mask = copy_nts[w - 1]
+
+            if constraint_scores is not None:
+                value, mask = constraint_scores[w - 1]
                 data = torch.where(mask, value, data)
+            if add_scores is not None:
+                if add_scores[w - 1] is not None:
+                    data = data + add_scores[w - 1]
+            if lse_scores is not None:
+                if lse_scores[w - 1] is not None:
+                    data = torch.logaddexp(data, lse_scores[w - 1])
+
             span[w] = data
             beta[A][: N - w, w, :] = span[w]
             beta[B][w:N, N - w - 1, :] = span[w]

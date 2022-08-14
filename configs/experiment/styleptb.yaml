@@ -16,29 +16,27 @@ defaults:
 # name of the run determines folder name in logs
 name: "styleptb"
 
-
-# ~17GB
 datamodule:
-  batch_size: 1
+  batch_size: 4
   eval_batch_size: 1
   # batch_size: 12
   # eval_batch_size: 4
-  max_src_len: 20
+  max_src_len: 60
 
 model:
-  load_from_checkpoint: '/home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb/2022-07-31_01-17-13/checkpoints/last.ckpt'
+  # load_from_checkpoint: '/home/louchao/project/semantic_parsing_qcfg/logs/ai1_download_1660232415/runs/styleptb/2022-08-09_02-33-58/checkpoints/epoch_020.ckpt'
   decoder:
-    num_samples: 10
+    num_samples: 100
     check_ppl_batch_size: 1
 
 trainer:
-  max_epochs: 15
-  accumulate_grad_batches: 4
+  max_epochs: 25
+  accumulate_grad_batches: 1
   gradient_clip_val: 3
 
 logger:
   wandb:
-    tags: ["baseline"]
+    project: ["baseline"]
     offline: true
 
-train: false
+# train: false

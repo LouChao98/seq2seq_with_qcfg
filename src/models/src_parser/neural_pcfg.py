@@ -64,22 +64,23 @@ class NeuralPCFGSrcParser(SrcParserBase):
         terms = torch.gather(terms, 3, x_expand).squeeze(3)
         return terms, rules, roots
 
-    def forward(self, x, lengths):
+    def forward(self, x, lengths, extra_scores=None):
         params = self.get_rules(x)
+        params = self.process_extra_scores(params, extra_scores)
         dist = SentCFG(params, lengths)
         return dist
 
-    def marginals(self, x, lengths):
-        params = self.get_rules(x)
-        dist = SentCFG(params, lengths)
+    def marginals(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
+        if dist is None:
+            dist = self(x, lengths, extra_scores)
         log_Z = dist.partition
         marginals = dist.marginals[-1]
         return -log_Z, marginals.sum(-1)
 
     @torch.enable_grad()
-    def sample(self, x, lengths, dist: Optional[SentCFG] = None):
+    def sample(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
         if dist is None:
-            dist = self(x, lengths)
+            dist = self(x, lengths, extra_scores)
         samples = dist._struct(torch_struct.SampledSemiring).marginals(
             dist.log_potentials, lengths=dist.lengths
         )
@@ -87,11 +88,20 @@ class NeuralPCFGSrcParser(SrcParserBase):
         logprobs = dist._struct().score(dist.log_potentials, samples) - log_Z
         return samples, logprobs
 
-    def argmax(self, x, lengths, dist: Optional[SentCFG] = None):
+    def argmax(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
         if dist is None:
-            dist = self(x, lengths)
+            dist = self(x, lengths, extra_scores)
 
         spans_onehot = dist.argmax
         log_Z = dist.partition
         logprobs = dist._struct().score(dist.log_potentials, spans_onehot) - log_Z
         return spans_onehot, logprobs
+
+    def process_extra_scores(self, params, extra_scores):
+        # constraint_scores, lse_scores, add_scores = None, None, None
+        if extra_scores is None:
+            return params
+        constraint_scores = extra_scores.get('constraint')
+        lse_scores = extra_scores.get('lse')
+        add_scores = extra_scores.get('add')
+        return *params, constraint_scores, lse_scores, add_scores

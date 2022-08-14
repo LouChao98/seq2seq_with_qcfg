@@ -338,18 +338,5 @@ class ScanModule(ModelBase):
     def test_epoch_end(self, outputs) -> None:
         acc = self.test_metric.compute().item()
         self.log("test/acc", acc, on_step=False, on_epoch=True)
-        self.print("test/acc", str(acc))
-
-        if self.global_rank == 0:
-            # TODO check whether pl gather outputs for me
-            preds = []
-            for inst in outputs:
-                preds_batch = inst["preds"]
-                id_batch = inst["id"].tolist()
-                preds.extend(zip(id_batch, preds_batch))
-            preds.sort(key=lambda x: x[0])
-
-            with open("predict_on_test.txt", "w") as f:
-                for _, inst in preds:
-                    f.write(" ".join(inst))
-                    f.write("\n")
+        # self.print("test/acc", str(acc))
+        self.save_predictions(outputs)

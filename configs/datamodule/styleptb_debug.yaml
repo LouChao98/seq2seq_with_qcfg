@@ -1,0 +1,15 @@
+_target_: src.datamodules.tsv_datamodule.TSVDataModule
+
+train_file: ${data_dir}/StylePTB/ATP/debug.tsv
+dev_file: ${data_dir}/StylePTB/ATP/debug_val.tsv
+test_file: ${data_dir}/StylePTB/ATP/debug_val.tsv
+
+copy_mode: 'phrase'
+
+batch_size: ${in_debugger:2,20}
+eval_batch_size: ${in_debugger:2,6}
+num_workers: ${in_debugger:0,4}
+pin_memory: false
+
+cache_dir: ${data_dir}/cache
+enable_cache: false

@@ -19,29 +19,30 @@ name: "styleptb_d1"
 
 # ~17GB
 datamodule:
-  batch_size: 1
-  eval_batch_size: 1
+  batch_size: 4
+  eval_batch_size: 2
   # batch_size: 12
   # eval_batch_size: 4
-  max_src_len: 20
+  max_src_len: 10
   # copy_mode: 'none'
 
 model:
-  load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb_d1/2022-07-31_02-36-47/checkpoints/last.ckpt
+  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/ai1_download_1659754809/runs/styleptb_d1/2022-08-06_05-59-05/checkpoints/epoch_014.ckpt
   decoder:
-    num_samples: 1000
+    num_samples: 100
     check_ppl_batch_size: 1
+    cpd_rank: 256
 
 trainer:
-  max_epochs: 15
-  accumulate_grad_batches: 4
+  max_epochs: 25
+  accumulate_grad_batches: 1
   gradient_clip_val: 3
 
 logger:
   wandb:
-    name: "styleptb"
+    project: "styleptb"
     tags: ["d1"]
     offline: true
 
 
-train: false
+# train: false

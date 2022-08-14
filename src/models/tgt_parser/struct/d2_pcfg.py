@@ -19,12 +19,12 @@ class TokenType(IntEnum):
     COPY_PT = _COPY_PT
 
 
-class D1PCFG:
+class D2PCFG:
     # A[i] -> B[j], C[k]
     # ================
     # A[i] -> R
-    # R -> B
-    # R -> C
+    # R, j -> B
+    # R, k -> C
     # R, i -> j, k
     # ================
     # Time complexity: 6
@@ -39,7 +39,7 @@ class D1PCFG:
         self.eq_qnkrj = tse.compile_equation("qnwjr,qnwkr->qnkrj")
         self.eq_qnri = tse.compile_equation("qnkrj,qrijk->qnri")
         self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
-        self.eq_tor = tse.compile_equation("xlpi,xrp->xlir")
+        self.eq_tor = tse.compile_equation("xlpi,xrip->xlir")
 
     @reorder
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
@@ -73,13 +73,13 @@ class D1PCFG:
 
         # {source,target}{left,right}[{nonterminal,preterminal}]
         H = params["head"]  # (batch, NT, r), A[i] -> R
-        # (batch, r, TGT_NT), R -> B
-        # (batch, r, TGT_PT), R -> B
+        # (batch, r, SRC, TGT_NT), R, j -> B
+        # (batch, r, SRC, TGT_PT), R, j -> B
         TLNT, TLPT = torch.split(
             params["left"], (self.tgt_nt_states, self.tgt_pt_states), -1
         )
-        # (batch, r, TGT_NT), R -> C
-        # (batch, r, TGT_PT), R -> C
+        # (batch, r, SRC, TGT_NT), R, k -> C
+        # (batch, r, SRC, TGT_PT), R, k -> C
         TRNT, TRPT = torch.split(
             params["right"], (self.tgt_nt_states, self.tgt_pt_states), -1
         )
@@ -402,7 +402,7 @@ class D1PCFG:
         b, _, r = head.shape
         head = params["head"].view(b, nt_states, -1, r)
         rule = torch.einsum(
-            "xair,xrb,xrc,xrijk->xaibjck",
+            "xair,xrjb,xrkc,xrijk->xaibjck",
             head.exp(),
             params["left"].exp(),
             params["right"].exp(),
