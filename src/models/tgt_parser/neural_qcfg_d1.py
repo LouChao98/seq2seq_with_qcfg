@@ -191,15 +191,13 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
             x_expand = x.unsqueeze(2).expand(batch_size, n, pt).unsqueeze(3)
             terms = torch.gather(terms, 3, x_expand).squeeze(3)
             if copy_position[0] is not None:
-                # TODO sanity check: pt_spans begin with (0,0), (1,1) ... (n-1,n-1)
                 terms = terms.view(batch_size, n, self.pt_states, -1)
                 terms[:, :, -1, : copy_position[0].shape[1]] = (
                     0.1 * self.neg_huge * ~copy_position[0].transpose(1, 2)
                 )
                 terms = terms.view(batch_size, n, -1)
             if copy_position[1] is not None:
-                # mask True= will set to value
-                # TODO this waste memory to store TGT * SRC. Does this matter?
+                # mask=True will set to value
                 copy_nt = [
                     np.full(
                         (batch_size, n - w, self.nt_states, nt_num_nodes),
@@ -269,36 +267,8 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
     ):
         # A[a i]->B[a j] C[a k], a i must be the DIRECT parent of a j and a k, j!=k.
         #   if a i has no child, a j/k = a i.
-        # TODO review this comment
-        nt = nt_num_nodes * self.nt_states
-        pt = pt_num_nodes * self.pt_states
-        bsz = batch_size
-        src_nt = self.nt_states
-        src_pt = self.pt_states
-        node_nt = nt_num_nodes
-        node_pt = pt_num_nodes
-        node_mask = torch.zeros(
-            bsz,
-            src_nt * node_nt,
-            src_nt * node_nt + src_pt * node_pt,
-            src_nt * node_nt + src_pt * node_pt,
-        ).to(device)
-
-        nt_idx = slice(0, src_nt * node_nt)
-        pt_idx = slice(src_nt * node_nt, src_nt * node_nt + src_pt * node_pt)
-
-        nt_ntnt = node_mask[:, nt_idx, nt_idx, nt_idx].view(
-            bsz, src_nt, node_nt, src_nt, node_nt, src_nt, node_nt
-        )
-        nt_ntpt = node_mask[:, nt_idx, nt_idx, pt_idx].view(
-            bsz, src_nt, node_nt, src_nt, node_nt, src_pt, node_pt
-        )
-        nt_ptnt = node_mask[:, nt_idx, pt_idx, nt_idx].view(
-            bsz, src_nt, node_nt, src_pt, node_pt, src_nt, node_nt
-        )
-        nt_ptpt = node_mask[:, nt_idx, pt_idx, pt_idx].view(
-            bsz, src_nt, node_nt, src_pt, node_pt, src_pt, node_pt
-        )
+        nt = nt_num_nodes
+        node_mask = torch.zeros(batch_size, nt, nt, nt, device=device)
 
         def is_parent(parent, child):
             if child[0] >= parent[0] and child[1] <= parent[1]:
@@ -318,37 +288,19 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
                 or (parent[0] == child2[0] and parent[1] == child1[1])
             )
 
-        # fill_(1.) = not masked
-        for b, (pt_span, nt_span) in enumerate(zip(pt_spans, nt_spans)):
+        for b, nt_span in enumerate(nt_spans):
             min_nt_span = min([span_len(s) for s in nt_span])
             for i, parent in enumerate(nt_span):
                 if span_len(parent) == min_nt_span:
-                    nt_ntnt[b, :, i, :, i, :, i].fill_(1.0)
-                    for j, child in enumerate(pt_span):
+                    node_mask[b, i, i, i].fill_(True)
+                    for j, child in enumerate(nt_span):
                         if is_strict_parent(parent, child):
-                            nt_ntpt[b, :, i, :, i, :, j].fill_(1.0)
-                            nt_ptnt[b, :, i, :, j, :, i].fill_(1.0)
-                if span_len(parent) == 1:
-                    for j, child in enumerate(pt_span):
-                        if parent == child:
-                            nt_ptnt[b, :, i, :, j, :, i].fill_(1.0)
-                            nt_ntpt[b, :, i, :, i, :, j].fill_(1.0)
-                            nt_ptpt[b, :, i, :, j, :, j].fill_(1.0)
+                            node_mask[b, i, i, j].fill_(True)
+                            node_mask[b, i, j, i].fill_(True)
                 for j, child1 in enumerate(nt_span):
                     for k, child2 in enumerate(nt_span):
                         if covers(parent, child1, child2):
-                            nt_ntnt[b, :, i, :, j, :, k].fill_(1.0)
-                            nt_ntnt[b, :, i, :, k, :, j].fill_(1.0)
-                    for k, child2 in enumerate(pt_span):
-                        if covers(parent, child1, child2):
-                            nt_ntpt[b, :, i, :, j, :, k].fill_(1.0)
-                            nt_ptnt[b, :, i, :, k, :, j].fill_(1.0)
-                for j, child1 in enumerate(pt_span):
-                    for k, child2 in enumerate(pt_span):
-                        if covers(parent, child1, child2):
-                            nt_ptpt[b, :, i, :, j, :, k].fill_(1.0)
-                            nt_ptpt[b, :, i, :, k, :, j].fill_(1.0)
+                            node_mask[b, i, j, k].fill_(True)
+                            node_mask[b, i, k, j].fill_(True)
 
-        node_mask = (1.0 - node_mask) * self.neg_huge
-
-        return node_mask.contiguous().view(batch_size, nt, nt + pt, nt + pt)
+        return node_mask.contiguous().view(batch_size, nt, nt, nt)

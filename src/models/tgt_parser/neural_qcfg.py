@@ -430,6 +430,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
             x_expand = x.unsqueeze(2).expand(batch_size, n, pt).unsqueeze(3)
             terms = torch.gather(terms, 3, x_expand).squeeze(3)
             if copy_position[0] is not None:
+                # TODO sanity check: pt_spans begin with (0,0), (1,1) ... (n-1,n-1)
                 terms = terms.view(batch_size, n, self.pt_states, -1)
                 terms[:, :, -1] = (
                     0.1 * self.neg_huge * ~copy_position[0].transpose(1, 2)
@@ -488,13 +489,13 @@ class NeuralQCFGTgtParser(TgtParserBase):
             pt_span = []
             nt_span = []
 
-            indices = list(range(len(spans_inst)))
-            shuffle_start = (len(spans_inst) + 1) // 2
-            shuffle_parts = indices[shuffle_start:-1]
-            random.shuffle(shuffle_parts)
-            indices = indices[:shuffle_start] + shuffle_parts + indices[-1:]
-            spans_inst = [spans_inst[i] for i in indices]
-            node_features_inst = [node_features_inst[i] for i in indices]
+            # indices = list(range(len(spans_inst)))
+            # shuffle_start = (len(spans_inst) + 1) // 2
+            # shuffle_parts = indices[shuffle_start:-1]
+            # random.shuffle(shuffle_parts)
+            # indices = indices[:shuffle_start] + shuffle_parts + indices[-1:]
+            # spans_inst = [spans_inst[i] for i in indices]
+            # node_features_inst = [node_features_inst[i] for i in indices]
 
             for s, f in zip(spans_inst, node_features_inst):
                 s_len = s[1] - s[0] + 1
@@ -536,7 +537,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
     ):
         # A[a i]->B[a j] C[a k], a i must be the parent of a j and a k.
-        # return 1 for not masked
+        # return True for not masked
         nt = nt_num_nodes * self.nt_states
         pt = pt_num_nodes * self.pt_states
         nt_node_mask = torch.ones(
@@ -593,7 +594,6 @@ class NeuralQCFGTgtParser(TgtParserBase):
     ):
         # A[a i]->B[a j] C[a k], a i must be the DIRECT parent of a j and a k, j!=k.
         #   if a i has no child, a j/k = a i.
-        # TODO review this comment
         nt = nt_num_nodes * self.nt_states
         pt = pt_num_nodes * self.pt_states
         bsz = batch_size
@@ -606,7 +606,9 @@ class NeuralQCFGTgtParser(TgtParserBase):
             src_nt * node_nt,
             src_nt * node_nt + src_pt * node_pt,
             src_nt * node_nt + src_pt * node_pt,
-        ).to(device)
+            dtype=torch.bool,
+            device=device,
+        )
 
         nt_idx = slice(0, src_nt * node_nt)
         pt_idx = slice(src_nt * node_nt, src_nt * node_nt + src_pt * node_pt)
@@ -625,10 +627,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         )
 
         def is_parent(parent, child):
-            if child[0] >= parent[0] and child[1] <= parent[1]:
-                return True
-            else:
-                return False
+            return child[0] >= parent[0] and child[1] <= parent[1]
 
         def is_strict_parent(parent, child):
             return is_parent(parent, child) and parent != child
@@ -642,37 +641,34 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 or (parent[0] == child2[0] and parent[1] == child1[1])
             )
 
-        # fill_(1.) = not masked
         for b, (pt_span, nt_span) in enumerate(zip(pt_spans, nt_spans)):
             min_nt_span = min([span_len(s) for s in nt_span])
             for i, parent in enumerate(nt_span):
                 if span_len(parent) == min_nt_span:
-                    nt_ntnt[b, :, i, :, i, :, i].fill_(1.0)
+                    nt_ntnt[b, :, i, :, i, :, i].fill_(True)
                     for j, child in enumerate(pt_span):
                         if is_strict_parent(parent, child):
-                            nt_ntpt[b, :, i, :, i, :, j].fill_(1.0)
-                            nt_ptnt[b, :, i, :, j, :, i].fill_(1.0)
+                            nt_ntpt[b, :, i, :, i, :, j].fill_(True)
+                            nt_ptnt[b, :, i, :, j, :, i].fill_(True)
                 if span_len(parent) == 1:
                     for j, child in enumerate(pt_span):
                         if parent == child:
-                            nt_ptnt[b, :, i, :, j, :, i].fill_(1.0)
-                            nt_ntpt[b, :, i, :, i, :, j].fill_(1.0)
-                            nt_ptpt[b, :, i, :, j, :, j].fill_(1.0)
+                            nt_ptnt[b, :, i, :, j, :, i].fill_(True)
+                            nt_ntpt[b, :, i, :, i, :, j].fill_(True)
+                            nt_ptpt[b, :, i, :, j, :, j].fill_(True)
                 for j, child1 in enumerate(nt_span):
                     for k, child2 in enumerate(nt_span):
                         if covers(parent, child1, child2):
-                            nt_ntnt[b, :, i, :, j, :, k].fill_(1.0)
-                            nt_ntnt[b, :, i, :, k, :, j].fill_(1.0)
+                            nt_ntnt[b, :, i, :, j, :, k].fill_(True)
+                            nt_ntnt[b, :, i, :, k, :, j].fill_(True)
                     for k, child2 in enumerate(pt_span):
                         if covers(parent, child1, child2):
-                            nt_ntpt[b, :, i, :, j, :, k].fill_(1.0)
-                            nt_ptnt[b, :, i, :, k, :, j].fill_(1.0)
+                            nt_ntpt[b, :, i, :, j, :, k].fill_(True)
+                            nt_ptnt[b, :, i, :, k, :, j].fill_(True)
                 for j, child1 in enumerate(pt_span):
                     for k, child2 in enumerate(pt_span):
                         if covers(parent, child1, child2):
-                            nt_ptpt[b, :, i, :, j, :, k].fill_(1.0)
-                            nt_ptpt[b, :, i, :, k, :, j].fill_(1.0)
+                            nt_ptpt[b, :, i, :, j, :, k].fill_(True)
+                            nt_ptpt[b, :, i, :, k, :, j].fill_(True)
 
-        node_mask = (1.0 - node_mask) * self.neg_huge
-
-        return node_mask.contiguous().view(batch_size, nt, nt + pt, nt + pt)
+        return node_mask.view(batch_size, nt, nt + pt, nt + pt)
