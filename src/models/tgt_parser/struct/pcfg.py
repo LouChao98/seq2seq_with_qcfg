@@ -109,11 +109,13 @@ class PCFG:
                 for sample, type_, score in zip(samples, types, scores)
                 if len(sample) > 0
             ]  # len=0 when max_actions is reached but no PT rules applied
+            if len(sample_scores) == 0:
+                sample_scores = ([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)
             preds.append(sample_scores)
         return preds
 
     @staticmethod
-    # @jit(nopython=True)
+    @jit(nopython=True)
     def sample(
         terms: np.ndarray,  # pt x t, in normal space
         rules: np.ndarray,  # nt x (nt+pt) x (nt+pt), in normal space
@@ -208,7 +210,7 @@ class PCFG:
                             terminal_type.append(_VOCAB)
             samples[i] = terminals
             types[i] = terminal_type
-            scores[i] = score / len(terminals)
+            scores[i] = score / (len(terminals) + 1e-9)
         return samples, types, scores
 
     @staticmethod
@@ -359,4 +361,3 @@ if __name__ == "__main__":
     # # print(params['head'].grad[0])
 
     # print("Ok if same")
-

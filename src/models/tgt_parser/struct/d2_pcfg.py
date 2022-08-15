@@ -8,7 +8,8 @@ from numba import jit, prange
 from torch import Tensor
 from torch.autograd import grad
 
-from ._utils import checkpoint, weighted_random, reorder
+from ._fn import diagonal, diagonal_copy_, stripe
+from ._utils import checkpoint, reorder, weighted_random
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
 
@@ -60,7 +61,7 @@ class D2PCFG:
 
         terms = params["term"]  # (batch, seq_len, PT)
         root = params["root"]  # (batch, NT)
-        copy_nts = params.get('copy_nt')
+        copy_nts = params.get("copy_nt")
 
         batch, N, PT = terms.shape
         N += 1
@@ -107,7 +108,9 @@ class D2PCFG:
         diagonal_copy_(right_s, right_term, w=1)
 
         if marginal:
-            span_indicator = terms.new_zeros(batch, N, N).requires_grad_()
+            span_indicator = terms.new_zeros(
+                batch, N, N, self.tgt_nt_states, nt_spans
+            ).requires_grad_()
             span_indicator_running = span_indicator[:]
         else:
             span_indicator = None
@@ -125,7 +128,7 @@ class D2PCFG:
             n = N - w
             y = stripe(left_s, n, w - 1, (0, 1)).clone()
             z = stripe(right_s, n, w - 1, (1, w), 0).clone()
-             
+
             qnkrj = tse.log_einsum(self.eq_qnkrj, y, z, block_size=self.block_size)
             qnri = tse.log_einsum(self.eq_qnri, qnkrj, SLR, block_size=self.block_size)
             x = tse.log_einsum(self.eq_qnai, qnri, H, block_size=self.block_size)
@@ -140,7 +143,7 @@ class D2PCFG:
                 x = torch.where(mask, value, x)
 
             if marginal:
-                indicator = span_indicator_running.diagonal(w, 1, 2)[..., None, None]
+                indicator = span_indicator_running.diagonal(w, 1, 2).movedim(-1, 1)
                 x += indicator
 
             if current_bsz - unfinished > 0:
@@ -173,7 +176,7 @@ class D2PCFG:
         logZ = final.logsumexp((-2, -1))
         if decode:
             spans = self.get_prediction(logZ, span_indicator, lens)
-            spans = [[(span[0], span[1] - 1, 0) for span in inst] for inst in spans]
+            # spans = [[(span[0], span[1] - 1, 0) for span in inst] for inst in spans]
             return spans
         if marginal:
             torch.set_grad_enabled(grad_state)
@@ -244,11 +247,13 @@ class D2PCFG:
                 for sample, type_, score in zip(samples, types, scores)
                 if len(sample) > 0
             ]  # len=0 when max_actions is reached but no PT rules applied
+            if len(sample_scores) == 0:
+                sample_scores = ([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)
             preds.append(sample_scores)
         return preds
 
     @staticmethod
-    # @jit(nopython=True, parallel=True)
+    @jit(nopython=True, parallel=True)
     def sample(
         terms: np.ndarray,  # seqlen x pt, in normal space
         rules_head: np.ndarray,  # nt x r, in normal space
@@ -341,61 +346,6 @@ class D2PCFG:
             scores[i] = score / len(terminals)
         return samples, types, scores
 
-    def get_prediction(self, logZ, span_indicator, lens):
-        batch, seq_len = span_indicator.shape[:2]
-        # to avoid some trivial corner cases.
-        if seq_len >= 3:
-            marginals = grad(logZ.sum(), [span_indicator])[0].detach()
-            return self._cky_zero_order(marginals.detach(), lens)
-        else:
-            # minimal length is 2
-            predictions = [[(0, 0), (1, 1), (0, 1)] for _ in range(batch)]
-            return predictions
-
-    @torch.no_grad()
-    def _cky_zero_order(self, marginals, lens):
-        N = marginals.shape[-1]
-        s = marginals.new_zeros(*marginals.shape).fill_(-1e9)
-        p = marginals.new_zeros(*marginals.shape).long()
-        diagonal_copy_(s, diagonal(marginals, 1), 1)
-        for w in range(2, N):
-            n = N - w
-            starts = p.new_tensor(range(n))
-            if w != 2:
-                Y = stripe(s, n, w - 1, (0, 1))
-                Z = stripe(s, n, w - 1, (1, w), 0)
-            else:
-                Y = stripe(s, n, w - 1, (0, 1))
-                Z = stripe(s, n, w - 1, (1, w), 0)
-            X, split = (Y + Z).max(2)
-            x = X + diagonal(marginals, w)
-            diagonal_copy_(s, x, w)
-            diagonal_copy_(p, split + starts.unsqueeze(0) + 1, w)
-
-        def backtrack(p, i, j):
-            if j == i + 1:
-                return [(i, j)]
-            split = p[i][j]
-            ltree = backtrack(p, i, split)
-            rtree = backtrack(p, split, j)
-            return [(i, j)] + ltree + rtree
-
-        p = p.tolist()
-        lens = lens.tolist()
-        spans = [backtrack(p[i], 0, length) for i, length in enumerate(lens)]
-        for spans_inst in spans:
-            spans_inst.sort(key=lambda x: x[1] - x[0])
-        return spans
-
-    def convert_to_tree(self, spans, length):
-        tree = [(i, str(i)) for i in range(length)]
-        tree = dict(tree)
-        for l, r, _ in spans:
-            if l != r:
-                span = "({} {})".format(tree[l], tree[r])
-                tree[r] = tree[l] = span
-        return tree[0]
-
     @staticmethod
     def get_pcfg_rules(params, nt_states):
         head = params["head"]
@@ -415,75 +365,13 @@ class D2PCFG:
         return {"term": params["term"], "rule": rule, "root": params["root"]}
 
 
-def diagonal_copy_(x, y, w):
-    x, seq_len = x.contiguous(), x.size(1)
-    stride, numel = list(x.stride()), x[:, 0, 0].numel()
-    new_stride = []
-    new_stride.append(stride[0])
-    new_stride.append(stride[1] + stride[2])
-    if len(x.shape) > 3:
-        new_stride.extend(stride[3:])
-        x.as_strided(
-            size=(x.shape[0], seq_len - w, *list(x.shape[3:])),
-            stride=new_stride,
-            storage_offset=w * stride[2],
-        ).copy_(y)
-    else:
-        x.as_strided(
-            size=(x.shape[0], seq_len - w),
-            stride=new_stride,
-            storage_offset=w * stride[2],
-        ).copy_(y)
-
-
-def diagonal(x, w):
-    x, seq_len = x.contiguous(), x.size(1)
-    stride, numel = list(x.stride()), x[:, 0, 0].numel()
-    new_stride = []
-    new_stride.append(stride[0])
-    new_stride.append(stride[1] + stride[2])
-    if len(x.shape) > 3:
-        new_stride.extend(stride[3:])
-        return x.as_strided(
-            size=(x.shape[0], seq_len - w, *list(x.shape[3:])),
-            stride=new_stride,
-            storage_offset=w * stride[2],
-        )
-    else:
-        return x.as_strided(
-            size=(x.shape[0], seq_len - w),
-            stride=new_stride,
-            storage_offset=w * stride[2],
-        )
-
-
-def stripe(x, n, w, offset=(0, 0), dim=1):
-    x, seq_len = x.contiguous(), x.size(2)
-    stride = list(x.stride())
-    numel = stride[2]
-    stride[1] = (seq_len + 1) * numel
-    stride[2] = (1 if dim == 1 else seq_len) * numel
-    if len(x.shape) > 3:
-        return x.as_strided(
-            size=(x.shape[0], n, w, *list(x.shape[3:])),
-            stride=stride,
-            storage_offset=(offset[0] * seq_len + offset[1]) * numel,
-        )
-    else:
-        return x.as_strided(
-            size=(x.shape[0], n, w),
-            stride=stride,
-            storage_offset=(offset[0] * seq_len + offset[1]) * numel,
-        )
-
-
 if __name__ == "__main__":
 
     from .pcfg import PCFG
 
     torch.autograd.set_detect_anomaly(True)
     torch.random.manual_seed(1)
-    B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r = 2,6, 3, 3, 3, 3, 2
+    B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r = 2, 6, 3, 3, 3, 3, 2
     NT = TGT_NT * SRC_NT
     T = TGT_PT * SRC_PT
     device = "cuda"
@@ -534,4 +422,3 @@ if __name__ == "__main__":
     params2 = {"term": params["term"], "rule": rule, "root": params["root"]}
     pcfg2 = PCFG()
     print(pcfg2(params2, lens))
-

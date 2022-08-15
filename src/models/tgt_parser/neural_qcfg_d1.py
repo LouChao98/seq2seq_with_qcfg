@@ -45,9 +45,9 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
             node_features, spans, x, copy_position
         )
 
-        params2 = D1PCFG.get_pcfg_rules(params, self.nt_states)
-        out = PCFG()(params2, lengths, decode=True)
-        # out = self.pcfg(params, lengths, True)
+        # params2 = D1PCFG.get_pcfg_rules(params, self.nt_states)
+        # out = PCFG()(params2, lengths, decode=True)
+        out = self.pcfg(params, lengths, True)
 
         # out: list of list, containing spans (i, j, label)
         src_nt_states = self.nt_states * nt_num_nodes
@@ -77,7 +77,7 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         x: Optional[torch.Tensor] = None,
         copy_position=None,  # (pt, nt), nt not implemented
     ):
-        if copy_position is None:
+        if copy_position is None or not self.use_copy:
             copy_position = (None, None)
 
         batch_size = len(spans)
@@ -352,4 +352,3 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         node_mask = (1.0 - node_mask) * self.neg_huge
 
         return node_mask.contiguous().view(batch_size, nt, nt + pt, nt + pt)
-

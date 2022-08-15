@@ -76,7 +76,7 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
         x: Optional[torch.Tensor] = None,
         copy_position=None,  # (pt, nt), nt not implemented
     ):
-        if copy_position is None:
+        if copy_position is None or not self.use_copy:
             copy_position = (None, None)
 
         batch_size = len(spans)
@@ -354,4 +354,3 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
         node_mask = (1.0 - node_mask) * self.neg_huge
 
         return node_mask.contiguous().view(batch_size, nt, nt + pt, nt + pt)
-

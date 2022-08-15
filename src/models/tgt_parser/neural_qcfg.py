@@ -115,6 +115,47 @@ class NeuralQCFGTgtParser(TgtParserBase):
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
             node_features, spans
         )
+
+        # params['root'].fill_(-1e9)
+        # params['term'].fill_(-1e9)
+        # params['rule'].fill_(-1e9)
+        # preds = []
+        # max_len = 100
+        # for i in range(len(node_features)):
+        #     _node_features = [node_features[i]]
+        #     _spans = [spans[i]]
+        #     _params, _pt_spans, _, _nt_spans, _ = self.get_params(
+        #         _node_features, _spans
+        #     )
+        #     params2 = {}
+        #     for key, value in _params.items():
+        #         if value is None:
+        #             params2[key] = None
+        #         else:
+        #             shape = [slice(i, i+1)]
+        #             for j in value.shape[1:]:
+        #                 shape.append(slice(0, j))
+        #             params2[key] = params[key][shape]
+        #     # _, a =  params_ref['root'].shape
+        #     # # assert torch.allclose(params['root'][i, :a], params_ref['root'][0])
+        #     # params['root'][i, :a] = params_ref['root'][0]
+        #     # _, a, b =  params_ref['term'].shape
+        #     # # assert torch.allclose(params['term'][i, :a, :b], params_ref['term'][0])
+        #     # params['term'][i, :a, :b] = params_ref['term'][0]
+        #     # _, a, b, c =  params_ref['rule'].shape
+        #     # # assert torch.allclose(params['rule'][i, :a, :b, :c], params_ref['rule'][0])
+        #     # params['rule'][i, :a, :b, :c] = params_ref['rule'][0]
+        #     out = self.pcfg.sampled_decoding(
+        #         params2,
+        #         nt_spans[i],
+        #         self.nt_states,
+        #         pt_spans[i],
+        #         self.pt_states,
+        #         num_samples=self.num_samples,
+        #         use_copy=self.use_copy,
+        #         max_length=max_len,
+        #     )
+        #     preds.extend(out)
         max_len = 100
         preds = self.pcfg.sampled_decoding(
             params,
@@ -142,44 +183,41 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 copy_nts = []
                 copy_unks = []
                 for inst in batch:
-                    # if len(inst[0]) == 1:
-                    #     inst[0] = inst[0] + inst[0]
-                    #     inst[1] = inst[1] + inst[1]
-                    try:
-                        expanded = []
-                        copy_pt = np.zeros((src_len, max_len), dtype=np.bool8)
-                        copy_nt = [[] for _ in range(max_len)]  # no need to prune
-                        copy_unk = {}  # record position if copy unk token
-                        for v, t in zip(inst[0], inst[1]):
-                            if t == TokenType.VOCAB:
-                                expanded.append(v)
-                            elif t == TokenType.COPY_PT:
-                                span = pt_spans_inst[v]
-                                tokens = vocab_pair.src2tgt(
-                                    src_ids_inst[span[0] : span[1] + 1]
-                                )
-                                copy_pt[span[0], len(expanded)] = True
-                                if tokens[0] == vocab_pair.tgt.unk_token_id:
-                                    copy_unk[len(expanded)] = span[0]
-                                expanded.extend(tokens)
-                            elif t == TokenType.COPY_NT:
-                                span = nt_spans_inst[v]
-                                tokens = vocab_pair.src2tgt(
-                                    src_ids_inst[span[0] : span[1] + 1]
-                                )
-                                copy_nt[span[1] - span[0] - 1].append(
-                                    (span[0], len(expanded))
-                                )  # copy_nt starts from w=2
-                                for i, token in enumerate(tokens):
-                                    if token == vocab_pair.tgt.unk_token_id:
-                                        copy_unk[len(expanded) + i] = span[0] + i
-                                expanded.extend(tokens)
-                    except IndexError:
-                        # generated seq may exceed max_len
-                        continue
+                    expanded = []
+                    copy_pt = np.zeros((src_len, max_len), dtype=np.bool8)
+                    copy_nt = [[] for _ in range(max_len)]  # no need to prune
+                    copy_unk = {}  # record position if copy unk token
+                    for v, t in zip(inst[0], inst[1]):
+                        if len(expanded) >= max_len:
+                            break
+                        if t == TokenType.VOCAB:
+                            expanded.append(v)
+                        elif t == TokenType.COPY_PT:
+                            span = pt_spans_inst[v]
+                            tokens = vocab_pair.src2tgt(
+                                src_ids_inst[span[0] : span[1] + 1]
+                            )
+                            copy_pt[span[0], len(expanded)] = True
+                            if tokens[0] == vocab_pair.tgt.unk_token_id:
+                                copy_unk[len(expanded)] = span[0]
+                            expanded.extend(tokens)
+                        elif t == TokenType.COPY_NT:
+                            span = nt_spans_inst[v]
+                            tokens = vocab_pair.src2tgt(
+                                src_ids_inst[span[0] : span[1] + 1]
+                            )
+                            copy_nt[span[1] - span[0] - 1].append(
+                                (span[0], len(expanded))
+                            )  # copy_nt starts from w=2
+                            for i, token in enumerate(tokens):
+                                if token == vocab_pair.tgt.unk_token_id:
+                                    copy_unk[len(expanded) + i] = span[0] + i
+                            expanded.extend(tokens)
+
                     if max(expanded) >= len(vocab_pair.tgt):
-                        # some may go to masked rules due to incomplete masking
+                        print(111)
                         continue
+                        assert False, "Debug this"
                     expanded_batch.append((expanded, inst[2]))
                     copy_pts.append(copy_pt)
                     copy_nts.append(copy_nt)
@@ -204,10 +242,6 @@ class NeuralQCFGTgtParser(TgtParserBase):
             ):
                 to_keep = [1 < len(inst[0]) <= 60 for inst in preds_one_inp]
                 _ids = [inst[0] for inst, flag in zip(preds_one_inp, to_keep) if flag]
-
-                if len(_ids) == 0:
-                    new_preds.append(([0, 0], 100, None))
-                    continue
 
                 sort_id = list(range(len(_ids)))
                 sort_id.sort(key=lambda x: len(_ids[x]), reverse=True)
@@ -297,7 +331,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         copy_position=None,  # (pt, nt), nt not implemented
         ignore_src=False,
     ):
-        if copy_position is None:
+        if copy_position is None or not self.use_copy:
             copy_position = (None, None)
 
         batch_size = len(spans)
@@ -402,8 +436,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 )
                 terms = terms.view(batch_size, n, -1)
             if copy_position[1] is not None:
-                # mask True= will set to value
-                # TODO this waste memory to store TGT * SRC. Does this matter?
+                # mask=True will set to value
                 copy_nt = [
                     np.full(
                         (batch_size, n - w, self.nt_states, nt_num_nodes),
@@ -443,7 +476,8 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         # seperate nt and pt features according to span width
         # TODO sanity check: the root node must be the last element of nt_spans.
-        #      because of root rules.
+        #      because of root rules' masking. single words are also required to
+        #      be placed in ascending order.
         # NOTE TreeLSTM guarantees this.
         pt_node_features, nt_node_features = [], []
         pt_spans, nt_spans = [], []
@@ -454,13 +488,13 @@ class NeuralQCFGTgtParser(TgtParserBase):
             pt_span = []
             nt_span = []
 
-            # indices = list(range(len(spans_inst)))
-            # shuffle_start = (len(spans_inst) + 1)//2
-            # shuffle_parts = indices[shuffle_start:]
-            # random.shuffle(shuffle_parts)
-            # indices = indices[:shuffle_start] + shuffle_parts
-            # spans_inst = [spans_inst[i] for i in indices]
-            # node_features_inst = [node_features_inst[i] for i in indices]
+            indices = list(range(len(spans_inst)))
+            shuffle_start = (len(spans_inst) + 1) // 2
+            shuffle_parts = indices[shuffle_start:-1]
+            random.shuffle(shuffle_parts)
+            indices = indices[:shuffle_start] + shuffle_parts + indices[-1:]
+            spans_inst = [spans_inst[i] for i in indices]
+            node_features_inst = [node_features_inst[i] for i in indices]
 
             for s, f in zip(spans_inst, node_features_inst):
                 s_len = s[1] - s[0] + 1
@@ -528,14 +562,22 @@ class NeuralQCFGTgtParser(TgtParserBase):
         nt_node_mask = (
             nt_node_mask[:, None, :, None, :]
             .expand(
-                batch_size, self.nt_states, nt_num_nodes, self.nt_states, nt_num_nodes,
+                batch_size,
+                self.nt_states,
+                nt_num_nodes,
+                self.nt_states,
+                nt_num_nodes,
             )
             .contiguous()
         )
         pt_node_mask = (
             pt_node_mask[:, None, :, None, :]
             .expand(
-                batch_size, self.nt_states, nt_num_nodes, self.pt_states, pt_num_nodes,
+                batch_size,
+                self.nt_states,
+                nt_num_nodes,
+                self.pt_states,
+                pt_num_nodes,
             )
             .contiguous()
         )
@@ -634,4 +676,3 @@ class NeuralQCFGTgtParser(TgtParserBase):
         node_mask = (1.0 - node_mask) * self.neg_huge
 
         return node_mask.contiguous().view(batch_size, nt, nt + pt, nt + pt)
-

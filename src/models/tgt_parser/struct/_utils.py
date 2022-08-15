@@ -19,7 +19,7 @@ def checkpoint(func):
 @jit(nopython=True)
 def weighted_random(cumsum):
     # cumsum = np.cumsum(w)
-    
+
     rdm_unif = np.random.rand(1)
     ind = np.searchsorted(cumsum, rdm_unif, side="right").item()
     return ind
@@ -40,26 +40,27 @@ def reorder(func):
 
         reordered_params = {}
         for key, value in params.items():
-            if key == 'copy_nt':
+            if key == "copy_nt":
                 reordered_value = []
                 for item in value:
                     v = item[0][argsort]
                     m = item[1][argsort]
                     reordered_value.append((v, m))
-                reordered_params['copy_nt'] = reordered_value
+                reordered_params["copy_nt"] = reordered_value
             else:
                 reordered_params[key] = value[argsort]
-        
+
         reordered_lens = [lens[i] for i in argsort]
         output = func(self, reordered_params, reordered_lens, *args, **kwargs)
 
         recovery_order = [None for _ in lens]
         for i, v in enumerate(argsort):
             recovery_order[v] = i
-        
+
         if isinstance(output, list):
             output = [output[i] for i in recovery_order]
         else:
             output = output[recovery_order]
         return output
+
     return wrapper

@@ -1,14 +1,12 @@
-import math
-from typing import Dict, List, Union
-
 import numpy as np
 import torch
 from torch import Tensor
 from torch.autograd import grad
 
-from .td_pcfg import FastestTDPCFG
-from .pcfg import PCFG
+from ._fn import diagonal, diagonal_copy_, stripe
 from ._utils import checkpoint
+from .pcfg import PCFG
+from .td_pcfg import FastestTDPCFG
 
 
 class PCFGRandomizedDP(FastestTDPCFG):
@@ -55,14 +53,14 @@ class PCFGRandomizedDP(FastestTDPCFG):
         rXYz = rules[:, :, NTs, Ts].contiguous()
         rXyz = rules[:, :, Ts, Ts].contiguous()
 
-        span_indicator = rules.new_zeros(batch, N, N, requires_grad=marginal)
+        span_indicator = rules.new_zeros(batch, N, N, NT, requires_grad=marginal)
 
         for step, w in enumerate(range(2, N)):
             n = N - w
 
             Y_term = terms[:, :n, :, None]
             Z_term = terms[:, w - 1 :, None, :]
-            indicator = span_indicator.diagonal(w, 1, 2).unsqueeze(-1)
+            indicator = span_indicator.diagonal(w, 1, 2).movedim(-1, 1)
 
             if w == 2:
                 score = Xyz(Y_term, Z_term, rXyz)
@@ -106,7 +104,7 @@ class PCFGRandomizedDP(FastestTDPCFG):
 
         if decode:
             spans = self.get_prediction(logZ, span_indicator, lens)
-            spans = [[(span[0], span[1] - 1, 0) for span in inst] for inst in spans]
+            # spans = [[(span[0], span[1] - 1, 0) for span in inst] for inst in spans]
             return spans
             # trees = []
             # for spans_inst, l in zip(spans, lens.tolist()):
@@ -219,47 +217,6 @@ def XyZ(y: Tensor, Z: Tensor, Z_ind: Tensor, rule: Tensor):
     b_n_yz = (y + Z).reshape(b, n, nt * t)
     b_n_x = (b_n_yz.unsqueeze(-2) + rule).logsumexp(-1)
     return b_n_x
-
-
-def stripe(x, n, w, offset=(0, 0), dim=1):
-    x, seq_len = x.contiguous(), x.size(2)
-    stride = list(x.stride())
-    numel = stride[2]
-    stride[1] = (seq_len + 1) * numel
-    stride[2] = (1 if dim == 1 else seq_len) * numel
-    if len(x.shape) > 3:
-        return x.as_strided(
-            size=(x.shape[0], n, w, *list(x.shape[3:])),
-            stride=stride,
-            storage_offset=(offset[0] * seq_len + offset[1]) * numel,
-        )
-    else:
-        return x.as_strided(
-            size=(x.shape[0], n, w),
-            stride=stride,
-            storage_offset=(offset[0] * seq_len + offset[1]) * numel,
-        )
-
-
-def diagonal_copy_(x, y, w):
-    x, seq_len = x.contiguous(), x.size(1)
-    stride, numel = list(x.stride()), x[:, 0, 0].numel()
-    new_stride = []
-    new_stride.append(stride[0])
-    new_stride.append(stride[1] + stride[2])
-    if len(x.shape) > 3:
-        new_stride.extend(stride[3:])
-        x.as_strided(
-            size=(x.shape[0], seq_len - w, *list(x.shape[3:])),
-            stride=new_stride,
-            storage_offset=w * stride[2],
-        ).copy_(y)
-    else:
-        x.as_strided(
-            size=(x.shape[0], seq_len - w),
-            stride=new_stride,
-            storage_offset=w * stride[2],
-        ).copy_(y)
 
 
 if __name__ == "__main__":

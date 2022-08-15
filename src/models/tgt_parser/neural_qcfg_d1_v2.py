@@ -10,23 +10,77 @@ from ..components.common import MultiResidualLayer
 from .base import TgtParserBase
 from .neural_qcfg_d1 import NeuralQCFGD1TgtParser
 from .struct.d1_pcfg import D1PCFG
-from .struct.pcfg import PCFG
 
-
-def get_nn(dim, cpd_rank):
-    return nn.Sequential(
-        nn.LeakyReLU(), nn.Linear(dim, cpd_rank) #, nn.LayerNorm(cpd_rank)
-    )
-
-# TODO: r emb
 
 class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        vocab=100,
+        dim=256,
+        num_layers=3,
+        src_dim=256,
+        nt_states=10,
+        pt_states=1,
+        rule_constraint_type=0,
+        use_copy=False,
+        nt_span_range=[2, 1000],
+        pt_span_range=[1, 1],
+        cpd_rank=96,
+        num_samples=10,
+        check_ppl=False,
+        check_ppl_batch_size=None,
+    ):
         # Different parameterization. Init nothing from bases.
-        TgtParserBase.__init__(self) 
+        TgtParserBase.__init__(self)
+        self.neg_huge = -1e9
+        self.vocab = vocab
+        self.dim = dim
+        self.src_dim = src_dim
+        self.num_layers = num_layers
+        self.nt_states = nt_states
+        self.pt_states = pt_states
+        self.rule_constraint_type = rule_constraint_type
+        self.use_copy = use_copy
+        self.nt_span_range = nt_span_range
+        self.pt_span_range = pt_span_range
+        self.cpd_rank = cpd_rank
+        self.num_samples = num_samples
+        self.check_ppl = check_ppl  # If true, there is a length limitation.
+        self.check_ppl_batch_size = check_ppl_batch_size
+        self.pcfg = D1PCFG(self.nt_states, self.pt_states)
 
-        
-        
+        self.nt_emb = nn.Parameter(torch.empty(nt_states, dim))
+        self.nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
+        self.pt_emb = nn.Parameter(torch.empty(pt_states, dim))
+        self.pt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
+        self.r_emb = nn.Parameter(torch.empty(cpd_rank, dim))
+
+        self.root_mlp_child = nn.Linear(dim, 1, bias=False)
+        self.vocab_out = MultiResidualLayer(
+            dim, dim, out_dim=vocab, num_layers=num_layers
+        )
+
+        self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)
+
+        self.act = nn.LeakyReLU()
+        self.ai_r_weight = nn.Parameter(torch.empty(dim, dim))
+        self.ri_b_weight = nn.Parameter(torch.empty(dim, dim))
+        self.ri_c_weight = nn.Parameter(torch.empty(dim, dim))
+        self.ri_jk_weight = nn.Parameter(torch.empty(dim, dim))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.nt_emb)
+        nn.init.xavier_uniform_(self.pt_emb)
+        nn.init.xavier_uniform_(self.r_emb)
+        nn.init.xavier_uniform_(self.ai_r_weight)
+        nn.init.xavier_uniform_(self.ri_b_weight)
+        nn.init.xavier_uniform_(self.ri_c_weight)
+        nn.init.xavier_uniform_(self.ri_jk_weight)
+
     def get_params(
         self,
         node_features,
@@ -34,55 +88,29 @@ class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
         x: Optional[torch.Tensor] = None,
         copy_position=None,  # (pt, nt), nt not implemented
     ):
-        if copy_position is None:
+        if copy_position is None or not self.use_copy:
             copy_position = (None, None)
 
         batch_size = len(spans)
-
-        # seperate nt and pt features according to span width
-        # TODO sanity check: the root node must be the last element of nt_spans.
-        # NOTE TreeLSTM guarantees this.
-        pt_node_features, nt_node_features = [], []
-        pt_spans, nt_spans = [], []
-        for spans_inst, node_features_inst in zip(spans, node_features):
-            pt_node_feature = []
-            nt_node_feature = []
-            pt_span = []
-            nt_span = []
-            for i, s in enumerate(spans_inst):
-                s_len = s[1] - s[0] + 1
-                if s_len >= self.nt_span_range[0] and s_len <= self.nt_span_range[1]:
-                    nt_node_feature.append(node_features_inst[i])
-                    nt_span.append(s)
-                if s_len >= self.pt_span_range[0] and s_len <= self.pt_span_range[1]:
-                    pt_node_feature.append(node_features_inst[i])
-                    pt_span.append(s)
-            if len(nt_node_feature) == 0:
-                nt_node_feature.append(node_features_inst[-1])
-                nt_span.append(spans_inst[-1])
-            pt_node_features.append(torch.stack(pt_node_feature))
-            nt_node_features.append(torch.stack(nt_node_feature))
-            pt_spans.append(pt_span)
-            nt_spans.append(nt_span)
-        nt_num_nodes_list = [len(inst) for inst in nt_node_features]
-        pt_num_nodes_list = [len(inst) for inst in pt_node_features]
-        nt_node_features = pad_sequence(
-            nt_node_features, batch_first=True, padding_value=0.0
-        )
-        pt_node_features = pad_sequence(
-            pt_node_features, batch_first=True, padding_value=0.0
-        )
-        pt_num_nodes = pt_node_features.size(1)
-        nt_num_nodes = nt_node_features.size(1)
+        (
+            nt_spans,
+            nt_num_nodes_list,
+            nt_num_nodes,
+            nt_node_features,
+            pt_spans,
+            pt_num_nodes_list,
+            pt_num_nodes,
+            pt_node_features,
+        ) = self.build_src_features(spans, node_features)
         device = nt_node_features.device
 
         # e = u + h
-        nt_node_emb = self.src_nt_node_mlp(nt_node_features)
-        nt_state_emb = self.src_nt_emb.expand(batch_size, self.nt_states, self.dim)
+        nt_node_emb = self.nt_node_mlp(nt_node_features)
+        nt_state_emb = self.nt_emb.expand(batch_size, self.nt_states, self.dim)
         nt_emb = nt_state_emb.unsqueeze(2) + nt_node_emb.unsqueeze(1)
 
-        pt_node_emb = self.src_pt_node_mlp(pt_node_features)
-        pt_state_emb = self.src_pt_emb.expand(batch_size, self.pt_states, self.dim)
+        pt_node_emb = self.pt_node_mlp(pt_node_features)
+        pt_state_emb = self.pt_emb.expand(batch_size, self.pt_states, self.dim)
         pt_emb = pt_state_emb.unsqueeze(2) + pt_node_emb.unsqueeze(1)
 
         # S->A
@@ -99,27 +127,32 @@ class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
         roots = F.log_softmax(roots, 1)
 
         # A->BC
-        state_emb = torch.cat([nt_state_emb, pt_state_emb], 1)
         node_emb = nt_node_emb  # torch.cat([nt_node_emb, pt_node_emb], 1)
-        rule_head = self.ai_r_nn(
-            self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))
-        ).log_softmax(-1)
-        rule_left = (
-            self.r_b_nn(self.rule_mlp_left(state_emb)).transpose(1, 2).log_softmax(-1)
-        )
-        rule_right = (
-            self.r_c_nn(self.rule_mlp_right(state_emb)).transpose(1, 2).log_softmax(-1)
-        )
-
         i = self.root_mlp_i(node_emb)
         j = self.root_mlp_j(node_emb)
         k = self.root_mlp_k(node_emb)
-        ijk = torch.einsum("bin,bjn,bkn->bijkn", i, j, k)
+        state_emb = torch.cat([nt_state_emb, pt_state_emb], 1)
+
+        rule_head = (
+            torch.einsum(
+                "baix,xy,ry->bair", self.act(nt_emb), self.ai_r_weight, self.r_emb
+            )
+            .log_softmax(-1)
+            .view(batch_size, -1, self.cpd_rank)
+        )
+        rule_left = torch.einsum(
+            "rx,xy,bny->brn", self.r_emb, self.ri_b_weight, state_emb
+        ).log_softmax(-1)
+        rule_right = torch.einsum(
+            "rx,xy,bny->brn", self.r_emb, self.ri_c_weight, state_emb
+        ).log_softmax(-1)
+
+        ri = self.act(self.r_emb[None, :, None] + i.unsqueeze(1))
+        jk = self.act(j.unsqueeze(2) + k.unsqueeze(1))
+        rule_slr = torch.einsum("brix,xy,bjky->brijk", ri, self.ri_jk_weight, jk)
         num_nodes = nt_num_nodes  # + pt_num_nodes
         rule_slr = (
-            self.r_jk_nn(ijk)
-            .movedim(4, 1)
-            .view(batch_size, self.cpd_rank, num_nodes, -1)
+            rule_slr.view(batch_size, self.cpd_rank, num_nodes, -1)
             .log_softmax(-1)
             .view(batch_size, self.cpd_rank, num_nodes, num_nodes, num_nodes)
             .clone()
@@ -176,7 +209,7 @@ class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
             if copy_position[0] is not None:
                 # TODO sanity check: pt_spans begin with (0,0), (1,1) ... (n-1,n-1)
                 terms = terms.view(batch_size, n, self.pt_states, -1)
-                terms[:, :, -1, :copy_position[0].shape[1]] = (
+                terms[:, :, -1, : copy_position[0].shape[1]] = (
                     0.1 * self.neg_huge * ~copy_position[0].transpose(1, 2)
                 )
                 terms = terms.view(batch_size, n, -1)
@@ -221,7 +254,6 @@ class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
             "right": rule_right,
             "head": rule_head,
             "slr": rule_slr,
-            "copy_nt": copy_nt
+            "copy_nt": copy_nt,
         }
         return params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes
-
