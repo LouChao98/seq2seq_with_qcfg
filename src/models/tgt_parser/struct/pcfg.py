@@ -1,5 +1,5 @@
 from enum import IntEnum
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 import torch
@@ -57,7 +57,7 @@ class PCFG:
     @torch.no_grad()
     def sampled_decoding(
         self,
-        params,
+        params: Dict[str, Tensor],
         nt_spans,
         nt_states,
         pt_spans,
@@ -70,22 +70,9 @@ class PCFG:
         rules = params["rule"].detach()
         roots = params["root"].detach()
 
-        terms: torch.Tensor
-        zero = terms.new_full((1,), -1e9)
-        # TODO: check clamp(1e-2) is enough to filter masked rules, and do not harm the sampling too much.
-        threshold = terms.new_full((1,), np.log(1e-2))
-        terms = torch.where(terms > threshold, terms, zero).softmax(2).cumsum(2)
-        rules = (
-            torch.where(rules > threshold, rules, zero)
-            .view(*rules.shape[:2], -1)
-            .softmax(2)
-            .cumsum(2)
-        )
-        roots = torch.where(roots > threshold, roots, zero).softmax(1).cumsum(1)
-        terms[:, :, -1] += 1  # avoid out of bound
-        rules[:, :, -1] += 1
-        roots[:, -1] += 1
-
+        terms = terms.softmax(2).clamp(1e-3).cumsum(2)
+        rules = rules.flatten(2).softmax(2).clamp(1e-3).cumsum(2)
+        roots = roots.softmax(1).clamp(1e-3).cumsum(1)
         terms = terms.cpu().numpy()
         rules = rules.cpu().numpy()
         roots = roots.cpu().numpy()
@@ -130,9 +117,6 @@ class PCFG:
         max_actions=100,
         UNK=1,
     ):
-        # TODO: fix scores, rules/terms/roots are cumsum. so current impl is wrong.
-        # NOTE: this bug has no effect if check_ppl=True.
-        #
         # Kim's impl derive the rightmost NT first. But I change it to left first.
         # My order (LL) should be more nature to combine with LM, as the generation order
         # of mine is left-to-right.
@@ -141,9 +125,6 @@ class PCFG:
         #
         # Kim's impl seems to be wrong when deriving COPY. The order of left/right PT
         # appended to the buffer in his impl should be reversed.
-        #
-        # TODO check this sampling impl
-        # https://gist.github.com/jph00/30cfed589a8008325eae8f36e2c5b087
 
         NT = rules.shape[0]
         PT = terms.shape[0]
@@ -157,7 +138,7 @@ class PCFG:
         for i in range(num_samples):
             actions = 0
             sample = weighted_random(roots)
-            score = roots[sample]
+            # score = roots[sample]
             nonterminals: List[int] = [sample]
             preterminals: List[int] = []
             is_copy_pt: List[bool] = []
@@ -178,7 +159,7 @@ class PCFG:
                             continue
                     actions += 1
                     sample = weighted_random(rules[s])
-                    score += rules[s, sample]
+                    # score += rules[s, sample]
                     left, right = divmod(sample, S)
                     nonterminals.extend([right, left])
                 else:
@@ -199,7 +180,7 @@ class PCFG:
                         terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random(terms[s])
-                        score += terms[s, sample]
+                        # score += terms[s, sample]
                         if use_copy and sample == UNK:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
@@ -210,7 +191,7 @@ class PCFG:
                             terminal_type.append(_VOCAB)
             samples[i] = terminals
             types[i] = terminal_type
-            scores[i] = score / (len(terminals) + 1e-9)
+            # scores[i] = score / (len(terminals) + 1e-9)
         return samples, types, scores
 
     @staticmethod
@@ -241,7 +222,7 @@ class PCFG:
         for i in range(num_samples):
             actions = 0
             sample = weighted_random(roots)
-            score = roots[sample]
+            # score = roots[sample]
             nonterminals: List[int] = [sample]
             preterminals: List[int] = []
             is_copy_pt: List[bool] = []
@@ -262,7 +243,7 @@ class PCFG:
                             continue
                     actions += 1
                     sample = weighted_random(rules[s])
-                    score += rules[s, sample]
+                    # score += rules[s, sample]
                     left, right = divmod(sample, S)
                     nonterminals.extend([left, right])
                 else:
@@ -286,7 +267,7 @@ class PCFG:
                         terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random(terms[s])
-                        score += terms[s, sample]
+                        # score += terms[s, sample]
                         if use_copy and sample == UNK:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
@@ -297,67 +278,5 @@ class PCFG:
                             terminal_type.append(_VOCAB)
             samples[i] = terminals
             types[i] = terminal_type
-            scores[i] = score / len(terminals)
+            # scores[i] = score / len(terminals)
         return samples, types, scores
-
-
-if __name__ == "__main__":
-    from time import time
-
-    torch.random.manual_seed(1)
-
-    B, N, T, NT, r = 4, 5, 3, 7, 2
-    device = "cpu"
-    params = {
-        "term": torch.randn(B, N, T, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
-        "root": torch.randn(B, NT, device=device).log_softmax(-1).requires_grad_(True),
-        "head": torch.randn(B, NT, r, device=device).softmax(-1).requires_grad_(True),
-        "left": torch.randn(B, NT + T, r, device=device)
-        .softmax(-2)
-        .requires_grad_(True),
-        "right": torch.randn(B, NT + T, r, device=device)
-        .softmax(-2)
-        .requires_grad_(True),
-    }
-    lens = torch.tensor([N, N - 1, N - 1, N - 3], dtype=torch.long, device=device)
-
-    pcfg = PCFG()
-
-    # t = time()
-    # print(pcfg(params, lens))
-    print(pcfg(params, lens, decode=True))
-    # print(time() - t)
-
-    # cfg = FastestTDPCFG()
-    # t = time()
-    # logZ = cfg(params, lens)
-    # print(logZ)
-    # print(time() - t)
-    # exit(0)
-
-    # print(cfg(params, lens, argmax=True))
-    # # logZ.sum().backward()
-    # # print(params["head"].grad[0])
-
-    # # mrg = cfg._inside(params, lens, marginal=True)
-    # # print(mrg[0].sum())
-
-    # for k in params.keys():
-    #     params[k] = params[k].detach().clone()
-    # cfg = PCFG()
-    # params = (
-    #     params["term"],
-    #     torch.einsum(
-    #         "bxr,byr,bzr->bxyz", params["head"], params["left"], params["right"]
-    #     ).log(),
-    #     params["root"],
-    # )
-    # logZ = -cfg(params, lens)
-    # print(logZ)
-    # cfg(params, lens, argmax=True)
-    # # logZ.sum().backward()
-    # # print(params['head'].grad[0])
-
-    # print("Ok if same")

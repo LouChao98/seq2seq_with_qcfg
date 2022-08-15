@@ -20,7 +20,7 @@ def checkpoint(func):
 def weighted_random(cumsum):
     # cumsum = np.cumsum(w)
 
-    rdm_unif = np.random.rand(1)
+    rdm_unif = np.random.rand() * cumsum[-1]
     ind = np.searchsorted(cumsum, rdm_unif, side="right").item()
     return ind
 

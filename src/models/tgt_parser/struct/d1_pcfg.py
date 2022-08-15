@@ -189,7 +189,7 @@ class D1PCFG(TDStyleBase):
     @torch.no_grad()
     def sampled_decoding(
         self,
-        params,
+        params: Dict[str, Tensor],
         nt_spans,
         src_nt_states,
         pt_spans,
@@ -198,28 +198,19 @@ class D1PCFG(TDStyleBase):
         num_samples=10,
         max_length=100,
     ):
-        terms: torch.Tensor = params["term"].detach()
-        roots: torch.Tensor = params["root"].detach()
-        H: torch.Tensor = params["head"].detach()  # (batch, NT, r) r:=rank
-        L: torch.Tensor = params["left"].detach()  # (batch, r, TGT_NT + TGT_PT)
-        R: torch.Tensor = params["right"].detach()  # (batch, r, TGT_NT + TGT_PT)
-        SLR: torch.Tensor = params["slr"].detach()
+        terms = params["term"].detach()
+        roots = params["root"].detach()
+        H = params["head"].detach()  # (batch, NT, r) r:=rank
+        L = params["left"].detach()  # (batch, r, TGT_NT + TGT_PT)
+        R = params["right"].detach()  # (batch, r, TGT_NT + TGT_PT)
+        SLR = params["slr"].detach()
 
-        zero = terms.new_full((1,), -1e9)
-        threshold = terms.new_full((1,), np.log(1e-2))
-        terms = torch.where(terms > threshold, terms, zero).softmax(2).cumsum(2)
-        roots = torch.where(roots > threshold, roots, zero).softmax(1).cumsum(1)
-        H = torch.where(H > threshold, H, zero).softmax(2).cumsum(2)
-        L = torch.where(L > threshold, L, zero).softmax(2).cumsum(2)
-        R = torch.where(R > threshold, R, zero).softmax(2).cumsum(2)
-        SLR = torch.where(SLR > threshold, SLR, zero).flatten(3).softmax(2).cumsum(2)
-
-        terms[..., -1] += 1  # avoid out of bound
-        roots[..., -1] += 1
-        H[..., -1] += 1
-        L[..., -1] += 1
-        R[..., -1] += 1
-        SLR[..., -1] += 1
+        terms = terms.softmax(2).clamp(1e-3).cumsum(2)
+        roots = roots.softmax(1).clamp(1e-3).cumsum(1)
+        H = H.softmax(2).clamp(1e-3).cumsum(2)
+        L = L.softmax(2).clamp(1e-3).cumsum(2)
+        R = R.softmax(2).clamp(1e-3).cumsum(2)
+        SLR = SLR.flatten(3).softmax(2).clamp(1e-3).cumsum(2)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()
@@ -284,7 +275,7 @@ class D1PCFG(TDStyleBase):
         for i in prange(num_samples):
             actions = 0
             sample = weighted_random(roots)
-            score = roots[sample]
+            # score = roots[sample]
             nonterminals: List[int] = [sample]
             preterminals: List[int] = []
             is_copy_pt: List[bool] = []
@@ -308,12 +299,12 @@ class D1PCFG(TDStyleBase):
                     right = weighted_random(rules_right[r])
                     jk = weighted_random(rules_src[r, nt_node])
                     j, k = divmod(jk, nt_num_nodes)
-                    score += (
-                        rules_head[s, r]
-                        + rules_left[r, left]
-                        + rules_right[r, right]
-                        + rules_src[r, nt_node, jk]
-                    )
+                    # score += (
+                    #     rules_head[s, r]
+                    #     + rules_left[r, left]
+                    #     + rules_right[r, right]
+                    #     + rules_src[r, nt_node, jk]
+                    # )
                     nonterminals.extend(
                         [right * nt_num_nodes + k, left * nt_num_nodes + j]
                     )
@@ -335,7 +326,7 @@ class D1PCFG(TDStyleBase):
                         terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random(terms[s])
-                        score += terms[s, sample]
+                        # score += terms[s, sample]
                         if use_copy and sample == UNK:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
@@ -346,7 +337,7 @@ class D1PCFG(TDStyleBase):
                             terminal_type.append(_VOCAB)
             samples[i] = terminals
             types[i] = terminal_type
-            scores[i] = score / (len(terminals) + 1e-9)
+            # scores[i] = score / (len(terminals) + 1e-9)
         return samples, types, scores
 
     @staticmethod
