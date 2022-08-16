@@ -222,6 +222,9 @@ class D2PCFG(TDStyleBase):
         R = R.cpu().numpy()
         SLR = SLR.cpu().numpy()
 
+        max_nt_spans = max(len(item) for item in nt_spans)
+        max_pt_spans = max(len(item) for item in pt_spans)
+
         preds = []
         for b in range(len(terms)):
             samples, types, scores = self.sample(
@@ -231,9 +234,9 @@ class D2PCFG(TDStyleBase):
                 R[b],
                 SLR[b],
                 roots[b],
-                len(nt_spans[b]),
+                max_nt_spans,
                 src_nt_states,
-                len(pt_spans[b]),
+                max_pt_spans,
                 src_pt_states,
                 use_copy=use_copy,
                 num_samples=num_samples,
