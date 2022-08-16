@@ -10,6 +10,9 @@ from .td_pcfg import FastestTDPCFG
 
 
 class PCFGRandomizedDP(FastestTDPCFG):
+    """This only implement inside, marginal and decode.
+    For sampling, use naive PCFG."""
+
     def __init__(self, topk, sample_size, smooth):
         self.topk = topk
         self.sample_size = sample_size

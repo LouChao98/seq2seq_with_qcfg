@@ -1,4 +1,5 @@
 import random
+from collections import defaultdict
 from typing import Optional
 
 import numpy as np
@@ -27,9 +28,14 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         num_layers = self.num_layers
         self.cpd_rank = cpd_rank
         self.pcfg = D1PCFG(self.nt_states, self.pt_states)
-        self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
-        self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
-        self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        # self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        # self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        # self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        self.root_mlp_i = get_nn(dim, dim)
+        self.root_mlp_j = get_nn(dim, dim)
+        self.root_mlp_k = get_nn(dim, dim)
+        self.rijk_weight = nn.Parameter(torch.empty(cpd_rank, dim, dim))
+        nn.init.kaiming_uniform_(self.rijk_weight)
         self.ai_r_nn = get_nn(dim, cpd_rank)
         self.r_b_nn = get_nn(dim, cpd_rank)
         self.r_c_nn = get_nn(dim, cpd_rank)
@@ -131,16 +137,29 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         i = self.root_mlp_i(node_emb)
         j = self.root_mlp_j(node_emb)
         k = self.root_mlp_k(node_emb)
-        ijk = i[:, :, None, None] + j[:, None, :, None] + k[:, None, None, :]
+        rule_slr = torch.einsum(
+            "rab,xia,xjkb->xrijk",
+            self.rijk_weight,
+            F.leaky_relu(i),
+            F.leaky_relu(j[:, :, None] + k[:, None, :]),
+        )
         num_nodes = nt_num_nodes  # + pt_num_nodes
         rule_slr = (
-            self.r_jk_nn(ijk)
-            .movedim(4, 1)
-            .view(batch_size, self.cpd_rank, num_nodes, -1)
+            rule_slr.view(batch_size, self.cpd_rank, num_nodes, -1)
             .log_softmax(-1)
             .view(batch_size, self.cpd_rank, num_nodes, num_nodes, num_nodes)
             .clone()
         )
+        # ijk = i[:, :, None, None] + j[:, None, :, None] + k[:, None, None, :]
+        # num_nodes = nt_num_nodes  # + pt_num_nodes
+        # rule_slr = (
+        #     self.r_jk_nn(ijk)
+        #     .movedim(4, 1)
+        #     .view(batch_size, self.cpd_rank, num_nodes, -1)
+        #     .log_softmax(-1)
+        #     .view(batch_size, self.cpd_rank, num_nodes, num_nodes, num_nodes)
+        #     .clone()
+        # )
 
         # fmt: off
         nt_mask = torch.arange(nt_num_nodes, device=i.device).unsqueeze(0) \
@@ -182,6 +201,21 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         mask = torch.from_numpy(is_multi)[:, None, :, None, None]
         mask = mask.expand(-1, rule_slr.shape[1], -1, *rule_slr.shape[-2:])
         rule_slr[~mask] = self.neg_huge
+
+        # debug_m = (rule_slr[0, 0].exp() > 1e-4).nonzero().tolist()
+        # debug_spans = nt_spans[0]
+        # children = defaultdict(set)
+        # for i, j, k in debug_m:
+        #     children[i].add(j)
+        #     children[i].add(k)
+        # for i, vset in children.items():
+        #     print(f'Parent={debug_spans[i]}')
+        #     print('  ' + ', '.join(str(debug_spans[j]) for j in vset))
+        # print('===')
+        # debug_m = terms.view(batch_size, self.pt_states, -1, terms.shape[-1])
+        # debug_m = debug_m[0, 0, :, 0].exp().nonzero().squeeze(-1).tolist()
+        # for i in debug_m:
+        #     print(pt_spans[0][i], end=', ')
 
         copy_nt = None
         if x is not None:
@@ -258,6 +292,8 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
                 for j, child_span in enumerate(nt_span):
                     if not (is_parent(parent_span, child_span)):
                         nt_node_mask[b, i, j] = False
+                # if i == len(nt_span) - 1:
+                #     nt_node_mask[b, i, i] = False
 
         node_mask = nt_node_mask.unsqueeze(3) * nt_node_mask.unsqueeze(2)
         return node_mask.view(batch_size, nt, nt, nt)

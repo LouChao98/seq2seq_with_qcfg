@@ -22,7 +22,7 @@ datamodule:
   eval_batch_size: 1
   # batch_size: 12
   # eval_batch_size: 4
-  max_src_len: 20
+  max_src_len: 60
   # copy_mode: 'none'
 
 model:
@@ -30,10 +30,10 @@ model:
   decoder:
     num_samples: 10
     check_ppl_batch_size: 1
-    cpd_rank: 64
+    cpd_rank: 256
 
 trainer:
-  max_epochs: 25
+  max_epochs: 100
   accumulate_grad_batches: 1
   gradient_clip_val: 3
 

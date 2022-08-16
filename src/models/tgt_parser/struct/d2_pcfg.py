@@ -10,6 +10,7 @@ from torch.autograd import grad
 
 from ._fn import diagonal, diagonal_copy_, stripe
 from ._utils import checkpoint, reorder, weighted_random
+from .td_style_base import TDStyleBase
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
 
@@ -20,7 +21,7 @@ class TokenType(IntEnum):
     COPY_PT = _COPY_PT
 
 
-class D2PCFG:
+class D2PCFG(TDStyleBase):
     # A[i] -> B[j], C[k]
     # ================
     # A[i] -> R
@@ -41,6 +42,8 @@ class D2PCFG:
         self.eq_qnri = tse.compile_equation("qnkrj,qrijk->qnri")
         self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
         self.eq_tor = tse.compile_equation("xlpi,xrip->xlir")
+
+        self.threshold = torch.nn.Threshold(1e-3, 0)
 
     @reorder
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
@@ -98,15 +101,6 @@ class D2PCFG:
 
         # ===== End =====
 
-        left_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
-        right_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
-        left_term = tse.log_einsum(self.eq_tor, terms, TLPT, block_size=self.block_size)
-        right_term = tse.log_einsum(
-            self.eq_tor, terms, TRPT, block_size=self.block_size
-        )
-        diagonal_copy_(left_s, left_term, w=1)
-        diagonal_copy_(right_s, right_term, w=1)
-
         if marginal:
             span_indicator = terms.new_zeros(
                 batch, N, N, self.tgt_nt_states, nt_spans
@@ -114,6 +108,18 @@ class D2PCFG:
             span_indicator_running = span_indicator[:]
         else:
             span_indicator = None
+
+        left_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
+        right_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
+        if marginal:
+            indicator = span_indicator_running.diagonal(1, 1, 2).movedim(-1, 1)
+            terms = terms + indicator
+        left_term = tse.log_einsum(self.eq_tor, terms, TLPT, block_size=self.block_size)
+        right_term = tse.log_einsum(
+            self.eq_tor, terms, TRPT, block_size=self.block_size
+        )
+        diagonal_copy_(left_s, left_term, w=1)
+        diagonal_copy_(right_s, right_term, w=1)
 
         # prepare length, same as the batch_size in PackedSequence
         n_at_position = (
@@ -202,12 +208,12 @@ class D2PCFG:
         R = params["right"].detach()  # (batch, r, TGT_NT + TGT_PT)
         SLR = params["slr"].detach()
 
-        terms = terms.softmax(2).clamp(1e-3).cumsum(2)
-        roots = roots.softmax(1).clamp(1e-3).cumsum(1)
-        H = H.softmax(2).clamp(1e-3).cumsum(2)
-        L = L.softmax(3).clamp(1e-3).cumsum(3)
-        R = R.softmax(3).clamp(1e-3).cumsum(3)
-        SLR = SLR.flatten(3).softmax(2).clamp(1e-3).cumsum(2)
+        terms = self.threshold(terms.softmax(2)).cumsum(2)
+        roots = self.threshold(roots.softmax(1)).cumsum(1)
+        H = self.threshold(H.softmax(2)).cumsum(2)
+        L = self.threshold(L.softmax(3)).cumsum(3)
+        R = self.threshold(R.softmax(3)).cumsum(3)
+        SLR = self.threshold(SLR.flatten(3).softmax(3)).cumsum(3)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()

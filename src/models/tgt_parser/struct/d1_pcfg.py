@@ -43,6 +43,8 @@ class D1PCFG(TDStyleBase):
         self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
         self.eq_tor = tse.compile_equation("xlpi,xrp->xlir")
 
+        self.threshold = torch.nn.Threshold(1e-3, 0)
+
     @reorder
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
         if decode:
@@ -99,15 +101,6 @@ class D1PCFG(TDStyleBase):
 
         # ===== End =====
 
-        left_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
-        right_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
-        left_term = tse.log_einsum(self.eq_tor, terms, TLPT, block_size=self.block_size)
-        right_term = tse.log_einsum(
-            self.eq_tor, terms, TRPT, block_size=self.block_size
-        )
-        diagonal_copy_(left_s, left_term, w=1)
-        diagonal_copy_(right_s, right_term, w=1)
-
         if marginal:
             span_indicator = terms.new_zeros(
                 batch, N, N, self.tgt_nt_states, nt_spans
@@ -116,6 +109,18 @@ class D1PCFG(TDStyleBase):
             span_indicator_running = span_indicator[:]
         else:
             span_indicator = None
+
+        left_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
+        right_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
+        if marginal:
+            indicator = span_indicator_running.diagonal(1, 1, 2).movedim(-1, 1)
+            terms = terms + indicator
+        left_term = tse.log_einsum(self.eq_tor, terms, TLPT, block_size=self.block_size)
+        right_term = tse.log_einsum(
+            self.eq_tor, terms, TRPT, block_size=self.block_size
+        )
+        diagonal_copy_(left_s, left_term, w=1)
+        diagonal_copy_(right_s, right_term, w=1)
 
         # prepare length, same as the batch_size in PackedSequence
         n_at_position = (
@@ -205,12 +210,12 @@ class D1PCFG(TDStyleBase):
         R = params["right"].detach()  # (batch, r, TGT_NT + TGT_PT)
         SLR = params["slr"].detach()
 
-        terms = terms.softmax(2).clamp(1e-3).cumsum(2)
-        roots = roots.softmax(1).clamp(1e-3).cumsum(1)
-        H = H.softmax(2).clamp(1e-3).cumsum(2)
-        L = L.softmax(2).clamp(1e-3).cumsum(2)
-        R = R.softmax(2).clamp(1e-3).cumsum(2)
-        SLR = SLR.flatten(3).softmax(2).clamp(1e-3).cumsum(2)
+        terms = self.threshold(terms.softmax(2)).cumsum(2)
+        roots = self.threshold(roots.softmax(1)).cumsum(1)
+        H = self.threshold(H.softmax(2)).cumsum(2)
+        L = self.threshold(L.softmax(2)).cumsum(2)
+        R = self.threshold(R.softmax(2)).cumsum(2)
+        SLR = self.threshold(SLR.flatten(3).softmax(3)).cumsum(3)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()
@@ -279,6 +284,7 @@ class D1PCFG(TDStyleBase):
             nonterminals: List[int] = [sample]
             preterminals: List[int] = []
             is_copy_pt: List[bool] = []
+            failed = False
 
             while (
                 len(nonterminals) > 0
@@ -297,8 +303,22 @@ class D1PCFG(TDStyleBase):
                     r = weighted_random(rules_head[s])
                     left = weighted_random(rules_left[r])
                     right = weighted_random(rules_right[r])
-                    jk = weighted_random(rules_src[r, nt_node])
-                    j, k = divmod(jk, nt_num_nodes)
+
+                    check_left = not (use_copy and left == COPY_NT)
+                    check_right = not (use_copy and right == COPY_NT)
+                    for patience in range(5):
+                        jk = weighted_random(rules_src[r, nt_node])
+                        j, k = divmod(jk, nt_num_nodes)
+                        ok = True
+                        if check_left:
+                            ok &= rules_src[0, j, -1] > 0
+                        if check_right:
+                            ok &= rules_src[0, k, -1] > 0
+                        if ok:
+                            break
+                    if not ok:
+                        failed = True
+                        break
                     # score += (
                     #     rules_head[s, r]
                     #     + rules_left[r, left]
@@ -311,6 +331,10 @@ class D1PCFG(TDStyleBase):
                 else:
                     preterminals.append(s - NT)
                     is_copy_pt.append(False)
+
+            if failed:
+                # print('failed')
+                continue
 
             terminals: List[int] = []
             terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span

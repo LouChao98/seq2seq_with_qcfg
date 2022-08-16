@@ -28,7 +28,10 @@ class FastestTDPCFG(TDStyleBase):
     # 2. remove unecessary tensor.clone()
     # 3. respect lens
 
-    # sampling: as the code generate samples one by one. I just recover the rules. Memory should be ok.
+    def __init__(self) -> None:
+        super().__init__()
+        self.threshold = torch.nn.Threshold(1e-3, 0)
+
     @reorder
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
         if decode:
@@ -67,26 +70,27 @@ class FastestTDPCFG(TDStyleBase):
         H = H.transpose(-1, -2)
         H_L = torch.matmul(H, L_nonterm)
         H_R = torch.matmul(H, R_nonterm)
+        if marginal:
+            span_indicator = terms.new_zeros(batch, N, N, NT).requires_grad_()
+            span_indicator_running = span_indicator[:]
+        else:
+            span_indicator = None
 
         normalizer = terms.new_full((batch, N, N), -1e9)
         norm = terms.max(-1)[0]
         diagonal_copy_(normalizer, norm, w=1)
         terms = (terms - norm.unsqueeze(-1)).exp()
+        if marginal:
+            indicator = span_indicator_running.diagonal(1, 1, 2).movedim(-1, 1)
+            terms = terms + indicator
         left_term = torch.matmul(terms, L_term)
         right_term = torch.matmul(terms, R_term)
 
         # for caching V^{T}s_{i,k} and W^{T}s_{k+1,j}
         left_s = terms.new_full((batch, N, N, L.shape[2]), -1e9)
         right_s = terms.new_full((batch, N, N, L.shape[2]), -1e9)
-
         diagonal_copy_(left_s, left_term, w=1)
         diagonal_copy_(right_s, right_term, w=1)
-
-        if marginal:
-            span_indicator = terms.new_zeros(batch, N, N, NT).requires_grad_()
-            span_indicator_running = span_indicator[:]
-        else:
-            span_indicator = None
 
         # prepare length, same as the batch_size in PackedSequence
         n_at_position = (
@@ -181,11 +185,11 @@ class FastestTDPCFG(TDStyleBase):
         L = params["left"].detach()  # (batch, NT + T, r)
         R = params["right"].detach()  # (batch, NT + T, r)
 
-        terms = terms.softmax(2).clamp(1e-3).cumsum(2)
-        roots = roots.softmax(1).clamp(1e-3).cumsum(1)
-        H = H.clamp(1e-3).cumsum(2)
-        L = L.clamp(1e-3).cumsum(1)
-        R = R.clamp(1e-3).cumsum(1)
+        terms = self.threshold(terms.softmax(2)).cumsum(2)
+        roots = self.threshold(roots.softmax(1)).cumsum(1)
+        H = self.threshold(H).cumsum(2)
+        L = self.threshold(L).cumsum(1)
+        R = self.threshold(R).cumsum(1)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()

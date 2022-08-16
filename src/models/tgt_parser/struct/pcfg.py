@@ -26,6 +26,9 @@ class PCFG:
     COPY_PT = 1
     COPY_NT = 2
 
+    def __init__(self):
+        self.threshold = torch.nn.Threshold(1e-3, 0)
+
     def __call__(self, params, lens, decode=False, marginal=False):
         # TODO remove pytorch-struct
         # terms: bsz x seqlen x pt
@@ -70,9 +73,9 @@ class PCFG:
         rules = params["rule"].detach()
         roots = params["root"].detach()
 
-        terms = terms.softmax(2).clamp(1e-3).cumsum(2)
-        rules = rules.flatten(2).softmax(2).clamp(1e-3).cumsum(2)
-        roots = roots.softmax(1).clamp(1e-3).cumsum(1)
+        terms = self.threshold(terms.softmax(2)).cumsum(2)
+        rules = self.threshold(rules.flatten(2).softmax(2)).cumsum(2)
+        roots = self.threshold(roots.softmax(1)).cumsum(1)
         terms = terms.cpu().numpy()
         rules = rules.cpu().numpy()
         roots = roots.cpu().numpy()
