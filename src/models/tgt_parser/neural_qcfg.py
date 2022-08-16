@@ -388,7 +388,11 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         rule_emb_child = rule_emb_left[:, :, None, :] + rule_emb_right[:, None, :, :]
         rule_emb_child = rule_emb_child.view(batch_size, (nt + pt) ** 2, self.dim)
-        rules = torch.matmul(rule_emb_parent, rule_emb_child.transpose(1, 2))
+        rules = (
+            torch.matmul(rule_emb_parent, rule_emb_child.transpose(1, 2))
+            .log_softmax(-1)
+            .clone()
+        )
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
 
         # fmt: off
@@ -414,11 +418,11 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 )
             rules[~mask] = self.neg_huge
 
-        rules = (
-            rules.view(batch_size, nt, (nt + pt) ** 2)
-            .log_softmax(2)
-            .view(batch_size, nt, nt + pt, nt + pt)
-        )
+        # rules = (
+        #     rules.view(batch_size, nt, (nt + pt) ** 2)
+        #     .log_softmax(2)
+        #     .view(batch_size, nt, nt + pt, nt + pt)
+        # )
 
         # A->a
         terms = F.log_softmax(self.vocab_out(pt_emb), 2)
