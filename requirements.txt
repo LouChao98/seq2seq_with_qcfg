@@ -47,3 +47,4 @@ fairscale
 opt-einsum
 numba
 torch_semiring_einsum
+class-resolver
