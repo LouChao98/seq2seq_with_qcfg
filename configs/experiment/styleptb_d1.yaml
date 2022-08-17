@@ -7,7 +7,7 @@ defaults:
   - override /datamodule: styleptb.yaml
   - override /model: styleptb_d1.yaml
   - override /callbacks: default.yaml
-  - override /logger: tensorboard
+  - override /logger: wandb
   - override /trainer: default.yaml
 
 # all parameters below will be merged with parameters from default configurations set above
@@ -19,7 +19,7 @@ name: "styleptb_d1"
 # ~17GB
 datamodule:
   batch_size: 4
-  eval_batch_size: 1
+  eval_batch_size: 2
   # batch_size: 12
   # eval_batch_size: 4
   max_src_len: 60
@@ -41,5 +41,5 @@ logger:
   wandb:
     project: "styleptb"
     tags: ["d1"]
-    offline: true
+    offline: false
 # train: false

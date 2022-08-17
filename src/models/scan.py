@@ -99,7 +99,10 @@ class ScanModule(ModelBase):
         src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
         tgt_nll = self.decoder(
-            batch["tgt_ids"], batch["tgt_lens"], node_features, node_spans,
+            batch["tgt_ids"],
+            batch["tgt_lens"],
+            node_features,
+            node_spans,
         )
 
         if _debug:
@@ -197,7 +200,10 @@ class ScanModule(ModelBase):
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         tgt_spans, aligned_spans = self.decoder.parse(
-            batch["tgt_ids"], batch["tgt_lens"], node_features, node_spans,
+            batch["tgt_ids"],
+            batch["tgt_lens"],
+            node_features,
+            node_spans,
         )
         tgt_annotated = []
         for snt, tgt_spans_inst in zip(batch["tgt"], tgt_spans):
@@ -242,7 +248,10 @@ class ScanModule(ModelBase):
         )
 
         tgt_nll = self.decoder(
-            batch["tgt_ids"], batch["tgt_lens"], node_features, node_spans,
+            batch["tgt_ids"],
+            batch["tgt_lens"],
+            node_features,
+            node_spans,
         )
         tgt_ppl = np.exp(tgt_nll.detach().cpu().numpy() / batch["tgt_lens"])
 
@@ -338,5 +347,5 @@ class ScanModule(ModelBase):
     def test_epoch_end(self, outputs) -> None:
         acc = self.test_metric.compute().item()
         self.log("test/acc", acc, on_step=False, on_epoch=True)
-        # self.print("test/acc", str(acc))
+        self.print("test/acc", str(acc))
         self.save_predictions(outputs)

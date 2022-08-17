@@ -286,3 +286,27 @@ class PCFG:
             types[i] = terminal_type
             # scores[i] = score / len(terminals)
         return samples, types, scores
+
+
+if __name__ == "__main__":
+    torch.random.manual_seed(1)
+
+    B, N, T, NT = 2, 5, 3, 7
+    device = "cpu"
+    params = {
+        "term": torch.randn(B, N, T, device=device)
+        .log_softmax(-1)
+        .requires_grad_(True),
+        "root": torch.randn(B, NT, device=device).log_softmax(-1).requires_grad_(True),
+        "rule": torch.randn(B, NT, (NT + T) ** 2, device=device)
+        .log_softmax(-1)
+        .view(B, NT, NT + T, NT + T)
+        .requires_grad_(True),
+    }
+    lens = torch.tensor([N, N - 3], dtype=torch.long, device=device)
+    pcfg = PCFG()
+
+    params2 = (params["term"], params["rule"], params["root"])
+    dist = SentCFG(params2, lens)
+    sampled = dist.gumbel_crf()
+    # breakpoint()

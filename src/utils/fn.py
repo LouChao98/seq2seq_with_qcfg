@@ -1,4 +1,3 @@
-from pdb import post_mortem
 from typing import List, Tuple
 
 import nltk
@@ -86,9 +85,7 @@ def get_tree(actions, sent=None, SHIFT=0, REDUCE=1):
     return stack[-1]
 
 
-def annotate_snt_with_brackets(
-    tokens: List[str], span: List[Tuple[int, int]]
-):
+def annotate_snt_with_brackets(tokens: List[str], span: List[Tuple[int, int]]):
     pre_tokens = [0 for _ in range(len(tokens))]
     post_tokens = [0 for _ in range(len(tokens))]
 
@@ -96,14 +93,63 @@ def annotate_snt_with_brackets(
         if l != r:
             pre_tokens[l] += 1
             post_tokens[r] += 1
-    
+
     output = []
     for pre, token, post in zip(pre_tokens, tokens, post_tokens):
         output_token = []
         if pre > 0:
-            output_token.append('(' * pre) 
+            output_token.append("(" * pre)
         output_token.append(token)
         if post > 0:
-            output_token.append(')' * post)
-        output.append(''.join(output_token))
-    return ' '.join(output)
+            output_token.append(")" * post)
+        output.append("".join(output_token))
+    return " ".join(output)
+
+
+def spans2tree(spans: List[Tuple[int, int]], return_mapping=False):
+    # mapping = output_span_i -> origin_span_i
+    if return_mapping:
+        index = list(range(len(spans)))
+        index.sort(key=lambda x: (spans[x][0], -spans[x][1]))
+        spans = [spans[i] for i in index]
+    else:
+        spans.sort(key=lambda x: (x[0], -x[1]))
+    parent = [i - 1 for i in range(len(spans))]
+    endpoint = [-1 for i in range(len(spans))]
+
+    prev_left = spans[0][0]
+    prev_left_i = 0
+
+    for i, (s, e, *_) in enumerate(spans[1:], start=1):
+        if s == prev_left:
+            continue
+
+        endpoint[prev_left_i] = i - 1
+
+        possible_parent_start = prev_left_i
+        possible_parent_end = i - 1
+        while spans[possible_parent_start][1] < e:
+            possible_parent_start = parent[possible_parent_start]
+            possible_parent_end = endpoint[possible_parent_start]
+
+        possible_parent_end += 1
+        while (possible_parent_end - possible_parent_start) > 1:
+            cursor = (possible_parent_start + possible_parent_end) // 2
+            v = spans[cursor][1]
+            if v < e:
+                possible_parent_end = cursor
+            elif v == e:
+                possible_parent_start = cursor
+                break
+            else:
+                possible_parent_start = cursor
+
+        prev_left = s
+        prev_left_i = i
+        parent[i] = possible_parent_start
+    if return_mapping:
+        mapping = list(range(len(spans)))
+        mapping.sort(key=lambda x: index[x])
+        return spans, parent, mapping
+    else:
+        return spans, parent

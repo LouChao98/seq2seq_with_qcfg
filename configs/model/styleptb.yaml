@@ -14,7 +14,7 @@ encoder:
 
 parser:
   _target_: src.models.src_parser.neural_pcfg.NeuralPCFGSrcParser
-  dim: 256  # this is independent to other modules
+  dim: 256 # this is independent to other modules
   pt_states: 20
   nt_states: 20
   num_layers: 2
@@ -49,9 +49,8 @@ test_metric:
     compute_on_step: false
   bleu-4:
     _target_: torchmetrics.BLEUScore
-    n_gram: 4 
+    n_gram: 4
     compute_on_step: false
-
 
 param_initializer: "xavier_uniform"
 track_param_norm: false
@@ -59,10 +58,16 @@ track_param_norm: false
 optimizer:
   groups: ~
   args:
-    _target_: torch.optim.Adam
+    _target_: torch.optim.AdamW
     lr: 5.0e-4
     betas: [0.75, 0.999]
     weight_decay: 1.0e-5
     eps: 1.0e-8
 
-scheduler: ~
+scheduler:
+  interval: step
+  frequency: 1
+  monitor: val/ppl
+  args:
+    _target_: src.utils.scheduler.get_exponential_lr_scheduler
+    gamma: 0.75**(1/5000)

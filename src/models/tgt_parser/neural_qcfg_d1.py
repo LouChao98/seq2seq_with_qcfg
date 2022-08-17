@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
+from ...utils.fn import spans2tree
 from ..components.common import MultiResidualLayer
 from .neural_qcfg import NeuralQCFGTgtParser
 from .struct.d1_pcfg import D1PCFG
@@ -178,10 +179,15 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
                     batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
                 )
             elif self.rule_constraint_type == 2:
-                raise NotImplementedError
                 mask = self.get_rules_mask2(
                     batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
                 )
+            elif self.rule_constraint_type == 3:
+                mask = self.get_rules_mask3(
+                    batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
+                )
+            else:
+                raise ValueError("Bad constraint_type")
             mask = mask.unsqueeze(1).expand(-1, self.cpd_rank, -1, -1, -1)
             rule_slr[~mask] = self.neg_huge
 
@@ -340,3 +346,57 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
                             node_mask[b, i, k, j].fill_(True)
 
         return node_mask.contiguous().view(batch_size, nt, nt, nt)
+
+    def get_rules_mask3(
+        self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
+    ):
+        # mask1 + children
+
+        # A[a i]->B[a j] C[a k], a i must be the parent of a j and a k.
+        # return True for not masked
+        nt = nt_num_nodes
+        nt_node_mask = torch.ones(
+            batch_size, nt_num_nodes, nt_num_nodes, dtype=torch.bool
+        )
+
+        def is_parent(parent, child):
+            return child[0] >= parent[0] and child[1] <= parent[1]
+
+        for b, nt_span in enumerate(nt_spans):
+            for i, parent_span in enumerate(nt_span):
+                for j, child_span in enumerate(nt_span):
+                    if not (is_parent(parent_span, child_span)):
+                        nt_node_mask[b, i, j] = False
+
+        for b, nt_spans_inst in enumerate(nt_spans):
+            spans, parents, mapping = spans2tree(nt_spans_inst, return_mapping=True)
+            for i, span1 in enumerate(spans):
+                for j, span2 in enumerate(spans[i + 1 :], start=i + 1):
+                    if not (is_parent(span1, span2)):
+                        continue
+                    depth = 1
+                    k = parents[j]
+                    while k != -1:
+                        if k == i:
+                            break
+                        k = parents[k]
+                        depth += 1
+                    if depth > 2:
+                        nt_node_mask[b, mapping[i], mapping[j]] = False
+
+        # for mask, spans_inst in zip(nt_node_mask, nt_spans):
+        #     self.show_constraint(mask, spans_inst)
+
+        node_mask = nt_node_mask.unsqueeze(3) * nt_node_mask.unsqueeze(2)
+        return node_mask.view(batch_size, nt, nt, nt)
+
+    def show_constraint(self, mask, spans):
+        # mask should be N * N. not allow batch.
+        position = mask[: len(spans), : len(spans)].nonzero(as_tuple=True)
+        allowed = defaultdict(list)
+        for i, j in zip(*position):
+            allowed[i].append(j)
+        for i, vset in allowed.items():
+            print("Parent: ", spans[i])
+            print("Possible children: ", [spans[j] for j in vset])
+            print("===")

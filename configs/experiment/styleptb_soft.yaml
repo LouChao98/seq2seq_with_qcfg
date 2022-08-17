@@ -18,10 +18,11 @@ name: "styleptb"
 
 datamodule:
   batch_size: 4
-  eval_batch_size: 2
+  eval_batch_size: 1
   # batch_size: 12
   # eval_batch_size: 4
   max_src_len: 60
+  copy_mode: "none"
 
 model:
   # load_from_checkpoint: '/home/louchao/project/semantic_parsing_qcfg/logs/ai1_download_1660232415/runs/styleptb/2022-08-09_02-33-58/checkpoints/epoch_020.ckpt'
@@ -37,6 +38,6 @@ trainer:
 logger:
   wandb:
     project: "styleptb"
-    tags: ["baseline"]
+    tags: ["soft"]
     offline: false
 # train: false

@@ -20,12 +20,11 @@ from src.utils.fn import (
 )
 from src.utils.metric import PerplexityMetric
 
-
 log = logging.getLogger(__file__)
 
 
 class GeneralSeq2SeqModule(ModelBase):
-    """ A module for general seq2seq tasks.
+    """A module for general seq2seq tasks.
 
     * support pretrained models
     * encoders
@@ -56,7 +55,8 @@ class GeneralSeq2SeqModule(ModelBase):
         self.datamodule = datamodule or self.trainer.datamodule
 
         self.embedding = instantiate(
-            self.hparams.embedding, num_embeddings=len(self.datamodule.src_vocab),
+            self.hparams.embedding,
+            num_embeddings=len(self.datamodule.src_vocab),
         )
         self.pretrained = (
             AutoModel.from_pretrained(self.hparams.transformer_pretrained_model)
@@ -197,9 +197,12 @@ class GeneralSeq2SeqModule(ModelBase):
         num_nt_spans = max(len(item) for item in nt_spans)
 
         alignments = []
-        for (tgt_spans_inst, tgt_snt, aligned_spans_inst, src_snt,) in zip(
-            tgt_spans, batch["tgt"], aligned_spans, batch["src"]
-        ):
+        for (
+            tgt_spans_inst,
+            tgt_snt,
+            aligned_spans_inst,
+            src_snt,
+        ) in zip(tgt_spans, batch["tgt"], aligned_spans, batch["src"]):
             alignments_inst = []
             for tgt_span, src_span in zip(tgt_spans_inst, aligned_spans_inst):
                 is_copy = False
@@ -343,6 +346,5 @@ class GeneralSeq2SeqModule(ModelBase):
     def test_epoch_end(self, outputs) -> None:
         acc = self.test_metric.compute()
         self.log_dict({"test/" + k: v for k, v in acc.items()})
-        # self.print(acc)
+        self.print(acc)
         self.save_predictions(outputs)
-        

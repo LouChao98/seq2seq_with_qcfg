@@ -27,7 +27,10 @@ tree_encoder:
     _target_: torch_geometric.nn.GAT
     hidden_channels: 256
     num_layers: 3
-  global_pooling: ~
+  global_pooling:
+    _target_: torch_geometric.nn.GraphMultisetTransformer
+    hidden_channels: ${..nn.hidden_channels}
+    out_channels: ${..nn.hidden_channels}
 
 decoder:
   _target_: src.models.tgt_parser.neural_qcfg.NeuralQCFGTgtParser
