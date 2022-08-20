@@ -120,7 +120,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         # params['term'].fill_(-1e9)
         # params['rule'].fill_(-1e9)
         # preds = []
-        # max_len = 100
+        # max_len = 40
         # for i in range(len(node_features)):
         #     _node_features = [node_features[i]]
         #     _spans = [spans[i]]
@@ -156,7 +156,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         #         max_length=max_len,
         #     )
         #     preds.extend(out)
-        max_len = 100
+        max_len = 30
         preds = self.pcfg.sampled_decoding(
             params,
             nt_spans,

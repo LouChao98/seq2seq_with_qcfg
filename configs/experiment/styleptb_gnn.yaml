@@ -5,16 +5,16 @@
 
 defaults:
   - override /datamodule: styleptb.yaml
-  - override /model: styleptb.yaml
+  - override /model: styleptb_gnn.yaml
   - override /callbacks: default.yaml
-  - override /logger: tensorboard
+  - override /logger: wandb
   - override /trainer: default.yaml
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb"
+name: "styleptb_gnn"
 
 datamodule:
   batch_size: 4
@@ -37,6 +37,7 @@ trainer:
 
 logger:
   wandb:
-    project: ["baseline"]
+    project: "styleptb"
+    tags: ["gnn"]
     offline: true
 # train: false

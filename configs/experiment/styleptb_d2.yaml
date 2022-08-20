@@ -7,15 +7,14 @@ defaults:
   - override /datamodule: styleptb.yaml
   - override /model: styleptb_d2.yaml
   - override /callbacks: default.yaml
-  - override /logger: tensorboard
+  - override /logger: wandb
   - override /trainer: default.yaml
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb_d1"
-
+name: "styleptb_d2"
 
 # ~17GB
 datamodule:
@@ -42,6 +41,4 @@ logger:
     project: "styleptb"
     tags: ["d2"]
     offline: true
-
-
 # train: false

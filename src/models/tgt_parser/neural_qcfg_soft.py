@@ -36,7 +36,6 @@ class NeuralQCFGSoftTgtParser(NeuralQCFGTgtParser):
             kdim=self.dim,
             vdim=self.dim,
             batch_first=True,
-            average_attn_weights=True,
         )
 
     def parse(self, x, lengths, node_features, spans, copy_position=None):
@@ -88,7 +87,7 @@ class NeuralQCFGSoftTgtParser(NeuralQCFGTgtParser):
             nt_att,
         ) = self.get_params(node_features, spans)
 
-        max_len = 100
+        max_len = 30
         preds = self.pcfg.sampled_decoding(
             params,
             nt_spans,
@@ -198,29 +197,28 @@ class NeuralQCFGSoftTgtParser(NeuralQCFGTgtParser):
             pt_num_nodes,
             pt_node_features,
         ) = self.build_src_features(spans, node_features)
+        device = node_features[0][0].device
 
         # fmt: off
-        nt_mask = torch.arange(nt_num_nodes, device=rules.device).unsqueeze(0) \
-            < torch.tensor(nt_num_nodes_list, device=rules.device).unsqueeze(1)
-        pt_mask = torch.arange(pt_num_nodes, device=rules.device).unsqueeze(0) \
-            < torch.tensor(pt_num_nodes_list, device=rules.device).unsqueeze(1)
+        nt_mask = torch.arange(nt_num_nodes, device=device).unsqueeze(0) \
+            < torch.tensor(nt_num_nodes_list, device=device).unsqueeze(1)
+        pt_mask = torch.arange(pt_num_nodes, device=device).unsqueeze(0) \
+            < torch.tensor(pt_num_nodes_list, device=device).unsqueeze(1)
 
         # e = u + h
         nt_emb, nt_att = self.att(
-            self.src_nt_emb,
+            self.src_nt_emb.unsqueeze(0).expand(batch_size, -1, -1),
             nt_node_features,
             nt_node_features,
-            ~nt_mask[:, None, :, None]
-            .repeat(1, self.att_num_heads, 1, 1)
-            .view(-1, nt_num_nodes, self.nt_states),
+            ~nt_mask,
+            average_attn_weights=True,
         )
         pt_emb, pt_att = self.att(
-            self.src_pt_emb,
+            self.src_pt_emb.unsqueeze(0).expand(batch_size, -1, -1),
             pt_node_features,
             pt_node_features,
-            ~pt_mask[:, None, :, None]
-            .repeat(1, self.att_num_heads, 1, 1)
-            .view(-1, pt_num_nodes, self.pt_states),
+            ~pt_mask,
+            average_attn_weights=True,
         )
 
         # S->A

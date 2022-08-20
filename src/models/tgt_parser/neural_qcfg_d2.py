@@ -44,9 +44,9 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
             node_features, spans, x, copy_position
         )
 
-        params2 = D2PCFG.get_pcfg_rules(params, self.nt_states)
-        out = PCFG()(params2, lengths, decode=True)
-        # out = self.pcfg(params, lengths, True)
+        # params2 = D2PCFG.get_pcfg_rules(params, self.nt_states)
+        # out = PCFG()(params2, lengths, decode=True)
+        out = self.pcfg(params, lengths, True)
 
         # out: list of list, containing spans (i, j, label)
         src_nt_states = self.nt_states * nt_num_nodes

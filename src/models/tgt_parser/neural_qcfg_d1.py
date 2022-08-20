@@ -310,13 +310,10 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         # A[a i]->B[a j] C[a k], a i must be the DIRECT parent of a j and a k, j!=k.
         #   if a i has no child, a j/k = a i.
         nt = nt_num_nodes
-        node_mask = torch.zeros(batch_size, nt, nt, nt, device=device)
+        node_mask = torch.zeros(batch_size, nt, nt, nt, device=device, dtype=torch.bool)
 
         def is_parent(parent, child):
-            if child[0] >= parent[0] and child[1] <= parent[1]:
-                return True
-            else:
-                return False
+            return child[0] >= parent[0] and child[1] <= parent[1]
 
         def is_strict_parent(parent, child):
             return is_parent(parent, child) and parent != child

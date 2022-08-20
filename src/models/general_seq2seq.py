@@ -1,4 +1,5 @@
 import logging
+import operator
 from typing import Any, List, Optional
 
 import torch
@@ -210,9 +211,26 @@ class GeneralSeq2SeqModule(ModelBase):
             src_snt,
         ) in zip(tgt_spans, batch["tgt"], aligned_spans, batch["src"]):
             alignments_inst = []
-            for tgt_span, src_span in zip(tgt_spans_inst, aligned_spans_inst):
+            # large span first for handling copy.
+            idx = list(range(len(tgt_spans_inst)))
+            idx.sort(key=lambda i: (operator.sub(*tgt_spans_inst[i][:2]), -i))
+            copied = []
+            # for tgt_span, src_span in zip(tgt_spans_inst, aligned_spans_inst):
+            for i in idx:
+                tgt_span = tgt_spans_inst[i]
+                src_span = aligned_spans_inst[i]
                 is_copy = False
                 if getattr(self.decoder, "use_copy"):
+                    should_skip = False
+                    for copied_span in copied:
+                        if (
+                            copied_span[0] <= tgt_span[0]
+                            and tgt_span[1] <= copied_span[1]
+                        ):
+                            should_skip = True
+                            break
+                    if should_skip:
+                        continue
                     if tgt_span[0] == tgt_span[1]:
                         is_copy = (
                             tgt_span[2] // num_pt_spans == self.decoder.pt_states - 1
@@ -221,6 +239,8 @@ class GeneralSeq2SeqModule(ModelBase):
                         is_copy = (
                             tgt_span[2] // num_nt_spans == self.decoder.nt_states - 1
                         )
+                    if is_copy:
+                        copied.append(tgt_span)
                 alignments_inst.append(
                     (
                         " ".join(src_snt[src_span[0] : src_span[1] + 1])
@@ -230,7 +250,7 @@ class GeneralSeq2SeqModule(ModelBase):
                         "COPY" if is_copy else "",
                     )
                 )
-            alignments.append(alignments_inst)
+            alignments.append(alignments_inst[::-1])
         return {
             "src_tree": src_annotated,
             "tgt_tree": tgt_annotated,

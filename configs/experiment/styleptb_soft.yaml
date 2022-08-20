@@ -5,7 +5,7 @@
 
 defaults:
   - override /datamodule: styleptb.yaml
-  - override /model: styleptb.yaml
+  - override /model: styleptb_soft.yaml
   - override /callbacks: default.yaml
   - override /logger: wandb
   - override /trainer: default.yaml
