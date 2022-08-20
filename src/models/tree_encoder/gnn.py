@@ -12,8 +12,6 @@ from src.utils.fn import spans2tree
 
 class GeneralGNN(torch.nn.Module):
     def __init__(self, nn, global_pooling, dim):
-        # TODO: we can avoid instantiate if we can prevent interpolation
-        # of in_channels at model's save_hyperparameters
         super().__init__()
         self.nn = instantiate(nn, in_channels=dim)
         self.global_pooling = instantiate(
@@ -77,6 +75,52 @@ class GeneralGNN(torch.nn.Module):
 
     def get_output_dim(self):
         return self.nn.out_channels
+
+
+class GeneralGNNForGumbel(GeneralGNN):
+    def build_gnn_input(
+        self, spans_inp: List[List[Tuple[int, int]]], x: List[List[torch.Tensor]]
+    ):
+        # spans: batch x nspans x 2
+        # x: batch x seq_len x hidden
+
+        spans, parents = [], []
+        graphs = []
+        for bidx, spans_inst in enumerate(spans_inp):
+            vertices, edges = [], []
+            s, p, mapping = spans2tree(spans_inst, return_mapping=True)
+            inv_mapping = list(range(len(s)))  # s to spans_inst
+            inv_mapping.sort(key=lambda x: mapping[x])
+
+            spans.append(spans_inst)
+            parents_inst = []
+            for i, span in enumerate(spans_inst):
+                _parent = p[mapping[i]]
+                vertices.append(x[bidx][i])
+                if _parent != -1:
+                    parent_i = inv_mapping[p[mapping[i]]]
+
+                    # p_span = spans_inst[parent_i]
+                    # assert p_span[0] <= span[0] <= span[1] <= p_span[1]
+                    # assert span != p_span
+                    edges.append((i, parent_i))
+                    edges.append((parent_i, i))
+                else:
+                    parent_i = -1
+
+                parents_inst.append(parent_i)
+
+            parents.append(parents_inst)
+            graphs.append(Data(torch.stack(vertices, 0), torch.tensor(edges).T))
+
+        return (
+            Batch.from_data_list(graphs).to(x[0][0].device),
+            {
+                "spans": spans,
+                "parents": parents,
+                "length": [len(item) for item in spans],
+            },
+        )
 
 
 if __name__ == "__main__":

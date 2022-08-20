@@ -1,5 +1,6 @@
 import torch
 import torch.distributions
+
 from .semirings import _BaseLog
 
 
@@ -127,7 +128,10 @@ def GumbelCRFSemiring(temp):
 
                 def sample(ls):
                     update = (
-                        ls + torch.distributions.Gumbel(0, 1).sample((ls.shape[-1],))
+                        ls
+                        + torch.distributions.Gumbel(0, 1)
+                        .sample((ls.shape[-1],))
+                        .to(ls.device)
                     ) / temp
                     out = ST.apply(update, ls.shape[-1])
                     return out

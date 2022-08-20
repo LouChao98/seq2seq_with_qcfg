@@ -308,5 +308,12 @@ if __name__ == "__main__":
 
     params2 = (params["term"], params["rule"], params["root"])
     dist = SentCFG(params2, lens)
-    sampled = dist.gumbel_crf()
+    print(dist.gumbel_crf()[-1].nonzero())
+
+    import torch_struct
+
+    samples = dist._struct(torch_struct.SampledSemiring).marginals(
+        dist.log_potentials, lengths=dist.lengths
+    )
+    print(samples[-1].nonzero())
     # breakpoint()

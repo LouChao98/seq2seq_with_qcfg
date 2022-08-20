@@ -1,10 +1,10 @@
 _target_: src.datamodules.tsv_datamodule.TSVDataModule
 
-train_file: ${data_dir}/StylePTB/ATP/debug.tsv
-dev_file: ${data_dir}/StylePTB/ATP/debug_val.tsv
-test_file: ${data_dir}/StylePTB/ATP/debug_val.tsv
+train_file: ${data_dir}/StylePTB/ATP/debug_overfit.tsv
+dev_file: ${data_dir}/StylePTB/ATP/debug_overfit_val.tsv
+test_file: ${data_dir}/StylePTB/ATP/debug_overfit_val.tsv
 
-copy_mode: 'phrase'
+copy_mode: "phrase"
 
 batch_size: ${in_debugger:2,20}
 eval_batch_size: ${in_debugger:2,6}

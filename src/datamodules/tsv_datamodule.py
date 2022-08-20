@@ -2,13 +2,15 @@ import logging
 from collections import Counter
 from typing import List, Optional, Union
 
+import numpy as np
 import torch
+from numba import jit
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer
+
+from src import is_under_debugger
 from src.datamodules.components.vocab import Vocabulary, VocabularyPair
 from src.datamodules.datamodule import _DataModule
-import numpy as np
-from numba import jit
 
 logger = logging.getLogger(__file__)
 
@@ -39,8 +41,8 @@ class TSVDataModule(_DataModule):
             self.vocab_pair: Optional[VocabularyPair] = None
             self.use_transformer_tokenizer = transformer_tokenizer_name is not None
             if transformer_tokenizer_name is not None:
-                self.transformer_tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
-                    transformer_tokenizer_name
+                self.transformer_tokenizer: PreTrainedTokenizer = (
+                    AutoTokenizer.from_pretrained(transformer_tokenizer_name)
                 )
 
             self.data_train: Optional[Dataset] = None
@@ -176,7 +178,7 @@ class TSVDataModule(_DataModule):
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             collate_fn=self.collator,
-            shuffle=False,
+            shuffle=False if is_under_debugger() else True,
         )
         logger.info(f"Train dataloader: {len(loader)}")
         return loader
@@ -293,4 +295,3 @@ if __name__ == "__main__":
     for batch in datamodule.train_dataloader():
         print(batch)
         break
-

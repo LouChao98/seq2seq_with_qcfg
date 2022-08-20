@@ -87,6 +87,8 @@ class GeneralSeq2SeqModule(ModelBase):
         self.val_best_metric = MinMetric()
         self.test_metric = instantiate(self.hparams.test_metric)
 
+        self.setup_patch(stage, datamodule)
+
         if self.hparams.load_from_checkpoint is not None:
             state_dict = torch.load(
                 self.hparams.load_from_checkpoint, map_location="cpu"
@@ -107,6 +109,10 @@ class GeneralSeq2SeqModule(ModelBase):
                     init_func(param)
                 else:
                     nn.init.zeros_(param)
+
+    def setup_patch(self, stage: Optional[str] = None, datamodule=None):
+        # allow submodule changing submodules before loading checkpoint
+        ...
 
     def encode(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
@@ -269,9 +275,11 @@ class GeneralSeq2SeqModule(ModelBase):
         self.log("train/ppl", ppl, prog_bar=True)
         self.log("train/decoder", output["decoder"], prog_bar=True)
         self.log("train/encoder", output["encoder"], prog_bar=True)
-        self.log("train/reward", output["reward"])
+        if "reward" in output:
+            self.log("train/reward", output["reward"])
 
         if batch_idx == 0:
+            self.eval()
             single_inst = {key: value[:2] for key, value in batch.items()}
             trees = self.forward_visualize(single_inst)
             self.print("=" * 79)
@@ -284,6 +292,7 @@ class GeneralSeq2SeqModule(ModelBase):
                     "Alg:\n"
                     + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
                 )
+            self.train()
         return {"loss": loss}
 
     def on_validation_epoch_start(self) -> None:

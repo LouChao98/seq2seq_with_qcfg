@@ -29,7 +29,7 @@ class NeuralPCFGSrcParser(SrcParserBase):
         self.pt_emb = nn.Parameter(torch.randn(pt_states, dim))
         self.nt_emb = nn.Parameter(torch.randn(nt_states, dim))
         self.root_emb = nn.Parameter(torch.randn(1, dim))
-        self.rule_mlp = nn.Sequential(nn.Linear(dim, self.all_states ** 2))
+        self.rule_mlp = nn.Sequential(nn.Linear(dim, self.all_states**2))
         self.root_mlp = MultiResidualLayer(
             in_dim=dim, res_dim=dim, num_layers=num_layers, out_dim=nt_states
         )
@@ -88,6 +88,22 @@ class NeuralPCFGSrcParser(SrcParserBase):
         logprobs = dist._struct().score(dist.log_potentials, samples) - log_Z
         return samples, logprobs
 
+    @torch.enable_grad()
+    def gumbel_sample(
+        self,
+        x,
+        lengths,
+        dist: Optional[SentCFG] = None,
+        extra_scores=None,
+        temperature=1,
+    ):
+        if dist is None:
+            dist = self(x, lengths, extra_scores)
+        samples = dist.gumbel_crf(temperature)
+        log_Z = dist.partition
+        logprobs = dist._struct().score(dist.log_potentials, samples) - log_Z
+        return samples, logprobs
+
     def argmax(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
         if dist is None:
             dist = self(x, lengths, extra_scores)
@@ -101,7 +117,7 @@ class NeuralPCFGSrcParser(SrcParserBase):
         # constraint_scores, lse_scores, add_scores = None, None, None
         if extra_scores is None:
             return params
-        constraint_scores = extra_scores.get('constraint')
-        lse_scores = extra_scores.get('lse')
-        add_scores = extra_scores.get('add')
+        constraint_scores = extra_scores.get("constraint")
+        lse_scores = extra_scores.get("lse")
+        add_scores = extra_scores.get("add")
         return *params, constraint_scores, lse_scores, add_scores
