@@ -156,7 +156,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         #         max_length=max_len,
         #     )
         #     preds.extend(out)
-        max_len = 30
+        max_len = 40
         preds = self.pcfg.sampled_decoding(
             params,
             nt_spans,
@@ -218,6 +218,8 @@ class NeuralQCFGTgtParser(TgtParserBase):
                         print(111)
                         continue
                         assert False, "Debug this"
+                    if len(expanded) > max_len:
+                        continue
                     expanded_batch.append((expanded, inst[2]))
                     copy_pts.append(copy_pt)
                     copy_nts.append(copy_nt)

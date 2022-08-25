@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_struct
-from torch_struct import SentCFG
+from torch_struct import GumbelCRFSemiring, SentCFG
 
 from ..components.common import MultiResidualLayer
 from .base import SrcParserBase
@@ -99,10 +99,18 @@ class NeuralPCFGSrcParser(SrcParserBase):
     ):
         if dist is None:
             dist = self(x, lengths, extra_scores)
-        samples = dist.gumbel_crf(temperature)
-        log_Z = dist.partition
-        logprobs = dist._struct().score(dist.log_potentials, samples) - log_Z
-        return samples, logprobs
+        semiring = GumbelCRFSemiring(temperature)
+        with torch.enable_grad():
+            samples = dist._struct(semiring).marginals(
+                dist.log_potentials, dist.lengths, inside_func="trace"
+            )
+        # log_Z = dist.partition
+        # logprobs = dist._struct().score(dist.log_potentials, samples) - log_Z
+        logprobs = 0
+
+        trace = dist.struct.trace
+        buffer = semiring.get_buffer()
+        return samples, logprobs, trace, buffer
 
     def argmax(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
         if dist is None:

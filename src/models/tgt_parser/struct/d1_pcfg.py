@@ -240,7 +240,6 @@ class D1PCFG(TDStyleBase):
                 src_nt_states,
                 max_pt_spans,
                 src_pt_states,
-                src_pt_states,
                 use_copy=use_copy,
                 num_samples=num_samples,
                 max_length=max_length,

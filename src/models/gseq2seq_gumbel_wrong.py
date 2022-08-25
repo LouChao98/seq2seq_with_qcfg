@@ -1,6 +1,5 @@
 import logging
 import operator
-from collections import defaultdict
 from typing import Any, List, Optional
 
 import numpy as np
@@ -25,6 +24,7 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
     """
 
     def __init__(self, *args, span_encoder_dropout=None, **kwargs):
+        assert False, "Do not use this."
         super().__init__(*args, **kwargs)
         self.save_hyperparameters(logger=False)
 
@@ -41,12 +41,11 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
 
         dist = self.parser(src_ids, src_lens)
         src_nll = -dist.partition
-        event, src_logprob, trace, buffer = self.parser.gumbel_sample(
-            src_ids, src_lens, dist
-        )
+        event, src_logprob = self.parser.gumbel_sample(src_ids, src_lens, dist)
         src_spans = extract_parses(event[-1], src_lens, inc=1)[0]
+        event = event[-1].sum(-1)
 
-        spans, node_feats = self.collect_node_feature(src_spans, trace, buffer, x)
+        spans, node_feats = self.collect_node_feature(src_spans, event, x)
         node_feats, node_spans = self.tree_encoder(node_feats, src_lens, spans=spans)
 
         tgt_nll = self.decoder(
@@ -57,11 +56,9 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
             (batch.get("copy_token"), batch.get("copy_phrase")),
         )
 
-        del buffer
-
         return {
             "decoder": tgt_nll.mean(),
-            "encoder": src_nll.mean(),
+            "encoder": 0.1 * src_nll.mean(),
             "tgt_nll": tgt_nll.mean(),
             "src_nll": src_nll.mean(),
         }
@@ -81,7 +78,7 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
             src_actions.append(get_actions(tree))
             src_annotated.append(get_tree(src_actions[-1], snt))
 
-        spans, node_feats = self.collect_node_feature2(src_spans, event, x)
+        spans, node_feats = self.collect_node_feature(src_spans, event, x)
         node_feats, node_spans = self.tree_encoder(node_feats, src_lens, spans=spans)
 
         tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(
@@ -163,7 +160,7 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
         src_spans = extract_parses(event[-1], src_lens, inc=1)[0]
         event = event[-1].sum(-1)
 
-        spans, node_feats = self.collect_node_feature2(src_spans, event, x)
+        spans, node_feats = self.collect_node_feature(src_spans, event, x)
         node_feats, node_spans = self.tree_encoder(node_feats, src_lens, spans=spans)
 
         y_preds = self.decoder.generate(
@@ -185,62 +182,7 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
 
         return {"pred": [item[0] for item in y_preds]}
 
-    def collect_node_feature(self, src_spans, trace, buffer, x):
-        invtrace = {v: k for k, v in trace.items()}
-
-        node_feats = []
-        spans = []
-
-        processed_buffer = {}
-        for i, item in buffer.items():
-            t = trace[i][1]
-            if t == "1234":
-                processed_buffer[i] = item[0, :, :, 0]  # <b, start, choice>
-            elif t == "YZ":
-                processed_buffer[i] = item[0, :, :, 0, 0]  # <b, start, split>
-        buffer = processed_buffer
-
-        for b, spans_inst in enumerate(src_spans):
-            features_inst = []
-            seq_len = len(spans_inst) + 1
-            buffer_inst = {i: item[b] for i, item in buffer.items()}  # <start, width>
-            spans_inst = [(i, i, None) for i in range(seq_len)] + [
-                (s, e, None) for s, e, l in spans_inst
-            ]
-
-            # s == e
-            single_x = x[b, :seq_len] * 2
-            features_inst.extend(list(self.span_encoder(single_x, single_x)))
-            for s, e, _ in spans_inst:
-                w = e - s
-                if w == 0:  # TODO revisit scoring
-                    continue
-                    # features_inst.append(self.span_encoder(2 * x[b, s], 2 * x[b, e]))
-                elif w == 1:
-                    features_inst.append(self.span_encoder(single_x[s], single_x[e]))
-                else:
-                    left = x[b, s, None]
-                    right = x[b, e, None]
-                    mid1 = x[b, s:e]
-                    mid2 = x[b, s + 1 : e + 1]
-
-                    span = self.span_encoder(left + mid1, mid2 + right)
-
-                    # XYZ XYz XyZ Xyz
-                    switch = buffer_inst[invtrace[(w, "1234")]][s]
-                    yz = buffer_inst[invtrace[(w, "YZ")]][s]
-                    d = yz * switch[0]
-                    d[0] += switch[2]
-                    d[-1] += switch[1]
-                    # assert d.sum().item() == 1
-
-                    feat = d @ span
-                    features_inst.append(feat)
-            node_feats.append(features_inst)
-            spans.append(spans_inst)
-        return spans, node_feats
-
-    def collect_node_feature2(self, src_spans, event, x):
+    def collect_node_feature(self, src_spans, event, x):
         event = torch.cat(
             [torch.ones(event.shape[0], 1, event.shape[2], device=event.device), event],
             dim=1,

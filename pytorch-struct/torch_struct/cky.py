@@ -1,6 +1,8 @@
 import math
+
 import torch
-from .helpers import _Struct, Chart
+
+from .helpers import Chart, _Struct
 
 A, B = 0, 1
 
@@ -99,7 +101,112 @@ class CKY(_Struct):
         log_Z = semiring.dot(top, roots)
         return log_Z, (term_use, rules, roots, span[1:])
 
-    def marginals(self, scores, lengths=None, _autograd=True, _raw=False):
+    def logpartition_trace(self, scores, lengths=None, force_grad=False):
+        semiring = self.semiring
+
+        # Checks
+        constraint_scores, lse_scores, add_scores = None, None, None
+
+        if len(scores) == 3:
+            terms, rules, roots = scores
+        elif len(scores) == 4:
+            terms, rules, roots, constraint_scores = scores
+        elif len(scores) == 5:
+            terms, rules, roots, constraint_scores, lse_scores = scores
+        elif len(scores) == 6:
+            terms, rules, roots, constraint_scores, lse_scores, add_scores = scores
+
+        rules.requires_grad_(True)
+        ssize = semiring.size()
+        batch, N, T = terms.shape
+        _, NT, _, _ = rules.shape
+        S = NT + T
+
+        terms = semiring.convert(terms).requires_grad_(True)
+        rules = semiring.convert(rules).requires_grad_(True)
+        roots = semiring.convert(roots).requires_grad_(True)
+        if lengths is None:
+            lengths = torch.LongTensor([N] * batch).to(terms.device)
+
+        # Charts
+        beta = [Chart((batch, N, N, NT), rules, semiring) for _ in range(2)]
+        span = [None for _ in range(N)]
+        term_use = terms + 0.0  # TODO why clone here
+
+        # Split into NT/T groups
+        rules = rules.view(ssize, batch, 1, NT, S, S)
+        v = (ssize, batch, NT, -1)
+
+        def arr(a, b):
+            return rules[..., a, b].contiguous().view(*v).transpose(-2, -1)
+
+        NTs = slice(0, NT)
+        Ts = slice(NT, S)
+        X_Y_Z = arr(NTs, NTs)
+        X_Y1_Z = arr(Ts, NTs)
+        X_Y_Z1 = arr(NTs, Ts)
+        X_Y1_Z1 = arr(Ts, Ts)
+
+        matmul = semiring.matmul
+        times = semiring.times
+
+        trace = {}
+        for w in range(1, N):
+            all_span = []
+            v2 = (ssize, batch, N - w, -1)
+
+            Y = beta[A][: N - w, :w, :]
+            Z = beta[B][w:, N - w :, :]
+            trace[semiring.get_i()] = (w, "YZ")
+            YZ = matmul(Y.transpose(-2, -1), Z)
+            trace[semiring.get_i()] = (w, "XYZ")
+            X1 = matmul(YZ.view(*v2), X_Y_Z)
+            all_span.append(X1)
+
+            Y_term = term_use[..., : N - w, :, None]
+            Z_term = term_use[..., w:, None, :]
+
+            Y = Y[..., -1, :].unsqueeze(-1)
+            trace[semiring.get_i()] = (w, "XYz")
+            X2 = matmul(times(Y, Z_term).view(*v2), X_Y_Z1)
+
+            Z = Z[..., 0, :].unsqueeze(-2)
+            trace[semiring.get_i()] = (w, "XyZ")
+            X3 = matmul(times(Y_term, Z).view(*v2), X_Y1_Z)
+            all_span += [X2, X3]
+
+            if w == 1:
+                trace[semiring.get_i()] = (w, "Xyz")
+                X4 = matmul(times(Y_term, Z_term).view(*v2), X_Y1_Z1)
+                all_span.append(X4)
+
+            trace[semiring.get_i()] = (w, "1234")
+            data = semiring.sum(torch.stack(all_span, dim=-1))
+
+            if constraint_scores is not None:
+                value, mask = constraint_scores[w - 1]
+                data = torch.where(mask, value, data)
+            if add_scores is not None:
+                if add_scores[w - 1] is not None:
+                    data = data + add_scores[w - 1]
+            if lse_scores is not None:
+                if lse_scores[w - 1] is not None:
+                    data = torch.logaddexp(data, lse_scores[w - 1])
+
+            span[w] = data
+            beta[A][: N - w, w, :] = span[w]
+            beta[B][w:N, N - w - 1, :] = span[w]
+
+        final = beta[A][0, :, NTs]
+        top = torch.stack([final[:, i, l - 1] for i, l in enumerate(lengths)], dim=1)
+        trace[semiring.get_i()] = (w, "root")
+        log_Z = semiring.dot(top, roots)
+        CKY.trace = trace
+        return log_Z, (term_use, rules, roots, span[1:])
+
+    def marginals(
+        self, scores, lengths=None, _autograd=True, _raw=False, inside_func=None
+    ):
         """
         Compute the marginals of a CFG using CKY.
 
@@ -118,14 +225,21 @@ class CKY(_Struct):
         batch, N, T = terms.shape
         _, NT, _, _ = rules.shape
 
-        v, (term_use, rule_use, root_use, spans) = self.logpartition(
+        inside_func = (
+            self.logpartition_trace if inside_func == "trace" else self.logpartition
+        )
+        v, (term_use, rule_use, root_use, spans) = inside_func(
             scores, lengths=lengths, force_grad=True
         )
 
         def marginal(obj, inputs):
             obj = self.semiring.unconvert(obj).sum(dim=0)
             marg = torch.autograd.grad(
-                obj, inputs, create_graph=True, only_inputs=True, allow_unused=False,
+                obj,
+                inputs,
+                create_graph=True,
+                only_inputs=True,
+                allow_unused=False,
             )
 
             spans_marg = torch.zeros(
@@ -284,4 +398,3 @@ class CKY(_Struct):
             cur += 1
         indices = left
         return (n_nodes, a, b, label), indices, topo
-

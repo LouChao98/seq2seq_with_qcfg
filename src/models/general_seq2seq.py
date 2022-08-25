@@ -134,7 +134,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
         dist = self.parser(src_ids, src_lens)
         src_nll = -dist.partition
-        src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist)
+        src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
         src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
 
         x = self.encode(batch)
@@ -150,7 +150,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
         with torch.no_grad():
             src_spans_argmax, src_logprob_argmax = self.parser.argmax(
-                src_ids, src_lens, dist
+                src_ids, src_lens, dist=dist
             )
             src_spans_argmax = extract_parses(src_spans_argmax[-1], src_lens, inc=1)[0]
             node_features_argmax, node_spans_argmax = self.tree_encoder(
@@ -262,7 +262,7 @@ class GeneralSeq2SeqModule(ModelBase):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
 
         dist = self.parser(src_ids, src_lens)
-        src_spans = self.parser.argmax(src_ids, src_lens, dist)[0]
+        src_spans = self.parser.argmax(src_ids, src_lens, dist=dist)[0]
         src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
 
         x = self.encode(batch)

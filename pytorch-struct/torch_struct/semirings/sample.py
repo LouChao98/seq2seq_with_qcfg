@@ -114,10 +114,16 @@ def GumbelCRFSemiring(temp):
                 )[0]
             return ret, None
 
+    i = 0
+    buffer = {}
+
     class _GumbelCRFLogSumExp(torch.autograd.Function):
         @staticmethod
         def forward(ctx, input, dim):
+            nonlocal i
             ctx.save_for_backward(input, torch.tensor(dim))
+            ctx.i = i
+            i += 1
             return torch.logsumexp(input, dim=dim)
 
         @staticmethod
@@ -147,12 +153,28 @@ def GumbelCRFSemiring(temp):
                     s = sample(logits.permute(perm)).permute(rev_perm)
 
                 grad_input = grad_output.unsqueeze(dim).mul(s)
+            if buffer is not None:
+                buffer[ctx.i] = s
             return grad_input, None
 
     class _GumbelCRFSemiring(_BaseLog):
         @staticmethod
         def sum(xs, dim=-1):
             return _GumbelCRFLogSumExp.apply(xs, dim)
+
+        @staticmethod
+        def get_buffer():
+            # unset buffer to avoid memory leak
+            # when backward from loss
+            nonlocal buffer
+            b2 = {**buffer}
+            del buffer
+            buffer = None
+            return b2
+
+        @staticmethod
+        def get_i():
+            return i
 
     return _GumbelCRFSemiring
 

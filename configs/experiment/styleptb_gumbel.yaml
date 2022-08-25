@@ -4,7 +4,7 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: styleptb.yaml
+  - override /datamodule: styleptb_debug.yaml
   - override /model: styleptb_gumbel.yaml
   - override /callbacks: default.yaml
   - override /logger: wandb
@@ -24,7 +24,7 @@ datamodule:
   max_src_len: 60
 
 model:
-  load_from_checkpoint: "/home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb/2022-08-21_00-15-28/checkpoints/epoch_000.ckpt"
+  # load_from_checkpoint: "/home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb/2022-08-21_00-15-28/checkpoints/epoch_000.ckpt"
   decoder:
     num_samples: 100
     check_ppl_batch_size: 1
