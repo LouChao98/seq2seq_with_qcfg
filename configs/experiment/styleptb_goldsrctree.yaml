@@ -14,9 +14,10 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb"
+name: "styleptb_goldsrctree"
 
 datamodule:
+  load_gold_tree: true
   batch_size: 4
   eval_batch_size: 1
   # batch_size: 12
@@ -24,10 +25,11 @@ datamodule:
   max_src_len: 60
 
 model:
-  # load_from_checkpoint: '/home/louchao/project/semantic_parsing_qcfg/logs/ai1_download_1660232415/runs/styleptb/2022-08-09_02-33-58/checkpoints/epoch_020.ckpt'
+  _target_: src.models.general_seq2seq_goldtree.GeneralSeq2SeqGoldSrcTreeModule
   decoder:
     num_samples: 100
     check_ppl_batch_size: 1
+    rule_constraint_type: 0
 
 trainer:
   max_epochs: 50
@@ -37,6 +39,6 @@ trainer:
 logger:
   wandb:
     project: "styleptb"
-    tags: ["baseline"]
-    offline: false
+    tags: ["goldsrctree"]
+    offline: true
 # train: false

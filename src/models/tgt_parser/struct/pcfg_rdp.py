@@ -4,7 +4,7 @@ from torch import Tensor
 from torch.autograd import grad
 
 from ._fn import diagonal, diagonal_copy_, stripe
-from ._utils import checkpoint
+from ._utils import checkpoint, process_param_for_marginal
 from .pcfg import PCFG
 from .td_pcfg import FastestTDPCFG
 
@@ -38,10 +38,10 @@ class PCFGRandomizedDP(FastestTDPCFG):
         if marginal:
             grad_state = torch.is_grad_enabled()
             torch.set_grad_enabled(True)
+            cm = torch.inference_mode(False)
+            cm.__enter__()
             # NOTE I assume marginals are only used for decoding.
-            params = {
-                k: v.detach() if isinstance(v, Tensor) else v for k, v in params.items()
-            }
+            params = {k: process_param_for_marginal(v) for k, v in params.items()}
 
         terms, rules, roots = params["term"], params["rule"], params["root"]
         copy_nts = params.get("copy_nt")
@@ -116,6 +116,7 @@ class PCFGRandomizedDP(FastestTDPCFG):
             # return trees, spans
         if marginal:
             torch.set_grad_enabled(grad_state)
+            cm.__exit__(None, None, None)
             return grad(logZ.sum(), [span_indicator])[0]
         return -logZ
 

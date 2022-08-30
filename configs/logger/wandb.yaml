@@ -1,7 +1,7 @@
 # https://wandb.ai
 
 wandb:
-  _target_: pytorch_lightning.loggers.wandb.WandbLogger
+  _target_: src.utils.callbacks.CustomWandbLogger
   project: "template-tests"
   save_dir: ${original_work_dir}/logs
   offline: False # set True to store all logs only locally

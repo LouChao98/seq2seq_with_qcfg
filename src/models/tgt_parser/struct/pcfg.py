@@ -7,7 +7,7 @@ from numba import jit, prange
 from torch import Tensor
 from torch_struct import SentCFG
 
-from ._utils import weighted_random
+from ._utils import process_param_for_marginal, weighted_random
 
 # I don't know how to use IntEnum with numba's jit.
 # So I use this workaround.
@@ -40,22 +40,33 @@ class PCFG:
             params = (terms, rules, roots, params["copy_nt"])
         else:
             params = (terms, rules, roots)
-        dist = SentCFG(params, lens)
-        if marginal:
-            return dist.marginals
-        elif not decode:
-            return -dist.partition
-        else:
-            spans_onehot = dist.argmax[-1].cpu().numpy()
-            tags = dist.argmax[0].max(-1)[1].cpu().numpy()
-            # lens = lens.cpu().tolist()
-            all_spans = []
-            for b in range(len(spans_onehot)):
-                spans_inst = [(i, i, int(tags[b][i])) for i in range(lens[b])]
-                for width, left, tag in zip(*spans_onehot[b].nonzero()):
-                    spans_inst.append((left, left + width + 1, tag))
-                all_spans.append(spans_inst)
-            return all_spans
+        if decode or marginal:
+            grad_state = torch.is_grad_enabled()
+            torch.set_grad_enabled(True)
+            cm = torch.inference_mode(False)
+            cm.__enter__()
+            params = [process_param_for_marginal(item) for item in params]
+        try:  # this try will not catch anything. just use finally.
+            dist = SentCFG(params, lens)
+            if marginal:
+                return dist.marginals
+            elif not decode:
+                return -dist.partition
+            else:
+                spans_onehot = dist.argmax[-1].cpu().numpy()
+                tags = dist.argmax[0].max(-1)[1].cpu().numpy()
+                # lens = lens.cpu().tolist()
+                all_spans = []
+                for b in range(len(spans_onehot)):
+                    spans_inst = [(i, i, int(tags[b][i])) for i in range(lens[b])]
+                    for width, left, tag in zip(*spans_onehot[b].nonzero()):
+                        spans_inst.append((left, left + width + 1, tag))
+                    all_spans.append(spans_inst)
+                return all_spans
+        finally:
+            if decode or marginal:
+                torch.set_grad_enabled(grad_state)
+                cm.__exit__(None, None, None)
 
     @torch.no_grad()
     def sampled_decoding(
@@ -97,6 +108,19 @@ class PCFG:
                 num_samples=num_samples,
                 max_length=max_length,
             )
+
+            # samples, types, scores, actions = self.sample_inspect(
+            #     terms[b],
+            #     rules[b],
+            #     roots[b],
+            #     max_nt_spans,
+            #     nt_states,
+            #     max_pt_spans,
+            #     pt_states,
+            #     use_copy=use_copy,
+            #     num_samples=num_samples,
+            #     max_length=max_length,
+            # )
             sample_scores = [
                 (sample, type_, score)
                 for sample, type_, score in zip(samples, types, scores)
@@ -199,6 +223,104 @@ class PCFG:
             types[i] = terminal_type
             # scores[i] = score / (len(terminals) + 1e-9)
         return samples, types, scores
+
+    @staticmethod
+    def sample_inspect(
+        terms: np.ndarray,  # pt x t, in normal space
+        rules: np.ndarray,  # nt x (nt+pt) x (nt+pt), in normal space
+        roots: np.ndarray,  # nt, in normal space
+        nt_num_nodes: int,
+        nt_states: int,
+        pt_num_nodes: int,
+        pt_states: int,
+        use_copy=True,
+        num_samples=1,
+        max_length=100,
+        max_actions=100,
+        UNK=1,
+    ):
+        # Kim's impl derive the rightmost NT first. But I change it to left first.
+        # My order (LL) should be more nature to combine with LM, as the generation order
+        # of mine is left-to-right.
+        # TODO inspect how often the sampling reaches max_length and max_actions.
+        # TODO try bfs.
+        #
+        # Kim's impl seems to be wrong when deriving COPY. The order of left/right PT
+        # appended to the buffer in his impl should be reversed.
+
+        NT = rules.shape[0]
+        PT = terms.shape[0]
+        S = NT + PT
+        COPY_NT = nt_states - 1
+        COPY_PT = pt_states - 1
+        samples = [[0] for _ in range(num_samples)]
+        types = [[0] for _ in range(num_samples)]
+        scores = [0.0 for _ in range(num_samples)]
+        trajectories = [[] for _ in range(num_samples)]
+
+        for i in range(num_samples):
+            trajectory = []
+            actions = 0
+            sample = weighted_random(roots)
+            trajectory.append(("r", sample))
+            # score = roots[sample]
+            nonterminals: List[int] = [sample]
+            preterminals: List[int] = []
+            is_copy_pt: List[bool] = []
+
+            while (
+                len(nonterminals) > 0
+                and len(preterminals) < max_length
+                and actions < max_actions
+            ):
+                s = nonterminals.pop()  # get the last element
+                if s < NT:
+                    if use_copy:
+                        nt_state = s // nt_num_nodes
+                        if nt_state == COPY_NT:
+                            nt_node = s % nt_num_nodes
+                            preterminals.append(nt_node)
+                            is_copy_pt.append(True)
+                            continue
+                    actions += 1
+                    sample = weighted_random(rules[s])
+                    trajectory.append(("r", sample))
+                    # score += rules[s, sample]
+                    left, right = divmod(sample, S)
+                    nonterminals.extend([right, left])
+                else:
+                    preterminals.append(s - NT)
+                    is_copy_pt.append(False)
+
+            terminals: List[int] = []
+            terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
+            for s, flag in zip(preterminals, is_copy_pt):
+                if flag:
+                    terminals.append(s)
+                    terminal_type.append(_COPY_NT)
+                else:
+                    src_pt_state = s // pt_num_nodes
+                    if use_copy and src_pt_state == COPY_PT:
+                        src_node = s % pt_num_nodes
+                        terminals.append(src_node)
+                        terminal_type.append(_COPY_PT)
+                    else:
+                        sample = weighted_random(terms[s])
+                        trajectory.append(("t", sample))
+                        # score += terms[s, sample]
+                        if use_copy and sample == UNK:
+                            # force <unk> tokens to copy
+                            src_node = s % pt_num_nodes
+                            terminals.append(src_node)
+                            terminal_type.append(_COPY_PT)
+                        else:
+                            terminals.append(sample)
+                            terminal_type.append(_VOCAB)
+            samples[i] = terminals
+            types[i] = terminal_type
+            trajectories[i] = trajectory
+            # scores[i] = score / (len(terminals) + 1e-9)
+        return samples, types, scores, trajectories
 
     @staticmethod
     @jit(nopython=True)

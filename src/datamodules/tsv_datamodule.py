@@ -1,6 +1,7 @@
 import logging
 from collections import Counter
-from typing import List, Optional, Union
+from pathlib import Path
+from typing import Any, List, Optional, Union
 
 import numpy as np
 import torch
@@ -21,6 +22,7 @@ class TSVDataModule(_DataModule):
         train_file,
         dev_file,
         test_file,
+        load_gold_tree: bool = False,
         max_src_len: int = 100,
         max_tgt_len: int = 100,
         copy_mode: str = "none",
@@ -51,14 +53,19 @@ class TSVDataModule(_DataModule):
 
     def setup(self, stage: Optional[str] = None):
         data_train = self.read_file(self.hparams.train_file)
+        data_val = self.read_file(self.hparams.dev_file)
+        data_test = self.read_file(self.hparams.test_file)
+        if self.hparams.load_gold_tree:
+            data_train = self.load_gold_tree(data_train, self.hparams.train_file)
+            data_val = self.load_gold_tree(data_val, self.hparams.dev_file)
+            data_test = self.load_gold_tree(data_test, self.hparams.test_file)
+
         data_train = [
             inst
             for inst in data_train
             if len(inst["src"]) <= self.hparams.max_src_len
             and len(inst["tgt"]) <= self.hparams.max_tgt_len
         ]
-        data_val = self.read_file(self.hparams.dev_file)
-        data_test = self.read_file(self.hparams.test_file)
 
         data_train = self.process_all_copy(data_train)
         data_val = self.process_all_copy(data_val)
@@ -145,6 +152,20 @@ class TSVDataModule(_DataModule):
             output.append(copy_position)
         inst["copy_phrase"] = output
 
+    def load_gold_tree(self, data, path):
+        from nltk.corpus.reader.bracket_parse import BracketParseCorpusReader
+
+        path = Path(path)
+        reader = BracketParseCorpusReader(
+            str(path.parents[0]), [path.with_suffix(".tb").name]
+        )
+        trees = list(reader.parsed_sents())
+        assert len(trees) == len(data)
+        for item, tree in zip(data, trees):
+            tree.collapse_unary(True)
+            item["src_tree"] = tree
+        return data
+
     def build_vocab(self, data):
         src_vocab_cnt = Counter()
         tgt_vocab_cnt = Counter()
@@ -186,7 +207,7 @@ class TSVDataModule(_DataModule):
     def val_dataloader(self):
         loader = DataLoader(
             dataset=self.data_val,
-            batch_size=self.hparams.eval_batch_size,
+            batch_size=self.hparams.batch_size,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             collate_fn=self.collator,
@@ -277,16 +298,34 @@ class TSVDataModule(_DataModule):
             batched["transformer_inputs"] = transformer_inp
             batched["transformer_offset"] = offset_mapping
 
+        if "src_tree" in data[0]:
+            trees = [item["src_tree"] for item in data]
+            batched["src_tree"] = trees
+
         return batched
+
+    def transfer_batch_to_device(
+        self, batch: Any, device: torch.device, dataloader_idx: int
+    ) -> Any:
+        excluded = []
+        if "src_tree" in batch:
+            trees = batch.pop("src_tree")
+            excluded.append(("src_tree", trees))
+        batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
+        for key, value in excluded:
+            batch[key] = value
+        return batch
 
 
 if __name__ == "__main__":
 
     datamodule = TSVDataModule(
-        "data/StylePTB/AEM/train.tsv",
-        "data/StylePTB/AEM/valid.tsv",
-        "data/StylePTB/AEM/test.tsv",
-        enable_copy=True,
+        "data/StylePTB/ATP/train.tsv",
+        "data/StylePTB/ATP/valid.tsv",
+        "data/StylePTB/ATP/test.tsv",
+        load_gold_tree=True,
+        copy_mode="phrase",
+        batch_size=2,
     )
     datamodule.setup()
     print("Loaded.")

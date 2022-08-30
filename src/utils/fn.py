@@ -1,6 +1,6 @@
 from typing import List, Tuple
 
-import nltk
+from nltk.tree import Tree
 
 
 def extract_parses(matrix, lengths, kbest=False, inc=0):
@@ -153,3 +153,48 @@ def spans2tree(spans: List[Tuple[int, int]], return_mapping=False):
         return spans, parent, mapping
     else:
         return spans, parent
+
+
+def convert_annotated_str_to_nltk_str(annotated, prefix="x"):
+    # convert (I (love nlp)) to (S (NN I) (VP (V love) (NP nlp)))
+    # TODO allow escape ( and )
+
+    buffer = []
+    left_brace_position = []
+    i = 0
+    num_token = 0
+    while i < len(annotated):
+        c = annotated[i]
+        i += 1
+        if c == " ":
+            continue
+        elif c == "(":
+            left_brace_position.append(len(buffer))
+        elif c == ")":
+            start = left_brace_position.pop()
+            children = buffer[start:]
+            tree = Tree(
+                (children[0].label()[0], children[-1].label()[1]), buffer[start:]
+            )
+            buffer[start:] = [tree]
+        else:
+            j = i + 1
+            while j < len(annotated) and annotated[j] not in " ()":
+                j += 1
+            buffer.append(Tree((num_token, num_token + 1), [annotated[i - 1 : j]]))
+            num_token += 1
+            i = j
+    assert len(buffer) == 1
+
+    def apply_to_tree(tree, func):
+        func(tree)
+        for subtree in tree:
+            if isinstance(subtree, Tree):
+                apply_to_tree(subtree, func)
+
+    def relabel_node(tree: Tree):
+        s, e = tree._label
+        tree._label = f"{prefix}{s}to{e}"
+
+    apply_to_tree(buffer[0], relabel_node)
+    return buffer[0]

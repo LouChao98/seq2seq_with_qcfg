@@ -11,6 +11,7 @@ from transformers import AutoModel
 
 from src.models.base import ModelBase
 from src.models.src_parser.base import SrcParserBase
+from src.models.src_parser.gold import GoldTreeProcessor
 from src.models.tgt_parser.base import TgtParserBase
 from src.models.tree_encoder.base import TreeEncoderBase
 from src.utils.fn import (
@@ -24,7 +25,7 @@ from src.utils.metric import PerplexityMetric
 log = logging.getLogger(__file__)
 
 
-class GeneralSeq2SeqModule(ModelBase):
+class GeneralSeq2SeqGoldSrcTreeModule(ModelBase):
     """A module for general seq2seq tasks.
 
     * support pretrained models
@@ -49,6 +50,8 @@ class GeneralSeq2SeqModule(ModelBase):
     ):
         super().__init__()
         self.save_hyperparameters(logger=False)
+        if parser is not None:
+            log.warning("Ignoring parser because of gold src trees are given.")
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
         super().setup(stage)
@@ -71,9 +74,7 @@ class GeneralSeq2SeqModule(ModelBase):
             + (0 if self.pretrained is None else self.pretrained.config.hidden_size),
         )
 
-        self.parser: SrcParserBase = instantiate(
-            self.hparams.parser, vocab=len(self.datamodule.src_vocab)
-        )
+        self.parser = GoldTreeProcessor()
         self.tree_encoder: TreeEncoderBase = instantiate(
             self.hparams.tree_encoder, dim=self.encoder.get_output_dim()
         )
@@ -132,11 +133,7 @@ class GeneralSeq2SeqModule(ModelBase):
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
-
-        dist = self.parser(src_ids, src_lens)
-        src_nll = -dist.partition
-        src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
-        src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
+        src_spans = self.parser.get_spans(batch["src_tree"])
 
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
@@ -149,29 +146,9 @@ class GeneralSeq2SeqModule(ModelBase):
             copy_position=copy_position,
         )
 
-        with torch.no_grad():
-            src_spans_argmax, src_logprob_argmax = self.parser.argmax(
-                src_ids, src_lens, dist=dist
-            )
-            src_spans_argmax = extract_parses(src_spans_argmax[-1], src_lens, inc=1)[0]
-            node_features_argmax, node_spans_argmax = self.tree_encoder(
-                x, src_lens, spans=src_spans_argmax
-            )
-            tgt_nll_argmax = self.decoder(
-                batch["tgt_ids"],
-                batch["tgt_lens"],
-                node_features_argmax,
-                node_spans_argmax,
-                copy_position=copy_position,
-            )
-            neg_reward = (tgt_nll - tgt_nll_argmax).detach()
-
         return {
             "decoder": tgt_nll.mean(),
-            "encoder": src_nll.mean() + (src_logprob * neg_reward).mean(),
             "tgt_nll": tgt_nll.mean(),
-            "src_nll": src_nll.mean(),
-            "reward": -neg_reward.mean(),
         }
 
     def forward_visualize(self, batch, sample=False):
@@ -179,13 +156,10 @@ class GeneralSeq2SeqModule(ModelBase):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
 
-        parse = self.parser.sample if sample else self.parser.argmax
-        src_spans = parse(src_ids, src_lens)[0][-1]
-        src_spans, src_trees = extract_parses(src_spans, src_lens, inc=1)
-        src_actions, src_annotated = [], []
-        for snt, tree in zip(batch["src"], src_trees):
-            src_actions.append(get_actions(tree))
-            src_annotated.append(get_tree(src_actions[-1], snt))
+        src_spans = self.parser.get_spans(batch["src_tree"])
+        src_annotated = []
+        for tree in batch["src_tree"]:
+            src_annotated.append(tree._pformat_flat("", "()", False))
 
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
@@ -263,9 +237,7 @@ class GeneralSeq2SeqModule(ModelBase):
         # actually predict the target sequence
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
 
-        dist = self.parser(src_ids, src_lens)
-        src_spans = self.parser.argmax(src_ids, src_lens, dist=dist)[0]
-        src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
+        src_spans = self.parser.get_spans(batch["src_tree"])
 
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
@@ -291,14 +263,11 @@ class GeneralSeq2SeqModule(ModelBase):
 
     def training_step(self, batch: Any, batch_idx: int):
         output = self(batch)
-        loss = output["decoder"] + output["encoder"]
+        loss = output["decoder"]
         ppl = self.train_metric(output["tgt_nll"], batch["tgt_lens"])
         self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
         self.log("train/ppl", ppl, prog_bar=True)
         self.log("train/decoder", output["decoder"], prog_bar=True)
-        self.log("train/encoder", output["encoder"], prog_bar=True)
-        if "reward" in output:
-            self.log("train/reward", output["reward"])
 
         if batch_idx == 0:
             self.eval()
@@ -340,7 +309,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
     def validation_step(self, batch: Any, batch_idx: int):
         output = self(batch)
-        loss = output["decoder"] + output["encoder"]
+        loss = output["decoder"]
         self.val_metric(output["tgt_nll"], batch["tgt_lens"])
         return {"loss": loss}
 

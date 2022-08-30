@@ -5,13 +5,14 @@ import pprint
 import re
 import sys
 import warnings
-
 from typing import Optional
+
 from pytorch_lightning import Callback
 from pytorch_lightning.callbacks import TQDMProgressBar
+from pytorch_lightning.loggers.wandb import WandbLogger
 from tqdm import tqdm
-import torch
-from pytorch_lightning import Trainer, LightningModule
+
+import wandb
 
 log = logging.getLogger("callback")
 
@@ -24,7 +25,7 @@ def _info(*args, **kwargs):
     log.info(*args, **kwargs)
 
 
-class MyProgressBar(TQDMProgressBar):
+class CustomProgressBar(TQDMProgressBar):
     """Only one, short, ascii"""
 
     def __init__(self, refresh_rate: int = 1, process_position: int = 0):
@@ -104,3 +105,11 @@ class MyProgressBar(TQDMProgressBar):
         # if active_progress_bar is not None:
         #     s = sep.join(map(str, args))
         #     active_progress_bar.write(s, end=end, file=file, nolock=nolock)
+
+
+class CustomWandbLogger(WandbLogger):
+    def finalize(self, status: str) -> None:
+        for fname in ["predict_on_test.txt", "train.log", "test.log"]:
+            if os.path.exists(fname):
+                wandb.save(fname)
+        return super().finalize(status)

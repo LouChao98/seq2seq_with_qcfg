@@ -7,12 +7,11 @@ import torch
 from src.models.general_seq2seq import GeneralSeq2SeqModule
 from src.utils.fn import extract_parses
 
-
 log = logging.getLogger(__file__)
 
 
 class GSeq2seqSrcSpanV1(GeneralSeq2SeqModule):
-    """ Based on GeneralSeq2Seq
+    """Based on GeneralSeq2Seq
     + use copy_phrases to bonus src parser. use svm hinge loss
     """
 
@@ -22,6 +21,7 @@ class GSeq2seqSrcSpanV1(GeneralSeq2SeqModule):
 
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
+        copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
 
         dist = self.parser(src_ids, src_lens)
         src_nll = -dist.partition
@@ -36,7 +36,7 @@ class GSeq2seqSrcSpanV1(GeneralSeq2SeqModule):
             batch["tgt_lens"],
             node_features,
             node_spans,
-            (batch.get("copy_token"), batch.get("copy_phrase")),
+            copy_position=copy_position,
         )
 
         src_spans_argmax, src_logprob_argmax = self.parser.argmax(
@@ -51,14 +51,19 @@ class GSeq2seqSrcSpanV1(GeneralSeq2SeqModule):
             batch["tgt_lens"],
             node_features_argmax,
             node_spans_argmax,
-            (batch.get("copy_token"), batch.get("copy_phrase")),
+            copy_position=copy_position,
         )
         neg_reward = (tgt_nll - tgt_nll_argmax).detach()
 
         copy_phrase = batch["copy_phrase"]
         batch_size, n, *_ = x.shape
         add_scores = [
-            np.full((batch_size, n - w), 0, dtype=np.float32,) for w in range(1, n)
+            np.full(
+                (batch_size, n - w),
+                0,
+                dtype=np.float32,
+            )
+            for w in range(1, n)
         ]
         for batch_idx, possible_copy in enumerate(copy_phrase):
             for w, maps in enumerate(possible_copy):

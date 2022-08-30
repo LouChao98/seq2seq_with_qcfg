@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from numba import jit
 from torch.utils.checkpoint import checkpoint as torch_ckpt
 
@@ -64,3 +65,16 @@ def reorder(func):
         return output
 
     return wrapper
+
+
+def process_param_for_marginal(item):
+    if item is None:
+        return item
+    elif isinstance(item, torch.Tensor):
+        if torch.is_floating_point(item):
+            return item.detach().clone().requires_grad_()
+        else:
+            return item.detach().clone()
+    elif isinstance(item, (list, tuple)):
+        return [process_param_for_marginal(i) for i in item]
+    raise NotImplementedError

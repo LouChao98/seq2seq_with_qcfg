@@ -96,11 +96,16 @@ def train(config: DictConfig) -> Optional[float]:
 
     # Test the model
     if config.get("test"):
-        ckpt_path = "best"
-        if not config.get("train") or config.trainer.get("fast_dev_run"):
-            ckpt_path = None
-        log.info("Starting testing!")
-        trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
+        log.info("Starting testing using the last model!")
+        trainer.test(model=model, datamodule=datamodule, ckpt_path=None)
+        if (
+            config.get("train")
+            and not config.trainer.get("fast_dev_run")
+            and trainer.checkpoint_callback is not None
+            and getattr(trainer.checkpoint_callback, "best_model_path") is not None
+        ):
+            log.info("Starting testing using the best model!")
+            trainer.test(model=model, datamodule=datamodule, ckpt_path="best")
 
     # Make sure everything closed properly
     log.info("Finalizing!")

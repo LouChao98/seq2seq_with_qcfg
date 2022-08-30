@@ -4,7 +4,7 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: styleptb_debug.yaml
+  - override /datamodule: styleptb.yaml
   - override /model: styleptb_gumbel.yaml
   - override /callbacks: default.yaml
   - override /logger: wandb
@@ -18,7 +18,7 @@ name: "styleptb_gumbel"
 
 datamodule:
   batch_size: 4
-  eval_batch_size: 2
+  eval_batch_size: 1
   # batch_size: 12
   # eval_batch_size: 4
   max_src_len: 60

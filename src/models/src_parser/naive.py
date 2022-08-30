@@ -9,6 +9,11 @@ from .base import SrcParserBase
 
 
 class NaiveSrcParser(SrcParserBase):
+    # generate a two-level tree
+    #    ROOT
+    #  /  | .. \
+    # w1  w2 ..  wn
+
     def __init__(self, *args, **kwargs):
         super(NaiveSrcParser, self).__init__()
 
@@ -21,10 +26,7 @@ class NaiveSrcParser(SrcParserBase):
         return torch.tensor(0.0, requires_grad=True)
 
     def sample(self, x, lengths, **kwargs):
-        # generate a two-level tree
-        #    ROOT
-        #  /  | .. \
-        # w1  w2 ..  wn
+
         b, n = x.shape
         samples = torch.zeros(b, n, n, 1, dtype=torch.long, device=x.device)
         samples[torch.arange(b), torch.tensor(lengths) - 2, 0] = 1.0

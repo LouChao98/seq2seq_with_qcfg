@@ -180,7 +180,7 @@ class NeuralQCFGSoftTgtParser(NeuralQCFGTgtParser):
         node_features,
         spans,
         x: Optional[torch.Tensor] = None,
-        copy_position=None,  # (pt, nt), nt not implemented
+        copy_position=None,  # (pt, nt)
     ):
         if copy_position is None or not self.use_copy:
             copy_position = (None, None)

@@ -9,7 +9,7 @@ from torch import Tensor
 from torch.autograd import grad
 
 from ._fn import diagonal, diagonal_copy_, stripe
-from ._utils import checkpoint, reorder, weighted_random
+from ._utils import checkpoint, process_param_for_marginal, reorder, weighted_random
 from .td_style_base import TDStyleBase
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
@@ -52,10 +52,10 @@ class D1PCFG(TDStyleBase):
         if marginal:
             grad_state = torch.is_grad_enabled()
             torch.set_grad_enabled(True)
+            cm = torch.inference_mode(False)
+            cm.__enter__()
             # NOTE I assume marginals are only used for decoding.
-            params = {
-                k: v.detach() if isinstance(v, Tensor) else v for k, v in params.items()
-            }
+            params = {k: process_param_for_marginal(v) for k, v in params.items()}
         if not isinstance(lens, torch.Tensor):
             lens = torch.tensor(lens)
         assert (
@@ -188,6 +188,7 @@ class D1PCFG(TDStyleBase):
             return spans
         if marginal:
             torch.set_grad_enabled(grad_state)
+            cm.__exit__(None, None, None)
             return grad(logZ.sum(), [span_indicator])[0]
         return -logZ
 

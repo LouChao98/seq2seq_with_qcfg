@@ -387,8 +387,22 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         # A->a
         terms = F.log_softmax(self.vocab_out(pt_emb), 2)
-        copy_nt = None
+        # temperory fix
+        is_multi = np.ones((batch_size, pt_num_nodes), dtype=np.bool8)
+        for b, pt_spans_inst in enumerate(pt_spans):
+            for span in pt_spans_inst:
+                if span[0] == span[1]:
+                    is_multi[b, span[0]] = False
+        terms = terms.clone()
+        mask = torch.from_numpy(is_multi)[:, None, :, None]
+        mask = mask.expand(-1, terms.shape[1], -1, terms.shape[3])
+        terms[mask] = self.neg_huge
+        terms = terms.view(batch_size, -1, terms.shape[-1])
+        mask = torch.from_numpy(is_multi)[:, None, :, None, None]
+        mask = mask.expand(-1, rules.shape[1], -1, *rules.shape[-2:])
+        rules[~mask] = self.neg_huge
 
+        copy_nt = None
         if x is not None:
             n = x.size(1)
             terms = terms.unsqueeze(1).expand(batch_size, n, pt, terms.size(2))

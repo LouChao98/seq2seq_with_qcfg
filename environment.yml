@@ -1,0 +1,48 @@
+name: qcfg
+channels:
+  - pytorch
+  - pyg
+  - defaults
+dependencies:
+  - pytorch
+  - torchvision
+  - cudatoolkit=11.3
+  - tensorboard
+  - black
+  - isort
+  - flake8
+  - rich
+  - pytest
+  - ipython
+  - ipykernel
+  - ipywidgets
+  - sqlalchemy
+  - matplotlib
+  - seaborn
+  - pytorch-scatter
+  - pyg
+  - numba
+  - pip
+  - pip:
+      - python-dotenv
+      - pre-commit
+      - nbstripout
+      - pudb
+      - pytorch-lightning
+      - torchmetrics
+      - hydra-core
+      - hydra-colorlog
+      - hydra-optuna-sweeper
+      - hydra-submitit-launcher
+      - transformers
+      - wandb
+      - class-resolver
+      - penman
+      - torch-semiring-einsum
+      - opt-einsum
+      - fairscale
+      - easydict
+      - pytorch-memlab
+      - allennlp
+      - svgling
+      - -e ./pytorch-struct

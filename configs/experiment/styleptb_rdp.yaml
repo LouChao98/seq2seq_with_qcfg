@@ -16,11 +16,10 @@ defaults:
 # name of the run determines folder name in logs
 name: "styleptb_rdp"
 
-
 # ~17GB
 datamodule:
   batch_size: 4
-  eval_batch_size: 2
+  eval_batch_size: 1
   # batch_size: 12
   # eval_batch_size: 4
   max_src_len: 60
@@ -42,5 +41,4 @@ logger:
     project: "styleptb"
     tags: ["rdp"]
     offline: true
-
 # train: false

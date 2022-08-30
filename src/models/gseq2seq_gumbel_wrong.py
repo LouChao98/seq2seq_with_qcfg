@@ -37,6 +37,8 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
 
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
+        copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
+
         x = self.encode(batch)
 
         dist = self.parser(src_ids, src_lens)
@@ -53,7 +55,7 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
             batch["tgt_lens"],
             node_feats,
             node_spans,
-            (batch.get("copy_token"), batch.get("copy_phrase")),
+            copy_position=copy_position,
         )
 
         return {
@@ -66,6 +68,8 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
     def forward_visualize(self, batch, sample=False):
         # parse and annotate brackets on src and tgt
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
+        copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
+
         x = self.encode(batch)
 
         parse = self.parser.sample if sample else self.parser.argmax
@@ -86,7 +90,7 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
             batch["tgt_lens"],
             node_feats,
             node_spans,
-            (batch.get("copy_token"), batch.get("copy_phrase")),
+            copy_position=copy_position,
         )
         tgt_annotated = []
         for snt, tgt_spans_inst in zip(batch["tgt"], tgt_spans):
