@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
+from torch_struct.distributions import SentCFG
 
 from ...datamodules.components.vocab import VocabularyPair
 from ..components.common import MultiResidualLayer
@@ -27,6 +28,8 @@ class NeuralQCFGTgtParser(TgtParserBase):
         nt_states=10,
         pt_states=1,
         rule_constraint_type=0,
+        rule_constraint_method="hard",
+        rule_constraint_method_args=None,
         use_copy=False,
         nt_span_range=[2, 1000],
         pt_span_range=[1, 1],
@@ -44,6 +47,8 @@ class NeuralQCFGTgtParser(TgtParserBase):
         self.nt_states = nt_states
         self.pt_states = pt_states
         self.rule_constraint_type = rule_constraint_type
+        self.rule_constraint_method = rule_constraint_method
+        self.rule_constraint_method_args = rule_constraint_method_args
         self.use_copy = use_copy
         self.nt_span_range = nt_span_range
         self.pt_span_range = pt_span_range
@@ -69,10 +74,16 @@ class NeuralQCFGTgtParser(TgtParserBase):
         nn.init.xavier_uniform_(self.src_nt_emb.data)
         nn.init.xavier_uniform_(self.src_pt_emb.data)
 
-    def forward(self, x, lengths, node_features, spans, **kwargs):
-        params, *_ = self.get_params(node_features, spans, x, **kwargs)
-        out = self.pcfg(params, lengths, False)
+    def forward(self, x, lengths, node_features, spans, params=None, **kwargs):
+        if params is None:
+            params, *_ = self.get_params(node_features, spans, x, **kwargs)
+        out = self.pcfg(params, lengths, False)  # nll
         return out
+
+    def forward_pr(self, x, lengths, node_features, spans, params=None, **kwargs):
+        if params is None:
+            params, *_ = self.get_params(node_features, spans, x, **kwargs)
+        return self.get_pr_term(params, lengths)
 
     def parse(self, x, lengths, node_features, spans, **kwargs):
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
@@ -148,15 +159,17 @@ class NeuralQCFGTgtParser(TgtParserBase):
                     copy_nt = [[] for _ in range(max_len)]  # no need to prune
                     copy_unk = {}  # record position if copy unk token
                     for v, t in zip(inst[0], inst[1]):
-                        if len(expanded) >= max_len:
-                            break
                         if t == TokenType.VOCAB:
+                            if len(expanded) + 1 > max_len:
+                                break
                             expanded.append(v)
                         elif t == TokenType.COPY_PT:
                             span = pt_spans_inst[v]
                             tokens = vocab_pair.src2tgt(
                                 src_ids_inst[span[0] : span[1] + 1]
                             )
+                            if len(expanded) + len(tokens) > max_len:
+                                break
                             copy_pt[span[0], len(expanded)] = True
                             if tokens[0] == vocab_pair.tgt.unk_token_id:
                                 copy_unk[len(expanded)] = span[0]
@@ -166,6 +179,8 @@ class NeuralQCFGTgtParser(TgtParserBase):
                             tokens = vocab_pair.src2tgt(
                                 src_ids_inst[span[0] : span[1] + 1]
                             )
+                            if len(expanded) + len(tokens) > max_len:
+                                break
                             copy_nt[span[1] - span[0] - 1].append(
                                 (span[0], len(expanded))
                             )  # copy_nt starts from w=2
@@ -368,16 +383,18 @@ class NeuralQCFGTgtParser(TgtParserBase):
         mask = torch.einsum("bx,by,bz->bxyz", lhs_mask, rhs_mask, rhs_mask)
         rules[~mask] = self.neg_huge
 
+        constraint_mask = None
         if self.rule_constraint_type > 0:
             if self.rule_constraint_type == 1:
-                mask = self.get_rules_mask1(
+                constraint_mask = self.get_rules_mask1(
                     batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
                 )
             elif self.rule_constraint_type == 2:
-                mask = self.get_rules_mask2(
+                constraint_mask = self.get_rules_mask2(
                     batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
                 )
-            rules[~mask] = self.neg_huge
+            if self.rule_constraint_method == "hard":
+                rules[~constraint_mask] = self.neg_huge
 
         # rules = (
         #     rules.view(batch_size, nt, (nt + pt) ** 2)
@@ -435,7 +452,14 @@ class NeuralQCFGTgtParser(TgtParserBase):
                     copy_nt_.append((item.to(terms.device), mask.to(terms.device)))
                 copy_nt = copy_nt_
 
-        params = {"term": terms, "root": roots, "rule": rules, "copy_nt": copy_nt}
+        # TODO return everything in dict, or some thing else
+        params = {
+            "term": terms,
+            "root": roots,
+            "rule": rules,
+            "copy_nt": copy_nt,
+            "constraint_mask": constraint_mask,
+        }
         return params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes
 
     def build_src_features(self, spans, node_features):
@@ -497,6 +521,134 @@ class NeuralQCFGTgtParser(TgtParserBase):
             pt_num_nodes,
             pt_node_features,
         )
+
+    def get_pr_term(self, params, lens):
+        if self.rule_constraint_type in (1, 2, 3):
+            return self.get_pr_term_by_line_search(params, lens)
+        raise NotImplementedError
+
+    def get_pr_term_by_line_search(self, params, lens):
+        # E[constraint] <= b
+        constraint = 1.0 - params["constraint_mask"].float()
+        lambdas = self.solve_line_search(
+            params,
+            lens,
+            constraint,
+            torch.full(
+                (len(params["rule"]),),
+                self.rule_constraint_method_args.b,
+                device=params["rule"].device,
+            ),
+            self.rule_constraint_method_args.lbound,
+            self.rule_constraint_method_args.rbound,
+            self.rule_constraint_method_args.num_point,
+            self.rule_constraint_method_args.num_iter,
+        )
+        constrained_params = (
+            params["term"].detach(),
+            params["rule"].detach() - constraint * lambdas.view(-1, 1, 1, 1),
+            params["root"].detach(),
+            params["copy_nt"],
+        )
+        original_params = (
+            params["term"],
+            params["rule"],
+            params["root"],
+            params["copy_nt"],
+        )
+        q = SentCFG(constrained_params, lens)
+        q_margin = q.marginals
+        p = SentCFG(original_params, lens)
+        ce = (
+            p.partition
+            - (q_margin[0].detach() * original_params[0]).sum((1, 2))
+            - (q_margin[1].detach() * original_params[1]).sum((1, 2, 3))
+            - (q_margin[2].detach() * original_params[2]).sum(1)
+        )
+        return ce
+
+    @torch.no_grad()
+    def solve_line_search(
+        self,
+        params,
+        lens,
+        factorized_constraint,
+        b,
+        lbound=1e-4,
+        rbound=1e4,
+        num_point=16,
+        num_iter=3,
+    ):
+        batch_size = len(params["rule"])
+        lambdas = []
+        for bidx in range(batch_size):
+            lb, rb = lbound, rbound
+            params_inst = {
+                "term": params["term"][bidx, None].detach().expand(num_point, -1, -1),
+                "root": params["root"][bidx, None].detach().expand(num_point, -1),
+                "copy_nt": (
+                    [
+                        (
+                            v[bidx, None].expand(num_point, -1, -1),
+                            m[bidx, None].expand(num_point, -1, -1),
+                        )
+                        for v, m in params["copy_nt"]
+                    ]
+                    if params["copy_nt"] is not None
+                    else None
+                ),
+            }
+            constraint_inst = factorized_constraint[bidx, None]
+            b_inst = b[bidx, None]
+            lt, rt, max_t, max_l = None, None, None, None
+            for itidx in range(num_iter):
+                if itidx > 0:  # skip lb rb
+                    lgrid_np = np.geomspace(lb, rb, num_point + 2, dtype=np.float32)
+                    lgrid = torch.from_numpy(lgrid_np[1:-1]).to(constraint_inst.device)
+                else:
+                    lgrid_np = np.geomspace(lb, rb, num_point, dtype=np.float32)
+                    lgrid = torch.from_numpy(lgrid_np).to(constraint_inst.device)
+                # potential * exp(-lambda * constraint)
+                rule_inst = params["rule"][
+                    bidx, None
+                ].detach() - constraint_inst * lgrid.view(
+                    -1, *[1] * (constraint_inst.ndim - 1)
+                )
+                params_inst["rule"] = rule_inst
+                target = -lgrid * b_inst + self.pcfg(
+                    params_inst, [lens[bidx]] * num_point
+                )
+                target = target.cpu().numpy()
+                if itidx > 0:  # take back lb, rb and argmax
+                    target = [lt, *target.tolist(), rt]
+                    max_insert = lgrid_np.searchsorted(max_l)
+                    lgrid_np = lgrid_np.tolist()
+                    lgrid_np.insert(max_insert, max_l)
+                    target.insert(max_insert, max_t)
+                    target = np.asarray(target)
+                argmax_i = np.argmax(target)
+                if argmax_i == 0 or argmax_i == len(target) - 1:
+                    lambdas.append(lgrid_np[argmax_i])
+                    if itidx == 0 and argmax_i != 0:
+                        # A very small i (argmax=0) is acceptable as it means
+                        # we can satisfy the constraint without effort
+                        #
+                        # This can also be understood as the slack-penalty version
+                        # of PR. The dual problem is
+                        # max -b\lambda - log Z s.t. 0 <= \lambda, dual_norm(\lambda) < \sigma
+                        log.warning("Line search fails.")
+                    break
+                lt, rt = target[argmax_i - 1], target[argmax_i + 1]
+                lb, rb = lgrid_np[argmax_i - 1], lgrid_np[argmax_i + 1]
+                max_t = target[argmax_i]
+                max_l = lgrid_np[argmax_i]
+                if rb - lb < 1e-3:
+                    lambdas.append(lgrid_np[argmax_i])
+                    break
+            else:
+                # any possible for argmax_i not defined before reference?
+                lambdas.append(lgrid_np[argmax_i])
+        return torch.tensor(lambdas, device=params["rule"].device, dtype=torch.float32)
 
     def get_rules_mask1(
         self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device

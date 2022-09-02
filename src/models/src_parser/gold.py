@@ -54,5 +54,6 @@ def tree2span(tree_str: str):
             if tree_str[i - 1] != ")":
                 pos += 1
             start = stack.pop()
-            spans.append((start, pos, 0))
+            if pos > start + 1:
+                spans.append((start, pos - 1, 0))
     return spans

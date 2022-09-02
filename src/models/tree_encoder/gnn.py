@@ -41,6 +41,7 @@ class GeneralGNN(torch.nn.Module):
         for bidx, spans_inst in enumerate(spans_inp):
             vertices, edges = [], []
             spans_inst += [(i, i) for i in range(max(x[1] for x in spans_inst) + 1)]
+            # spans_inst = [(i, j-1, l) for i, j, l in spans_inst]
             s, p = spans2tree(spans_inst)
 
             index = list(range(len(s)))

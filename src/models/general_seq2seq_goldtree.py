@@ -11,7 +11,7 @@ from transformers import AutoModel
 
 from src.models.base import ModelBase
 from src.models.src_parser.base import SrcParserBase
-from src.models.src_parser.gold import GoldTreeProcessor
+from src.models.src_parser.gold import GoldTreeProcessor, tree2span
 from src.models.tgt_parser.base import TgtParserBase
 from src.models.tree_encoder.base import TreeEncoderBase
 from src.utils.fn import (
@@ -158,8 +158,10 @@ class GeneralSeq2SeqGoldSrcTreeModule(ModelBase):
 
         src_spans = self.parser.get_spans(batch["src_tree"])
         src_annotated = []
-        for tree in batch["src_tree"]:
-            src_annotated.append(tree._pformat_flat("", "()", False))
+        for src, tree in zip(batch["src"], batch["src_tree"]):
+            spans = tree2span(tree._pformat_flat("", "()", False))
+            annotated = annotate_snt_with_brackets(src, spans)
+            src_annotated.append(annotated)
 
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
