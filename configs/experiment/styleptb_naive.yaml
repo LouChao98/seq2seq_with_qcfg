@@ -5,7 +5,7 @@
 
 defaults:
   - override /datamodule: styleptb.yaml
-  - override /model: styleptb.yaml
+  - override /model: styleptb_gnn.yaml
   - override /callbacks: default.yaml
   - override /logger: wandb
   - override /trainer: default.yaml
@@ -27,7 +27,7 @@ datamodule:
 model:
   _target_: src.models.gseq2seq_fixedsrctree.GeneralSeq2SeqWithFixedSrcParserModule
   parser:
-    _target_: src.models.src_parser.gold.GoldTreeProcessor
+    _target_: src.models.src_parser.naive.NaiveTreeProcessor
   decoder:
     num_samples: 100
     check_ppl_batch_size: 1

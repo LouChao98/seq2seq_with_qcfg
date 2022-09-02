@@ -22,9 +22,9 @@ class GoldTreeProcessor(SrcParserBase):
         # simulate dist
         return torch.tensor(0.0, requires_grad=True)
 
-    def get_spans(self, trees):
+    def get_spans(self, batch):
         spans = []
-        for tree in trees:
+        for tree in batch["src_tree"]:
             tree_str = tree._pformat_flat("", "()", False)
             spans.append(tree2span(tree_str))
         return spans

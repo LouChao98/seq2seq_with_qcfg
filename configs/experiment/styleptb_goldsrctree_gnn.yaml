@@ -25,7 +25,9 @@ datamodule:
   max_src_len: 60
 
 model:
-  _target_: src.models.general_seq2seq_goldtree.GeneralSeq2SeqGoldSrcTreeModule
+  _target_: src.models.gseq2seq_fixedsrctree.GeneralSeq2SeqWithFixedSrcParserModule
+  parser:
+    _target_: src.models.src_parser.gold.GoldTreeProcessor
   decoder:
     num_samples: 100
     check_ppl_batch_size: 1

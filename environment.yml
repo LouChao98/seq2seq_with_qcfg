@@ -45,4 +45,6 @@ dependencies:
       - pytorch-memlab
       - allennlp
       - svgling
+      - amrlib
+      - unidecode
       - -e ./pytorch-struct

@@ -8,14 +8,14 @@ from ..components.common import MultiResidualLayer
 from .base import SrcParserBase
 
 
-class NaiveSrcParser(SrcParserBase):
+class NaiveTreeProcessor(SrcParserBase):
     # generate a two-level tree
     #    ROOT
     #  /  | .. \
     # w1  w2 ..  wn
 
     def __init__(self, *args, **kwargs):
-        super(NaiveSrcParser, self).__init__()
+        super(NaiveTreeProcessor, self).__init__()
 
     def forward(self, x, lengths):
         return self
@@ -24,6 +24,12 @@ class NaiveSrcParser(SrcParserBase):
     def partition(self):
         # simulate dist
         return torch.tensor(0.0, requires_grad=True)
+
+    def get_spans(self, batch):
+        spans = []
+        for l in batch["src_lens"]:
+            spans.append([(0, l - 1, 0)])
+        return spans
 
     def sample(self, x, lengths, **kwargs):
 
