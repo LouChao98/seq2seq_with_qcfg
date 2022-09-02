@@ -352,7 +352,12 @@ class GeneralSeq2SeqModule(ModelBase):
         self.log("val/ppl_best", best_ppl, on_epoch=True, prog_bar=True)
         self.print("val/ppl", str(ppl.item()))
 
+    @torch.inference_mode(False)
     def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = None):
+        # patch for inference_mode
+        batch["src_ids"] = batch["src_ids"].clone()
+        batch["tgt_ids"] = batch["tgt_ids"].clone()
+
         preds = self.forward_inference(batch)["pred"]
         targets = batch["tgt"]
 

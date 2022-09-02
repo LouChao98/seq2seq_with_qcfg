@@ -112,6 +112,7 @@ class NeuralPCFGSrcParser(SrcParserBase):
         buffer = semiring.get_buffer()
         return samples, logprobs, trace, buffer
 
+    @torch.enable_grad()
     def argmax(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
         if dist is None:
             dist = self(x, lengths, extra_scores)
