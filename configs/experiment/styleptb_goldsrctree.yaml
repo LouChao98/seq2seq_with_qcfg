@@ -39,6 +39,6 @@ trainer:
 logger:
   wandb:
     project: "styleptb"
-    tags: ["goldsrctree"]
+    tags: ["goldsrctree_fix"]
     offline: true
 # train: false
