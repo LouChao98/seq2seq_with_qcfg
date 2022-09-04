@@ -1,0 +1,13 @@
+_target_: src.models.tree_encoder.gnn.GeneralGNN
+_recursive_: false
+nn:
+  # https://pytorch-geometric.readthedocs.io/en/2.0.4/notes/cheatsheet.html
+  _target_: torch_geometric.nn.GAT
+  hidden_channels: 128
+  num_layers: 3
+  dropout: 0.1
+  jk: lstm
+global_pooling:
+  _target_: torch_geometric.nn.GraphMultisetTransformer
+  hidden_channels: ${..nn.hidden_channels}
+  out_channels: ${..nn.hidden_channels}

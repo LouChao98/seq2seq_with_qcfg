@@ -1,9 +1,11 @@
 import contextlib
-import pytorch_lightning as pl
-import pickle
-from pathlib import Path
-from .components.file_utils import get_hash, iter_dir
 import logging
+from pathlib import Path
+
+import dill
+import pytorch_lightning as pl
+
+from .components.file_utils import get_hash, iter_dir
 
 logger = logging.getLogger(__file__)
 
@@ -44,10 +46,8 @@ class _DataModule(pl.LightningDataModule):
             if len(args) + len(kwargs) > 0:
                 logger.warning("Args are ignored because I loads data from caches.")
             with open(cache_file, "rb") as f:
-                self.__dict__.update(pickle.load(f))
+                self.__dict__.update(dill.load(f))
         else:
             self.setup_orig(*args, **kwargs)
             with open(cache_file, "wb") as f:
-                pickle.dump(
-                    {k: self.__dict__[k] for k in self._persistent_variables}, f
-                )
+                dill.dump({k: self.__dict__[k] for k in self._persistent_variables}, f)

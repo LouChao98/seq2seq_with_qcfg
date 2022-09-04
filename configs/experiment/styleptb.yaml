@@ -4,29 +4,22 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: styleptb.yaml
-  - override /model: styleptb.yaml
-  - override /callbacks: default.yaml
+  - override /datamodule: styleptb
+  - override /model: styleptb
+  - override /model/tree_encoder: treelstm
+  - override /model/decoder: qcfg
+  - override /callbacks: default
   - override /logger: wandb
-  - override /trainer: default.yaml
+  - override /trainer: default
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb"
-
-datamodule:
-  batch_size: 4
-  eval_batch_size: 1
-  # batch_size: 12
-  # eval_batch_size: 4
-  max_src_len: 60
+name: "styleptb_${hydra:runtime.choices.model/decoder}"
 
 model:
-  # load_from_checkpoint: '/home/louchao/project/semantic_parsing_qcfg/logs/ai1_download_1660232415/runs/styleptb/2022-08-09_02-33-58/checkpoints/epoch_020.ckpt'
   decoder:
-    num_samples: 100
     check_ppl_batch_size: 1
 
 trainer:
@@ -37,6 +30,8 @@ trainer:
 logger:
   wandb:
     project: "styleptb"
-    tags: ["baseline"]
-    offline: false
-# train: false
+    tags:
+      - "${hydra:runtime.choices.model/parser}"
+      - "${hydra:runtime.choices.model/tree_encoder}"
+      - "${hydra:runtime.choices.model/decoder}"
+    offline: ${in_cluster:}

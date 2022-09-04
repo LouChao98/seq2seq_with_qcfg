@@ -1,23 +1,19 @@
 defaults:
   - encoder: yzhang_lstm
   - parser: pcfg
-  - tree_encoder: gnn
+  - tree_encoder: treelstm
   - decoder: qcfg
   - test_metric: bleu1234
 
-_target_: src.models.gseq2seq_gumbel.GSeq2seqGumbel
+_target_: src.models.gseq2seq_fixedsrctree.GeneralSeq2SeqWithFixedSrcParserModule
 _recursive_: false
 
 param_initializer: "xavier_uniform"
 track_param_norm: false
-span_encoder_dropout: 0.33
 
 embedding:
   _target_: torch.nn.Embedding
   embedding_dim: 300
-
-tree_encoder:
-  _target_: src.models.tree_encoder.gnn.GeneralGNNForGumbel
 
 optimizer:
   groups: ~

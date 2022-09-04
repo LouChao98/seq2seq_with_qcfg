@@ -71,10 +71,14 @@ def process_param_for_marginal(item):
     if item is None:
         return item
     elif isinstance(item, torch.Tensor):
-        if torch.is_floating_point(item):
-            return item.detach().clone().requires_grad_()
+        if item.is_inference():
+            item = item.clone()
         else:
-            return item.detach().clone()
+            item = item.detach()
+        if torch.is_floating_point(item):
+            return item.requires_grad_()
+        else:
+            return item
     elif isinstance(item, (list, tuple)):
         return [process_param_for_marginal(i) for i in item]
     raise NotImplementedError

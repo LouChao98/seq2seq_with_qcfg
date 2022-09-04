@@ -26,6 +26,13 @@ OmegaConf.register_new_resolver(
 )
 
 
+def in_cluster():
+    return os.environ.get("SLURM_JOB_ID") is not None
+
+
+OmegaConf.register_new_resolver("in_cluster", in_cluster)
+
+
 def huggingface_path_helper(name, local_path):
     if os.path.exists(local_path):
         return local_path

@@ -4,10 +4,11 @@ train_file: ${data_dir}/StylePTB/ATP/train.tsv
 dev_file: ${data_dir}/StylePTB/ATP/valid.tsv
 test_file: ${data_dir}/StylePTB/ATP/test.tsv
 
-copy_mode: 'phrase'
+copy_mode: "phrase"
+max_src_len: 60
 
-batch_size: ${in_debugger:2,20}
-eval_batch_size: ${in_debugger:2,6}
+batch_size: ${in_debugger:2,4}
+eval_batch_size: 1 # ${in_debugger:2,6}
 num_workers: ${in_debugger:0,4}
 pin_memory: false
 

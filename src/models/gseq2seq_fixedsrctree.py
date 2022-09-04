@@ -13,20 +13,6 @@ log = logging.getLogger(__file__)
 
 
 class GeneralSeq2SeqWithFixedSrcParserModule(GeneralSeq2SeqModule):
-    def encode(self, batch):
-        src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        x = []
-        if self.embedding is not None:
-            h = self.embedding(src_ids)
-            x.append(h)
-        if self.pretrained is not None:
-            h = self.pretrained(**batch["transformer_inputs"])
-            h = scatter_mean(x, batch["transformer_offset"], 1)[:, 1:]
-            x.append(h)
-        x = torch.cat(x, dim=-1) if len(x) > 1 else x[0]
-        x = self.encoder(x, src_lens)
-        return x
-
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))

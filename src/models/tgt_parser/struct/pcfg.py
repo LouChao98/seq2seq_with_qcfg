@@ -36,10 +36,15 @@ class PCFG:
         # roots: bsz x nt
 
         terms, rules, roots = params["term"], params["rule"], params["root"]
-        if "copy_nt" in params:
-            params = (terms, rules, roots, params["copy_nt"])
-        else:
-            params = (terms, rules, roots)
+        params = (
+            terms,
+            rules,
+            roots,
+            params.get("copy_nt"),
+            None,
+            params.get("add_scores"),
+        )
+
         if decode or marginal:
             grad_state = torch.is_grad_enabled()
             torch.set_grad_enabled(True)
@@ -108,19 +113,6 @@ class PCFG:
                 num_samples=num_samples,
                 max_length=max_length,
             )
-
-            # samples, types, scores, actions = self.sample_inspect(
-            #     terms[b],
-            #     rules[b],
-            #     roots[b],
-            #     max_nt_spans,
-            #     nt_states,
-            #     max_pt_spans,
-            #     pt_states,
-            #     use_copy=use_copy,
-            #     num_samples=num_samples,
-            #     max_length=max_length,
-            # )
             sample_scores = [
                 (sample, type_, score)
                 for sample, type_, score in zip(samples, types, scores)
@@ -438,4 +430,3 @@ if __name__ == "__main__":
         dist.log_potentials, lengths=dist.lengths
     )
     print(samples[-1].nonzero())
-    # breakpoint()

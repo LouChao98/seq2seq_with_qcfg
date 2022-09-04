@@ -1,0 +1,9 @@
+_target_: src.models.tgt_parser.neural_qcfg_soft.NeuralQCFGSoftTgtParser
+num_layers: 3
+dim: 512
+nt_states: 8 # src_nt_states in origin impl
+pt_states: 8 # src_pt_states in origin impl
+num_samples: 100
+check_ppl: true
+att_dropout: 0.1
+att_num_heads: 4

@@ -1,141 +1,155 @@
-import logging
-from functools import partial
+from typing import Dict, List, Tuple
 
 import torch
-from torch.utils.data import BatchSampler
-
-log = logging.getLogger(__file__)
+import torch.distributed as dist
 
 
-class ConstantTokenNumSampler(BatchSampler):
-    def __init__(self,
-                 seq_len,
-                 max_token=4096,
-                 max_sentence=-1,
-                 num_bucket=-1,
-                 single_sent_threshold=-1,
-                 shuffle=True,
-                 weight=None):
-        """
+class BucketedSampler(torch.utils.data.Sampler):
+    r"""
+    Sampler that supports for bucketization and token-level batchification.
+    Args:
+        buckets (Dict):
+            A dict that maps each centroid to indices of clustered sentences.
+            The centroid corresponds to the average length of all sentences in the bucket.
+        batch_size (int):
+            Token-level batch size. The resulting batch contains roughly the same number of tokens as ``batch_size``.
+        shuffle (bool):
+            If ``True``, the sampler will shuffle both buckets and samples in each bucket. Default: ``False``.
+        distributed (bool):
+            If ``True``, the sampler will be used in conjunction with :class:`torch.nn.parallel.DistributedDataParallel`
+            that restricts data loading to a subset of the dataset.
+            Default: ``False``.
+    """
 
-        :param List[int] seq_len: list[int], 是每个sample的长度。一般可以通过dataset.get_field('seq_len').content传入
-        :param int max_token: 每个batch的最大的token数量
-        :param int single_sent_threshold: 长度大于阈值的句子强制batch size=1
-        :param int max_sentence: 每个batch最多多少个instance, -1表示根据max_token决定
-        :param int num_bucket: 将数据按长度拆分为num_bucket个bucket，batch中的sample尽量在bucket之中进行组合，这样可以减少padding。
-        :param bool shuffle: shuffle data each epoch. the order is not kept even shuffle=False due to bucket.
-        """
-
-        if len(seq_len) < num_bucket:
-            log.warning("Too few samples. Batch size=1.")
-            num_bucket = len(seq_len)
-        assert num_bucket > 0
-
-        self.seq_len = seq_len
-        self.max_token = max_token
-        self.max_sentence = max_sentence if max_sentence > 0 else 10000000000000000
-        self.single_sent_threshold = single_sent_threshold
+    def __init__(
+        self,
+        buckets: Dict[float, List],
+        batch_size: int,
+        shuffle: bool = False,
+        distributed: bool = False,
+    ):
+        self.batch_size = batch_size
         self.shuffle = shuffle
-        self.epoch = 0
-
-        self.sizes, self.buckets = self.kmeans(seq_len, num_bucket)
-        if weight is not None:
-            for bucket in self.buckets:
-                for i in range(len(bucket)):
-                    bucket[i: i+1] *= weight[bucket[i]]
-        self.chunks = [
-            min(
-                len(bucket),
-                max(1, round(size * len(bucket) / max_token),
-                    ((len(bucket) + max_sentence - 1) // max_sentence) if max_sentence >= 1 else 0))
+        self.sizes, self.buckets = zip(
+            *[(size, bucket) for size, bucket in buckets.items()]
+        )
+        # number of batches in each bucket, clipped by range [1, len(bucket)]
+        self.n_batches = [
+            min(len(bucket), max(round(size * len(bucket) / batch_size), 1))
             for size, bucket in zip(self.sizes, self.buckets)
         ]
+        self.rank, self.n_replicas, self.n_samples = 0, 1, sum(self.n_batches)
+        if distributed:
+            self.rank = dist.get_rank()
+            self.n_replicas = dist.get_world_size()
+            self.n_samples = sum(self.n_batches) // self.n_replicas + int(
+                self.rank < sum(self.n_batches) % self.n_replicas
+            )
+        self.epoch = 1
 
-        self.samples = sum(self.chunks) 
-    
-    def __len__(self):
-        return self.samples
+        assert not distributed, "Need to review that whether this is a correct impl"
 
     def __iter__(self):
-        if self.shuffle:
-            self.epoch += 1
-            g = torch.Generator()
-            g.manual_seed(self.epoch)
-            range_fn = partial(torch.randperm, generator=g)
-        else:
-            range_fn = torch.arange
-        
-        batches = []
-        for i in range_fn(len(self.buckets)).tolist():
-            split_sizes = [(len(self.buckets[i]) - j - 1) // self.chunks[i] + 1 for j in range(self.chunks[i])]
-            for batch in range_fn(len(self.buckets[i])).split(split_sizes):
-                batches.append([self.buckets[i][j] for j in batch.tolist()])
-        
-        if self.shuffle:
-            batches = [batches[i] for i in range_fn(len(batches))]
+        g = torch.Generator()
+        g.manual_seed(self.epoch)
+        total, batches = 0, []
+        # if `shuffle=True`, shuffle both the buckets and samples in each bucket
+        # for distributed training, make sure each process generates the same random sequence at each epoch
+        range_fn = (
+            torch.arange
+            if not self.shuffle
+            else lambda x: torch.randperm(x, generator=g)
+        )
+        for i, bucket in enumerate(self.buckets):
+            split_sizes = [
+                (len(bucket) - j - 1) // self.n_batches[i] + 1
+                for j in range(self.n_batches[i])
+            ]
+            # DON'T use `torch.chunk` which may return wrong number of batches
+            for batch in range_fn(len(bucket)).split(split_sizes):
+                if total % self.n_replicas == self.rank:
+                    batches.append([bucket[j] for j in batch.tolist()])
+                total += 1
+        self.epoch += 1
+        return iter(batches[i] for i in range_fn(len(batches)).tolist())
 
-        for batch in batches:
-            yield from self._sort_in_batch(batch)
+    def __len__(self):
+        return self.n_samples
 
 
-    def _sort_in_batch(self, batch):
-        singles = []
-        if self.single_sent_threshold != -1:
-            new_batch = []
-            for inst_idx in batch:
-                if self.seq_len[inst_idx] >= self.single_sent_threshold:
-                    singles.append([inst_idx])
-                else:
-                    new_batch.append(inst_idx)
-            batch = new_batch
-        batch.sort(key=lambda i: -self.seq_len[i])
-        if len(batch):
-            return [batch] + singles
-        else:
-            return singles
+def kmeans(
+    x: List[int], k: int, max_it: int = 32
+) -> Tuple[List[float], List[List[int]]]:
+    r"""
+    KMeans algorithm for clustering the sentences by length.
+    Args:
+        x (List[int]):
+            The list of sentence lengths.
+        k (int):
+            The number of clusters, which is an approximate value.
+            The final number of clusters can be less or equal to `k`.
+        max_it (int):
+            Maximum number of iterations.
+            If centroids does not converge after several iterations, the algorithm will be early stopped.
+    Returns:
+        List[float], List[List[int]]:
+            The first list contains average lengths of sentences in each cluster.
+            The second is the list of clusters holding indices of data points.
+    Examples:
+        >>> x = torch.randint(10, 20, (10,)).tolist()
+        >>> x
+        [15, 10, 17, 11, 18, 13, 17, 19, 18, 14]
+        >>> centroids, clusters = kmeans(x, 3)
+        >>> centroids
+        [10.5, 14.0, 17.799999237060547]
+        >>> clusters
+        [[1, 3], [0, 5, 9], [2, 4, 6, 7, 8]]
+    """
 
-    @staticmethod
-    def kmeans(x, k, max_it=32):
-        """From https://github.com/yzhangcs/parser/blob/main/supar/utils/alg.py#L7"""
+    x = torch.tensor(x, dtype=torch.float)
+    # collect unique datapoints
+    datapoints, indices, freqs = x.unique(return_inverse=True, return_counts=True)
+    # the number of clusters must not be greater than the number of datapoints
+    k = min(len(datapoints), k)
+    # initialize k centroids randomly
+    centroids = datapoints[torch.randperm(len(datapoints))[:k]]
+    # assign each datapoint to the cluster with the closest centroid
+    dists, y = torch.abs_(datapoints.unsqueeze(-1) - centroids).min(-1)
 
-        # the number of clusters must not be greater than the number of datapoints
-        x, k = torch.tensor(x, dtype=torch.float), min(len(x), k)
-        # collect unique datapoints
-        d = x.unique()
-        # initialize k centroids randomly
-        c = d[torch.randperm(len(d))[:k]]
-        # assign each datapoint to the cluster with the closest centroid
-        dists, y = torch.abs_(x.unsqueeze(-1) - c).min(-1)
-
-        for _ in range(max_it):
-            # if an empty cluster is encountered,
-            # choose the farthest datapoint from the biggest cluster and move that the empty one
+    for _ in range(max_it):
+        # if an empty cluster is encountered,
+        # choose the farthest datapoint from the biggest cluster and move that the empty one
+        mask = torch.arange(k).unsqueeze(-1).eq(y)
+        none = torch.where(~mask.any(-1))[0].tolist()
+        for i in none:
+            # the biggest cluster
+            biggest = torch.where(mask[mask.sum(-1).argmax()])[0]
+            # the datapoint farthest from the centroid of the biggest cluster
+            farthest = dists[biggest].argmax()
+            # update the assigned cluster of the farthest datapoint
+            y[biggest[farthest]] = i
+            # re-calculate the mask
             mask = torch.arange(k).unsqueeze(-1).eq(y)
-            none = torch.where(~mask.any(-1))[0].tolist()
-            while len(none) > 0:
-                for i in none:
-                    # the biggest cluster
-                    b = torch.where(mask[mask.sum(-1).argmax()])[0]
-                    # the datapoint farthest from the centroid of cluster b
-                    f = dists[b].argmax()
-                    # update the assigned cluster of f
-                    y[b[f]] = i
-                    # re-calculate the mask
-                    mask = torch.arange(k).unsqueeze(-1).eq(y)
-                none = torch.where(~mask.any(-1))[0].tolist()
-            # update the centroids
-            c, old = (x * mask).sum(-1) / mask.sum(-1), c
-            # re-assign all datapoints to clusters
-            dists, y = torch.abs_(x.unsqueeze(-1) - c).min(-1)
-            # stop iteration early if the centroids converge
-            if c.equal(old):
-                break
-        # assign all datapoints to the new-generated clusters
-        # the empty ones are discarded
-        assigned = y.unique().tolist()
-        # get the centroids of the assigned clusters
-        centroids = c[assigned].tolist()
-        # map all values of datapoints to buckets
-        clusters = [torch.where(y.eq(i))[0].tolist() for i in assigned]
+        # update the centroids
+        centroids, old = (datapoints * freqs * mask).sum(-1) / (freqs * mask).sum(
+            -1
+        ), centroids
+        # re-assign all datapoints to clusters
+        dists, y = torch.abs_(datapoints.unsqueeze(-1) - centroids).min(-1)
+        # stop iteration early if the centroids converge
+        if centroids.equal(old):
+            break
+    # assign all datapoints to the new-generated clusters
+    # the empty ones are discarded
+    assigned = y.unique().tolist()
+    # get the centroids of the assigned clusters
+    centroids = centroids[assigned].tolist()
+    # map all values of datapoints to buckets
+    clusters = [
+        torch.where(indices.unsqueeze(-1).eq(torch.where(y.eq(i))[0]).any(-1))[
+            0
+        ].tolist()
+        for i in assigned
+    ]
 
-        return centroids, clusters
+    return centroids, clusters

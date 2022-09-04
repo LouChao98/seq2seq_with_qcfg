@@ -1,7 +1,5 @@
-import copy
 import logging
-import random
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -305,6 +303,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         spans,
         x: Optional[torch.Tensor] = None,
         copy_position=None,  # (pt, nt)
+        impossible_span_mask=None,
         ignore_src=False,
     ):
         if copy_position is None or not self.use_copy:
@@ -451,6 +450,18 @@ class NeuralQCFGTgtParser(TgtParserBase):
                     mask = torch.from_numpy(mask.reshape(item.shape))
                     copy_nt_.append((item.to(terms.device), mask.to(terms.device)))
                 copy_nt = copy_nt_
+            if impossible_span_mask is not None:
+                assert copy_position[1] is None, "Not implemented"
+                copy_nt_ = []  # TODO rename to some meaningful name
+                neg_huge = rules.new_tensor(self.neg_huge)
+                for item in impossible_span_mask:
+                    copy_nt_.append(
+                        (
+                            neg_huge,
+                            item.unsqueeze(-1),
+                        )
+                    )
+                copy_nt = copy_nt_
 
         # TODO return everything in dict, or some thing else
         params = {
@@ -528,7 +539,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         raise NotImplementedError
 
     def get_pr_term_by_line_search(self, params, lens):
-        # E[constraint] <= b
+        # E[constraint] <= b, constraint_mask 1=allow
         constraint = 1.0 - params["constraint_mask"].float()
         lambdas = self.solve_line_search(
             params,

@@ -1,6 +1,7 @@
 import math
 
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from .helpers import Chart, _Struct
 
@@ -63,21 +64,39 @@ class CKY(_Struct):
 
             Y = beta[A][: N - w, :w, :]
             Z = beta[B][w:, N - w :, :]
-            X1 = matmul(matmul(Y.transpose(-2, -1), Z).view(*v2), X_Y_Z)
+            # X1 = matmul(matmul(Y.transpose(-2, -1), Z).view(*v2), X_Y_Z)
+            X1 = checkpoint(
+                matmul,
+                matmul(Y.transpose(-2, -1), Z).view(*v2),
+                X_Y_Z,
+                use_reentrant=False,
+            )
             all_span.append(X1)
 
             Y_term = term_use[..., : N - w, :, None]
             Z_term = term_use[..., w:, None, :]
 
             Y = Y[..., -1, :].unsqueeze(-1)
-            X2 = matmul(times(Y, Z_term).view(*v2), X_Y_Z1)
+            # X2 = matmul(times(Y, Z_term).view(*v2), X_Y_Z1)
+            X2 = checkpoint(
+                matmul, times(Y, Z_term).view(*v2), X_Y_Z1, use_reentrant=False
+            )
 
             Z = Z[..., 0, :].unsqueeze(-2)
-            X3 = matmul(times(Y_term, Z).view(*v2), X_Y1_Z)
+            # X3 = matmul(times(Y_term, Z).view(*v2), X_Y1_Z)
+            X3 = checkpoint(
+                matmul, times(Y_term, Z).view(*v2), X_Y1_Z, use_reentrant=False
+            )
             all_span += [X2, X3]
 
             if w == 1:
-                X4 = matmul(times(Y_term, Z_term).view(*v2), X_Y1_Z1)
+                # X4 = matmul(times(Y_term, Z_term).view(*v2), X_Y1_Z1)
+                X4 = checkpoint(
+                    matmul,
+                    times(Y_term, Z_term).view(*v2),
+                    X_Y1_Z1,
+                    use_reentrant=False,
+                )
                 all_span.append(X4)
 
             data = semiring.sum(torch.stack(all_span, dim=-1))

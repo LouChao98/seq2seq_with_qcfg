@@ -1,0 +1,12 @@
+_target_: src.models.tgt_parser.neural_qcfg_d1_v2.NeuralQCFGD1V2TgtParser
+num_layers: 3
+dim: 512
+nt_states: 8 # src_nt_states in origin impl
+pt_states: 8 # src_pt_states in origin impl
+rule_constraint_type: 1
+use_copy: true
+num_samples: 100
+check_ppl: true
+cpd_rank: 256
+nt_span_range: [1, 1000]
+pt_span_range: [1, 1000]

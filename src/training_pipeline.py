@@ -96,8 +96,6 @@ def train(config: DictConfig) -> Optional[float]:
 
     # Test the model
     if config.get("test"):
-        log.info("Starting testing using the last model!")
-        trainer.test(model=model, datamodule=datamodule, ckpt_path=None)
         if (
             config.get("train")
             and not config.trainer.get("fast_dev_run")
@@ -106,7 +104,9 @@ def train(config: DictConfig) -> Optional[float]:
         ):
             log.info("Starting testing using the best model!")
             trainer.test(model=model, datamodule=datamodule, ckpt_path="best")
-
+        else:
+            log.info("Starting testing using the last model!")
+            trainer.test(model=model, datamodule=datamodule, ckpt_path=None)
     # Make sure everything closed properly
     log.info("Finalizing!")
     utils.finish(

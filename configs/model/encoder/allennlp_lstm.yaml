@@ -1,0 +1,5 @@
+_target_: src.models.components.encoder.BiAugmentedLstm
+hidden_size: 256
+bidirectional: true
+recurrent_dropout_probability: 0.2
+num_layers: 1
