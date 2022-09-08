@@ -40,7 +40,6 @@ class PCFGRandomizedDP(FastestTDPCFG):
             torch.set_grad_enabled(True)
             cm = torch.inference_mode(False)
             cm.__enter__()
-            # NOTE I assume marginals are only used for decoding.
             params = {k: process_param_for_marginal(v) for k, v in params.items()}
 
         terms, rules, roots = params["term"], params["rule"], params["root"]
@@ -56,7 +55,7 @@ class PCFGRandomizedDP(FastestTDPCFG):
         rXYz = rules[:, :, NTs, Ts].contiguous()
         rXyz = rules[:, :, Ts, Ts].contiguous()
 
-        span_indicator = rules.new_zeros(batch, N, N, NT, requires_grad=marginal)
+        span_indicator = rules.new_zeros(batch, N, N, 1, requires_grad=marginal)
 
         for step, w in enumerate(range(2, N)):
             n = N - w
@@ -106,7 +105,7 @@ class PCFGRandomizedDP(FastestTDPCFG):
         logZ = (s[b_ind, 0, lens] + roots).logsumexp(-1)
 
         if decode:
-            spans = self.get_prediction(logZ, span_indicator, lens)
+            spans = self.mbr_decoding(logZ, span_indicator, lens)
             # spans = [[(span[0], span[1] - 1, 0) for span in inst] for inst in spans]
             return spans
             # trees = []
@@ -221,34 +220,3 @@ def XyZ(y: Tensor, Z: Tensor, Z_ind: Tensor, rule: Tensor):
     b_n_yz = (y + Z).reshape(b, n, nt * t)
     b_n_x = (b_n_yz.unsqueeze(-2) + rule).logsumexp(-1)
     return b_n_x
-
-
-if __name__ == "__main__":
-    torch.random.manual_seed(1)
-
-    B, N, T, NT = 4, 5, 3, 7
-    device = "cpu"
-    params = {
-        "term": torch.randn(B, N, T, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
-        "root": torch.randn(B, NT, device=device).log_softmax(-1).requires_grad_(True),
-        "rule": torch.randn(B, NT, (NT + T) ** 2, device=device)
-        .log_softmax(-1)
-        .view(B, NT, NT + T, NT + T)
-        .requires_grad_(True),
-    }
-    lens = torch.tensor([N, N - 1, N - 1, N - 3], dtype=torch.long, device=device)
-
-    pcfg = PCFGRandomizedDP(3, 3)
-    out = torch.zeros(B)
-    print(pcfg(params, lens))
-    for _ in range(100):
-        out += pcfg(params, lens)
-    print(out / 100)
-
-    from .pcfg import PCFG as PCFG_ref
-
-    pcfg = PCFG_ref()
-    print(pcfg(params, lens))
-    print(pcfg(params, lens, decode=True))

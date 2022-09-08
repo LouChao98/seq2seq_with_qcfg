@@ -198,3 +198,14 @@ def convert_annotated_str_to_nltk_str(annotated, prefix="x"):
 
     apply_to_tree(buffer[0], relabel_node)
     return buffer[0]
+
+
+def report_ids_when_err(func):
+    def wrapper(self, batch):
+        try:
+            return func(self, batch)
+        except Exception as e:
+            log.error(f"Error at {batch['id']}")
+            raise e
+
+    return wrapper

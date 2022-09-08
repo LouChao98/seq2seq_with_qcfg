@@ -45,7 +45,7 @@ class D2PCFG(TDStyleBase):
 
         self.threshold = torch.nn.Threshold(1e-3, 0)
 
-    @reorder
+    # @reorder
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
         if decode:
             marginal = True  # MBR decoding
@@ -54,7 +54,6 @@ class D2PCFG(TDStyleBase):
             torch.set_grad_enabled(True)
             cm = torch.inference_mode(False)
             cm.__enter__()
-            # NOTE I assume marginals are only used for decoding.
             params = {k: process_param_for_marginal(v) for k, v in params.items()}
         if not isinstance(lens, torch.Tensor):
             lens = torch.tensor(lens)
@@ -181,7 +180,7 @@ class D2PCFG(TDStyleBase):
         final = final.squeeze(1) + root
         logZ = final.logsumexp((-2, -1))
         if decode:
-            spans = self.get_prediction(logZ, span_indicator, lens)
+            spans = self.mbr_decoding(logZ, span_indicator, lens)
             # spans = [[(span[0], span[1] - 1, 0) for span in inst] for inst in spans]
             return spans
         if marginal:

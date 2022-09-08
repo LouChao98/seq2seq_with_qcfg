@@ -5,6 +5,7 @@ from typing import Any, List, Optional
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
+from pytorch_lightning.profilers import PassThroughProfiler, SimpleProfiler
 from torch_scatter import scatter_mean
 from torchmetrics import MinMetric
 from transformers import AutoModel
@@ -52,6 +53,8 @@ class GeneralSeq2SeqModule(ModelBase):
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
         super().setup(stage)
+        self.profiler = self.trainer.profiler or PassThroughProfiler()
+
         assert datamodule is not None or self.trainer.datamodule is not None
         self.datamodule = datamodule or self.trainer.datamodule
 
@@ -133,38 +136,44 @@ class GeneralSeq2SeqModule(ModelBase):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
 
-        dist = self.parser(src_ids, src_lens)
-        src_nll = -dist.partition
-        src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
-        src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
+        with self.profiler.profile("compute_src_nll_and_sampling"):
+            dist = self.parser(src_ids, src_lens)
+            src_nll = -dist.partition
+            src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
+            src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
 
-        x = self.encode(batch)
-        node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
+        with self.profiler.profile("src_encoding"):
+            x = self.encode(batch)
+            node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
-        tgt_nll = self.decoder(
-            batch["tgt_ids"],
-            batch["tgt_lens"],
-            node_features,
-            node_spans,
-            copy_position=copy_position,
-        )
-
-        with torch.no_grad():
-            src_spans_argmax, src_logprob_argmax = self.parser.argmax(
-                src_ids, src_lens, dist=dist
-            )
-            src_spans_argmax = extract_parses(src_spans_argmax[-1], src_lens, inc=1)[0]
-            node_features_argmax, node_spans_argmax = self.tree_encoder(
-                x, src_lens, spans=src_spans_argmax
-            )
-            tgt_nll_argmax = self.decoder(
+        with self.profiler.profile("compute_tgt_nll"):
+            tgt_nll = self.decoder(
                 batch["tgt_ids"],
                 batch["tgt_lens"],
-                node_features_argmax,
-                node_spans_argmax,
+                node_features,
+                node_spans,
                 copy_position=copy_position,
             )
-            neg_reward = (tgt_nll - tgt_nll_argmax).detach()
+
+        with self.profiler.profile("reward"):
+            with torch.no_grad():
+                src_spans_argmax, src_logprob_argmax = self.parser.argmax(
+                    src_ids, src_lens, dist=dist
+                )
+                src_spans_argmax = extract_parses(
+                    src_spans_argmax[-1], src_lens, inc=1
+                )[0]
+                node_features_argmax, node_spans_argmax = self.tree_encoder(
+                    x, src_lens, spans=src_spans_argmax
+                )
+                tgt_nll_argmax = self.decoder(
+                    batch["tgt_ids"],
+                    batch["tgt_lens"],
+                    node_features_argmax,
+                    node_spans_argmax,
+                    copy_position=copy_position,
+                )
+                neg_reward = (tgt_nll - tgt_nll_argmax).detach()
 
         return {
             "decoder": tgt_nll.mean(),
@@ -319,22 +328,23 @@ class GeneralSeq2SeqModule(ModelBase):
 
     def on_validation_epoch_start(self) -> None:
         super().on_validation_epoch_start()
+        self.val_metric.reset()
         if self.hparams.track_param_norm:
             self.log(
                 "stat/parser_norm",
-                sum(param.norm() ** 2 for param in self.parser.parameters()).item()
+                sum(param.norm().item() ** 2 for param in self.parser.parameters())
                 ** 0.5,
             )
             self.log(
                 "stat/encoder_norm",
                 sum(
-                    param.norm() ** 2 for param in self.tree_encoder.parameters()
-                ).item()
+                    param.norm().item() ** 2 for param in self.tree_encoder.parameters()
+                )
                 ** 0.5,
             )
             self.log(
                 "stat/decoder_norm",
-                sum(param.norm() ** 2 for param in self.decoder.parameters()).item()
+                sum(param.norm().item() ** 2 for param in self.decoder.parameters())
                 ** 0.5,
             )
 

@@ -1,18 +1,17 @@
-from typing import Optional
+from functools import reduce
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from nltk.tree import Tree
 from numba import njit
 
-from ..components.common import MultiResidualLayer
 from .base import SrcParserBase
 
 
 class GoldTreeProcessor(SrcParserBase):
     # read src_tree and convert them to spans
-    def __init__(self, *args, **kwargs):
+    def __init__(self, binarize=False, *args, **kwargs):
         super(GoldTreeProcessor, self).__init__()
+        self.binarize = binarize
 
     def forward(self, x, lengths):
         return self
@@ -25,6 +24,8 @@ class GoldTreeProcessor(SrcParserBase):
     def get_spans(self, batch):
         spans = []
         for tree in batch["src_tree"]:
+            if self.binarize:
+                tree.chomsky_normal_form()
             tree_str = tree._pformat_flat("", "()", False)
             spans.append(tree2span(tree_str))
         return spans

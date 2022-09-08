@@ -10,13 +10,13 @@ trainer:
   limit_train_batches: 2
   limit_val_batches: 1
   limit_test_batches: 1
-  # profiler: "simple"
+  profiler: "simple"
   # profiler: "advanced"
-  profiler:
-    _target_: pytorch_lightning.profiler.PyTorchProfiler
-    filename: "profile_output"
-    row_limit: 20
-    profile_memory: true
-    record_shapes: true
+  # profiler:
+  #   _target_: pytorch_lightning.profiler.PyTorchProfiler
+  #   filename: "profile_output"
+  #   row_limit: 20
+  #   profile_memory: true
+  #   record_shapes: true
 
 test: false

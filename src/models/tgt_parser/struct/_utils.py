@@ -10,7 +10,7 @@ def checkpoint(func):
         # The only case is marginal=True and the one need grad is span_indicator.
         # We do not need checkpoint in this case because no big mid tensors need to be traced.
         if all(v.requires_grad for v in args):
-            return torch_ckpt(func, *args, **kwargs)
+            return torch_ckpt(func, *args, **kwargs, use_reentrant=False)
         else:
             return func(*args)
 
@@ -21,6 +21,14 @@ def checkpoint(func):
 def weighted_random(cumsum):
     # cumsum = np.cumsum(w)
 
+    rdm_unif = np.random.rand() * cumsum[-1]
+    ind = np.searchsorted(cumsum, rdm_unif, side="right").item()
+    return ind
+
+
+def weighted_random_v2(cumsum):
+    if cumsum[-1] == 0:
+        raise ValueError("Sampling on masked NT.")
     rdm_unif = np.random.rand() * cumsum[-1]
     ind = np.searchsorted(cumsum, rdm_unif, side="right").item()
     return ind
@@ -42,9 +50,14 @@ def reorder(func):
         reordered_params = {}
         for key, value in params.items():
             if key == "copy_nt":
+                if value is None:
+                    continue
                 reordered_value = []
                 for item in value:
-                    v = item[0][argsort]
+                    if item[0].ndim > 0:
+                        v = item[0][argsort]
+                    else:
+                        v = item[0]
                     m = item[1][argsort]
                     reordered_value.append((v, m))
                 reordered_params["copy_nt"] = reordered_value
@@ -73,8 +86,8 @@ def process_param_for_marginal(item):
     elif isinstance(item, torch.Tensor):
         if item.is_inference():
             item = item.clone()
-        else:
-            item = item.detach()
+        # else:
+        #     item = item.detach()
         if torch.is_floating_point(item):
             return item.requires_grad_()
         else:

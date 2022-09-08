@@ -1,18 +1,16 @@
-import random
 from collections import defaultdict
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
 
+from ...datamodules.components.vocab import VocabularyPair
 from ...utils.fn import spans2tree
-from ..components.common import MultiResidualLayer
 from .neural_qcfg import NeuralQCFGTgtParser
-from .struct.d1_pcfg import D1PCFG
-from .struct.pcfg import PCFG
+from .struct.d1_pcfg_flex import D1PCFGFlex
+from .struct.pcfg import PCFG, TokenType
 
 
 def get_nn(dim, cpd_rank):
@@ -21,14 +19,14 @@ def get_nn(dim, cpd_rank):
     )
 
 
-class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
+class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
     def __init__(self, cpd_rank, *args, **kwargs):
         super().__init__(*args, **kwargs)
         assert self.nt_states == self.pt_states
         dim = self.dim
         num_layers = self.num_layers
         self.cpd_rank = cpd_rank
-        self.pcfg = D1PCFG(self.nt_states, self.pt_states)
+        self.pcfg = D1PCFGFlex(self.nt_states, self.pt_states)
         # self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
         # self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
         # self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)
@@ -81,6 +79,195 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
             all_spans_node.append(all_span_node)
         return out, all_spans_node, pt_spans, nt_spans
 
+    def generate(
+        self,
+        node_features,
+        spans,
+        vocab_pair: VocabularyPair,
+        src_ids: torch.Tensor,
+        src: List[List[str]],
+    ):
+        # if check_ppl=True, I will compute ppl for samples, return the one with minimum ppl
+        # else, just return the one with the maximum score
+
+        params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
+            node_features, spans
+        )
+
+        max_len = 40
+        preds = self.pcfg.sampled_decoding(
+            params,
+            nt_spans,
+            self.nt_states,
+            pt_spans,
+            self.pt_states,
+            num_samples=self.num_samples,
+            use_copy=self.use_copy,
+            max_length=max_len,
+        )
+
+        # expand copied spans and build copy_position
+        preds_ = []
+        copy_positions = []
+        device = node_features[0].device
+        src_lens = (src_ids != vocab_pair.src.pad_token_id).sum(1).tolist()
+        src_ids = src_ids.tolist()
+        for batch, pt_spans_inst, nt_spans_inst, src_ids_inst, src_len in zip(
+            preds, pt_spans, nt_spans, src_ids, src_lens
+        ):
+            if self.use_copy:
+                expanded_batch = []
+                copy_pts = []
+                copy_nts = []
+                copy_unks = []
+                for inst in batch:
+                    expanded = []
+                    copy_pt = np.zeros((src_len, max_len), dtype=np.bool8)
+                    copy_nt = [[] for _ in range(max_len)]  # no need to prune
+                    copy_unk = {}  # record position if copy unk token
+                    for v, t in zip(inst[0], inst[1]):
+                        if t == TokenType.VOCAB:
+                            if len(expanded) + 1 > max_len:
+                                break
+                            expanded.append(v)
+                        elif t == TokenType.COPY_PT:
+                            span = pt_spans_inst[v]
+                            tokens = vocab_pair.src2tgt(
+                                src_ids_inst[span[0] : span[1] + 1]
+                            )
+                            if len(expanded) + len(tokens) > max_len:
+                                break
+                            copy_pt[span[0], len(expanded)] = True
+                            if tokens[0] == vocab_pair.tgt.unk_token_id:
+                                copy_unk[len(expanded)] = span[0]
+                            expanded.extend(tokens)
+                        elif t == TokenType.COPY_NT:
+                            span = nt_spans_inst[v]
+                            tokens = vocab_pair.src2tgt(
+                                src_ids_inst[span[0] : span[1] + 1]
+                            )
+                            if len(expanded) + len(tokens) > max_len:
+                                break
+                            copy_nt[span[1] - span[0] - 1].append(
+                                (span[0], len(expanded))
+                            )  # copy_nt starts from w=2
+                            for i, token in enumerate(tokens):
+                                if token == vocab_pair.tgt.unk_token_id:
+                                    copy_unk[len(expanded) + i] = span[0] + i
+                            expanded.extend(tokens)
+
+                    if len(expanded) > max_len:
+                        assert False
+                    expanded_batch.append((expanded, inst[2]))
+                    copy_pts.append(copy_pt)
+                    copy_nts.append(copy_nt)
+                    copy_unks.append(copy_unk)
+                copy_pts = torch.from_numpy(np.stack(copy_pts, axis=0)).to(device)
+                copy_positions.append((copy_pts, copy_nts, copy_unks))
+                preds_.append(expanded_batch)
+            else:
+                expanded_batch = []
+                for inst in batch:
+                    expanded_batch.append(inst[0])
+                copy_positions.append((None, None, None))
+                preds_.append(expanded_batch)
+
+        preds = preds_
+
+        if self.check_ppl:
+            with torch.no_grad():
+                padid = vocab_pair.tgt.pad_token_id or 0
+                new_preds = []
+                for i, (preds_one_inp, (copy_pt, copy_nt, copy_unk)) in enumerate(
+                    zip(preds, copy_positions)
+                ):
+                    to_keep = [1 < len(inst) <= 60 for inst in preds_one_inp]
+                    _ids = [
+                        inst[0] for inst, flag in zip(preds_one_inp, to_keep) if flag
+                    ]
+                    # TODO
+                    sort_id = list(range(len(_ids)))
+                    sort_id.sort(key=lambda x: len(_ids[x]), reverse=True)
+                    _ids = [_ids[i] for i in sort_id]
+                    _lens = [len(inst) for inst in _ids]
+                    _ids_t = torch.full((len(_ids), _lens[0]), padid)
+                    for j, (snt, length) in enumerate(zip(_ids, _lens)):
+                        _ids_t[j, :length] = torch.tensor(snt)
+                    _ids_t = _ids_t.to(node_features[0].device)
+
+                    if copy_pt is not None:
+                        copy_pt = copy_pt[to_keep]
+                        copy_pt = copy_pt[sort_id]
+                        copy_nt = [item for item, flag in zip(copy_nt, to_keep) if flag]
+                        copy_nt = [copy_nt[i] for i in sort_id]
+                        copy_unk = [
+                            item for item, flag in zip(copy_unk, to_keep) if flag
+                        ]
+                        copy_unk = [copy_unk[i] for i in sort_id]
+
+                    batch_size = (
+                        len(node_features)
+                        if self.check_ppl_batch_size is None
+                        else self.check_ppl_batch_size
+                    )
+                    ppl = []
+                    for j in range(0, len(_ids), batch_size):
+                        real_batch_size = min(batch_size, len(_ids) - j)
+                        _node_ft = [node_features[i] for _ in range(real_batch_size)]
+                        _spans = [spans[i] for _ in range(real_batch_size)]
+                        if copy_pt is not None:
+                            _copy = (
+                                copy_pt[j : j + batch_size, :, : _ids_t.shape[1]],
+                                copy_nt[j : j + batch_size],
+                            )
+                        else:
+                            _copy = None
+                        max_len = max(_lens[j : j + batch_size])
+                        nll = (
+                            self(
+                                _ids_t[j : j + batch_size],
+                                _lens[j : j + batch_size],
+                                _node_ft,
+                                _spans,
+                                copy_position=_copy,
+                            )
+                            .detach()
+                            .cpu()
+                            .numpy()
+                        )
+                        ppl.append(np.exp(nll / np.array(_lens[j : j + batch_size])))
+                    ppl = np.concatenate(ppl, 0)
+                    chosen = np.argmin(ppl)
+                    new_preds.append(
+                        (
+                            _ids[chosen],
+                            ppl[chosen],
+                            None if copy_pt is None else copy_unk[chosen],
+                        )
+                    )
+                preds = new_preds
+        else:
+            assert False, "Bad impl of score. see sample()."
+            preds_ = []
+            for item in preds:
+                item = max(item, key=lambda x: x[1])
+                preds_.append(item)
+            preds = preds_
+
+        pred_strings = []
+        for pred, src_sent in zip(preds, src):
+            snt, score, copy_unk = pred
+            try:
+                sent = vocab_pair.tgt.convert_ids_to_tokens(snt)
+                if copy_unk is not None:
+                    for t, s in copy_unk.items():
+                        sent[t] = src_sent[s]
+                pred_strings.append((sent, score))
+            except IndexError:
+                print("Bad pred:", snt)
+                pred_strings.append([("", -999)])
+        return pred_strings
+
     def get_params(
         self,
         node_features,
@@ -129,7 +316,7 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
 
         # A->BC
         state_emb = torch.cat([nt_state_emb, pt_state_emb], 1)
-        node_emb = nt_node_emb  # torch.cat([nt_node_emb, pt_node_emb], 1)
+        node_emb = torch.cat([nt_node_emb, pt_node_emb], 1)
         rule_head = self.ai_r_nn(
             self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))
         ).softmax(-1)
@@ -140,7 +327,7 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
             self.r_c_nn(self.rule_mlp_right(state_emb)).transpose(1, 2).softmax(-1)
         )
 
-        i = self.root_mlp_i(node_emb)
+        i = self.root_mlp_i(nt_node_emb)
         j = self.root_mlp_j(node_emb)
         k = self.root_mlp_k(node_emb)
         rule_slr = torch.einsum(
@@ -148,14 +335,17 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
             self.rijk_weight,
             F.leaky_relu(i),
             F.leaky_relu(j[:, :, None] + k[:, None, :]),
-        )
-        num_nodes = nt_num_nodes  # + pt_num_nodes
-        rule_slr = (
-            rule_slr.view(batch_size, self.cpd_rank, num_nodes, -1)
-            .softmax(-1)
-            .view(batch_size, self.cpd_rank, num_nodes, num_nodes, num_nodes)
-            .clone()
-        )
+        ).clone()
+
+        block = rule_slr[..., :nt_num_nodes, :nt_num_nodes]
+        block /= block.sum((-2, -1), keepdim=True)
+        block = rule_slr[..., :nt_num_nodes, nt_num_nodes:]
+        block /= block.sum((-2, -1), keepdim=True)
+        block = rule_slr[..., nt_num_nodes:, :nt_num_nodes]
+        block /= block.sum((-2, -1), keepdim=True)
+        block = rule_slr[..., nt_num_nodes:, nt_num_nodes:]
+        block /= block.sum((-2, -1), keepdim=True)
+
         # ijk = i[:, :, None, None] + j[:, None, :, None] + k[:, None, None, :]
         # num_nodes = nt_num_nodes  # + pt_num_nodes
         # rule_slr = (
@@ -173,8 +363,8 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         pt_mask = torch.arange(pt_num_nodes, device=i.device).unsqueeze(0) \
             < torch.tensor(pt_num_nodes_list, device=i.device).unsqueeze(1)
         # fmt: on
-        mask = nt_mask  # torch.cat([nt_mask, pt_mask], dim=1)
-        mask = torch.einsum("bx,by,bz->bxyz", mask, mask, mask)
+        mask = torch.cat([nt_mask, pt_mask], dim=1)
+        mask = torch.einsum("bx,by,bz->bxyz", nt_mask, mask, mask)
         mask = mask.unsqueeze(1).expand(-1, self.cpd_rank, -1, -1, -1)
         rule_slr[~mask] = 0  # = self.neg_huge
 
@@ -198,35 +388,6 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
 
         # A->a
         terms = self.vocab_out(pt_emb).log_softmax(-1)
-        # temperory fix
-        is_multi = np.ones((batch_size, pt_num_nodes), dtype=np.bool8)
-        for b, pt_spans_inst in enumerate(pt_spans):
-            for span in pt_spans_inst:
-                if span[0] == span[1]:
-                    is_multi[b, span[0]] = False
-        terms = terms.clone()
-        mask = torch.from_numpy(is_multi)[:, None, :, None]
-        mask = mask.expand(-1, terms.shape[1], -1, terms.shape[3])
-        terms[mask] = self.neg_huge
-        terms = terms.view(batch_size, -1, terms.shape[-1])
-        mask = torch.from_numpy(is_multi)[:, None, :, None, None]
-        mask = mask.expand(-1, rule_slr.shape[1], -1, *rule_slr.shape[-2:])
-        rule_slr[~mask] = 0  # self.neg_huge
-
-        # debug_m = (rule_slr[0, 0].exp() > 1e-4).nonzero().tolist()
-        # debug_spans = nt_spans[0]
-        # children = defaultdict(set)
-        # for i, j, k in debug_m:
-        #     children[i].add(j)
-        #     children[i].add(k)
-        # for i, vset in children.items():
-        #     print(f'Parent={debug_spans[i]}')
-        #     print('  ' + ', '.join(str(debug_spans[j]) for j in vset))
-        # print('===')
-        # debug_m = terms.view(batch_size, self.pt_states, -1, terms.shape[-1])
-        # debug_m = debug_m[0, 0, :, 0].exp().nonzero().squeeze(-1).tolist()
-        # for i in debug_m:
-        #     print(pt_spans[0][i], end=', ')
 
         copy_nt = None
         if x is not None:
@@ -303,23 +464,29 @@ class NeuralQCFGD1TgtParser(NeuralQCFGTgtParser):
         # A[a i]->B[a j] C[a k], a i must be the parent of a j and a k.
         # return 1 for not masked
         nt = nt_num_nodes
+        pt = pt_num_nodes
         nt_node_mask = torch.ones(
             batch_size, nt_num_nodes, nt_num_nodes, dtype=torch.bool
+        )
+        pt_node_mask = torch.ones(
+            batch_size, nt_num_nodes, pt_num_nodes, dtype=torch.bool
         )
 
         def is_parent(parent, child):
             return child[0] >= parent[0] and child[1] <= parent[1]
 
-        for b, nt_span in enumerate(nt_spans):
+        for b, (pt_span, nt_span) in enumerate(zip(pt_spans, nt_spans)):
             for i, parent_span in enumerate(nt_span):
                 for j, child_span in enumerate(nt_span):
                     if not (is_parent(parent_span, child_span)):
                         nt_node_mask[b, i, j] = False
-                # if i == len(nt_span) - 1:
-                #     nt_node_mask[b, i, i] = False
+                for j, child_span in enumerate(pt_span):
+                    if not (is_parent(parent_span, child_span)):
+                        pt_node_mask[b, i, j] = False
 
-        node_mask = nt_node_mask.unsqueeze(3) * nt_node_mask.unsqueeze(2)
-        return node_mask.view(batch_size, nt, nt, nt)
+        node_mask = torch.cat([nt_node_mask, pt_node_mask], dim=2).to(device)
+        node_mask = node_mask.unsqueeze(3) * node_mask.unsqueeze(2)
+        return node_mask.view(batch_size, nt, nt + pt, nt + pt)
 
     def get_rules_mask2(
         self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device

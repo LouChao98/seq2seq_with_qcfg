@@ -17,7 +17,13 @@ defaults:
 # name of the run determines folder name in logs
 name: "styleptb_fixedsrctree"
 
+datamodule:
+  load_gold_tree: true
+  copy_mode: "token"
+
 model:
+  parser:
+    binarize: true
   decoder:
     rule_constraint_type: 0
 

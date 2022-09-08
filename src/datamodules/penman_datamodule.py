@@ -100,7 +100,7 @@ class PenmanDataModule(_DataModule):
         data = load_and_serialize(fpath, False)
         reentry_pattern = re.compile(r"(.*)_(\d+)")
         converted = []
-        for i, (graph, serial, sent) in enumerate(
+        for di, (graph, serial, sent) in enumerate(
             zip(data["graphs"], data["serials"], data["sents"])
         ):
             processed_serial = []
@@ -144,9 +144,14 @@ class PenmanDataModule(_DataModule):
                         processed_serial.append(surface)
             assert len(bracket_stack) == 0
             tgt_len = len(processed_serial)
+            src = word_tokenize(sent)
+            if tgt_len <= 1:  # TODO !!!
+                continue
+            if len(src) <= 1:
+                continue
             inst = {
-                "id": i,
-                "src": word_tokenize(sent),
+                "id": di,
+                "src": src,
                 "tgt": processed_serial,
                 "tgt_spans": spans,
                 "tgt_mask": self.gen_impossible_span_mask(spans, tgt_len),
@@ -195,7 +200,6 @@ class PenmanDataModule(_DataModule):
 
     def process_phrase_copy(self, inst):
         # generate a list of bool vectors from width 2 to len(tgt)-1.
-        # NOTE this assume phrases are at least length 2
         src = inst["src"]
         tgt = inst["tgt"]
         output = []
@@ -305,9 +309,9 @@ class PenmanDataModule(_DataModule):
 
     def collator(self, data):
         batch_size = len(data)
-        src_lens = [len(inst["src_ids"]) for inst in data]
+        tgt_lens = [len(inst["tgt_ids"]) for inst in data]
         argsort = list(range(len(data)))
-        argsort.sort(key=lambda i: src_lens[i], reverse=True)
+        argsort.sort(key=lambda i: tgt_lens[i], reverse=True)
         data = [data[i] for i in argsort]
 
         src = [inst["src"] for inst in data]
@@ -354,7 +358,10 @@ class PenmanDataModule(_DataModule):
         for inst, tgt_len in zip(data, tgt_lens):
             pt_neq_constraint = torch.zeros(tgt_len, dtype=torch.float32)
             for groups in inst["var"].values():
+                if len(groups) == 1:
+                    continue
                 for vs in groups.values():
+                    # pt_neq_constraint[vs[0]] = 1.0
                     pt_neq_constraint[random.choice(vs)] = 1.0
             pt_neq_constraints.append(pt_neq_constraint)
         pt_neq_constraints = pad_sequence(pt_neq_constraints, batch_first=True)

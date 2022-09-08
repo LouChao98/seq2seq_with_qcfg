@@ -2,13 +2,17 @@ import torch
 from torch_struct import SentCFG
 
 from ..tgt_parser.neural_qcfg import NeuralQCFGTgtParser
+from ..tgt_parser.neural_qcfg_d1 import NeuralQCFGD1TgtParser
+from ..tgt_parser.struct.d1_pcfg import D1PCFG
 from .pr import PrTask
 
 
 class AMRNeqQCFGPrTask(PrTask):
-    def __init__(self, num_src_pt, num_tgt_pt, device):
+    def __init__(self, num_src_pt, num_src_nt, num_tgt_pt, num_tgt_nt, device):
         self.num_src_pt = num_src_pt
+        self.num_src_nt = num_src_nt
         self.num_tgt_pt = num_tgt_pt
+        self.num_tgt_nt = num_tgt_nt
         self.device = device
 
     def get_b(self, batch_size):
@@ -73,4 +77,46 @@ class AMRNeqQCFGPrTask(PrTask):
         ).sum((1, 2))
 
 
-AMRNeqQCFGTasks = {NeuralQCFGTgtParser: AMRNeqQCFGPrTask}
+class AMRNeqD1PrTask(AMRNeqQCFGPrTask):
+    params = ["term", "root", "left", "right", "head", "slr"]
+
+    def __init__(self, num_src_pt, num_src_nt, num_tgt_pt, num_tgt_nt, device):
+        super().__init__(num_src_pt, num_src_nt, num_tgt_pt, num_tgt_nt, device)
+        self.pcfg = D1PCFG(self.num_tgt_nt, self.num_tgt_pt)
+
+    def nll(self, params, lens):
+        return self.pcfg(params, lens)
+
+    @torch.enable_grad()
+    def ce(self, q_params, p_params, lens):
+        q_params = {
+            k: v.detach().requires_grad_() if isinstance(v, torch.Tensor) else v
+            for k, v in q_params.items()
+        }
+        q_ll = -self.pcfg(q_params, lens)
+        q_margin = torch.autograd.grad(q_ll.sum(), [q_params[k] for k in self.params])
+        ce = -self.pcfg(p_params, lens)
+        for i, k in enumerate(self.params):
+            ce = ce - (q_margin[i].detach() * p_params[k]).flatten(1).sum(1)
+        return ce
+
+    @torch.enable_grad()
+    def calc_e(self, params, lengths, constraints):
+        if not params["term"].requires_grad:
+            params = {
+                k: v.requires_grad_() if isinstance(v, torch.Tensor) else v
+                for k, v in params.items()
+            }
+        q_ll = -self.pcfg(params, lengths)
+        m = torch.autograd.grad(q_ll.sum(), [params["term"]])[0]
+        # print("entropy of label dist", - (m * (m + 1e-9).log()).sum(-1))
+        return (
+            m.view(*m.shape[:2], self.num_tgt_pt, self.num_src_pt)
+            * self.process_constraint(constraints).unsqueeze(2)
+        ).sum((1, 2))
+
+
+AMRNeqQCFGTasks = {
+    NeuralQCFGTgtParser: AMRNeqQCFGPrTask,
+    NeuralQCFGD1TgtParser: AMRNeqD1PrTask,
+}

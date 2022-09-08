@@ -227,9 +227,9 @@ class TSVDataModule(_DataModule):
         )
 
     def collator(self, data):
-        src_lens = [len(inst["src_ids"]) for inst in data]
+        tgt_lens = [len(inst["tgt_ids"]) for inst in data]
         argsort = list(range(len(data)))
-        argsort.sort(key=lambda i: src_lens[i], reverse=True)
+        argsort.sort(key=lambda i: tgt_lens[i], reverse=True)
         data = [data[i] for i in argsort]
 
         src = [inst["src"] for inst in data]
@@ -261,7 +261,7 @@ class TSVDataModule(_DataModule):
         copy_token = None
         if "copy_token" in data[0]:
             copy_token = torch.zeros(
-                len(src), max(src_lens), max(tgt_lens), dtype=torch.bool
+                len(src), max_src_len, max_tgt_len, dtype=torch.bool
             )
             for i, inst in enumerate(data):
                 inst = torch.from_numpy(inst["copy_token"])

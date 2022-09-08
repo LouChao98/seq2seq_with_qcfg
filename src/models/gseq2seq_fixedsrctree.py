@@ -7,7 +7,7 @@ from torch_scatter import scatter_mean
 from src.models.base import ModelBase
 from src.models.general_seq2seq import GeneralSeq2SeqModule
 from src.models.src_parser.gold import GoldTreeProcessor, tree2span
-from src.utils.fn import annotate_snt_with_brackets
+from src.utils.fn import annotate_snt_with_brackets, report_ids_when_err
 
 log = logging.getLogger(__file__)
 
@@ -34,6 +34,7 @@ class GeneralSeq2SeqWithFixedSrcParserModule(GeneralSeq2SeqModule):
             "tgt_nll": tgt_nll.mean(),
         }
 
+    @report_ids_when_err
     def forward_visualize(self, batch, sample=False):
         # parse and annotate brackets on src and tgt
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]

@@ -5,7 +5,7 @@ from ._fn import diagonal, diagonal_copy_, stripe
 
 
 class TDStyleBase:
-    def get_prediction(self, logZ, span_indicator, lens):
+    def mbr_decoding(self, logZ, span_indicator, lens):
         batch, seq_len = span_indicator.shape[:2]
         # to avoid some trivial corner cases.
         if seq_len >= 3:
@@ -15,7 +15,7 @@ class TDStyleBase:
             spans = self._cky_zero_order(scores.detach(), lens)
         else:
             # minimal length is 2
-            spans = [[(0, 0), (1, 1), (0, 1)] for _ in range(batch)]
+            spans = [[(0, 1), (1, 2), (0, 2)] for _ in range(batch)]
         spans_ = []
         labels = marginals.flatten(3).argmax(-1).cpu().numpy()
         for i, spans_inst in enumerate(spans):
@@ -47,16 +47,8 @@ class TDStyleBase:
             diagonal_copy_(s, x, w)
             diagonal_copy_(p, split + starts.unsqueeze(0) + 1, w)
 
-        def backtrack(p, i, j):
-            if j == i + 1:
-                return [(i, j)]
-            split = p[i][j]
-            ltree = backtrack(p, i, split)
-            rtree = backtrack(p, split, j)
-            return [(i, j)] + ltree + rtree
-
-        p = p.tolist()
-        lens = lens.tolist()
+        p = p.cpu().numpy()
+        lens = lens.cpu().numpy()
         spans = [backtrack(p[i], 0, length) for i, length in enumerate(lens)]
         for spans_inst in spans:
             spans_inst.sort(key=lambda x: x[1] - x[0])
@@ -70,3 +62,12 @@ class TDStyleBase:
                 span = "({} {})".format(tree[l], tree[r])
                 tree[r] = tree[l] = span
         return tree[0]
+
+
+def backtrack(p, i, j):
+    if j == i + 1:
+        return [(i, j)]
+    split = p[i][j]
+    ltree = backtrack(p, i, split)
+    rtree = backtrack(p, split, j)
+    return [(i, j)] + ltree + rtree

@@ -24,17 +24,19 @@ class PrTask:
         ...
 
 
-def compute_pr(params, lens, constraints, task: PrTask, **kwargs):
+def compute_pr(params, lens, constraints, task: PrTask, get_param=False, **kwargs):
     constraints = task.process_constraint(constraints)
     lambdas = pgd_solver(params, lens, constraints, task, **kwargs).detach()
     cparams = task.build_constrained_params(params, lambdas, constraints)
+    if get_param:
+        return cparams
     return task.ce(cparams, params, lens)
 
 
 def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
     num_iter = kwargs.get("num_iter", 3)
 
-    batch_size = len(params["rule"])
+    batch_size = len(lens)
     lambdas = task.get_init_lambdas(batch_size)
     b = task.get_b(batch_size)
     params = {
@@ -47,6 +49,7 @@ def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
         #     for item in factorized_constraint
         # ]
         cparams = task.build_constrained_params(params, lambdas, constraints)
+        # TODO we can cache grads in BP and reuse them
         target = (-(lambdas * b).sum(-1) + task.nll(cparams, lens)).sum()
         target.backward()
         if (lambdas.grad.abs() < 1e-5).all():

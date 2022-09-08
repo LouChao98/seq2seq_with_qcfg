@@ -209,72 +209,77 @@ class NeuralQCFGTgtParser(TgtParserBase):
         preds = preds_
 
         if self.check_ppl:
-            padid = vocab_pair.tgt.pad_token_id or 0
-            new_preds = []
-            for i, (preds_one_inp, (copy_pt, copy_nt, copy_unk)) in enumerate(
-                zip(preds, copy_positions)
-            ):
-                to_keep = [1 < len(inst[0]) <= 60 for inst in preds_one_inp]
-                _ids = [inst[0] for inst, flag in zip(preds_one_inp, to_keep) if flag]
+            with torch.no_grad():
+                padid = vocab_pair.tgt.pad_token_id or 0
+                new_preds = []
+                for i, (preds_one_inp, (copy_pt, copy_nt, copy_unk)) in enumerate(
+                    zip(preds, copy_positions)
+                ):
+                    to_keep = [1 < len(inst[0]) <= 60 for inst in preds_one_inp]
+                    _ids = [
+                        inst[0] for inst, flag in zip(preds_one_inp, to_keep) if flag
+                    ]
+                    # TODO
+                    sort_id = list(range(len(_ids)))
+                    sort_id.sort(key=lambda x: len(_ids[x]), reverse=True)
+                    _ids = [_ids[i] for i in sort_id]
+                    _lens = [len(inst) for inst in _ids]
+                    _ids_t = torch.full((len(_ids), _lens[0]), padid)
+                    for j, (snt, length) in enumerate(zip(_ids, _lens)):
+                        _ids_t[j, :length] = torch.tensor(snt)
+                    _ids_t = _ids_t.to(node_features[0].device)
 
-                sort_id = list(range(len(_ids)))
-                sort_id.sort(key=lambda x: len(_ids[x]), reverse=True)
-                _ids = [_ids[i] for i in sort_id]
-                _lens = [len(inst) for inst in _ids]
-                _ids_t = torch.full((len(_ids), _lens[0]), padid)
-                for j, (snt, length) in enumerate(zip(_ids, _lens)):
-                    _ids_t[j, :length] = torch.tensor(snt)
-                _ids_t = _ids_t.to(node_features[0].device)
-
-                if copy_pt is not None:
-                    copy_pt = copy_pt[to_keep]
-                    copy_pt = copy_pt[sort_id]
-                    copy_nt = [item for item, flag in zip(copy_nt, to_keep) if flag]
-                    copy_nt = [copy_nt[i] for i in sort_id]
-                    copy_unk = [item for item, flag in zip(copy_unk, to_keep) if flag]
-                    copy_unk = [copy_unk[i] for i in sort_id]
-
-                batch_size = (
-                    len(node_features)
-                    if self.check_ppl_batch_size is None
-                    else self.check_ppl_batch_size
-                )
-                ppl = []
-                for j in range(0, len(_ids), batch_size):
-                    real_batch_size = min(batch_size, len(_ids) - j)
-                    _node_ft = [node_features[i] for _ in range(real_batch_size)]
-                    _spans = [spans[i] for _ in range(real_batch_size)]
                     if copy_pt is not None:
-                        _copy = (
-                            copy_pt[j : j + batch_size, :, : _ids_t.shape[1]],
-                            copy_nt[j : j + batch_size],
-                        )
-                    else:
-                        _copy = None
-                    max_len = max(_lens[j : j + batch_size])
-                    nll = (
-                        self(
-                            _ids_t[j : j + batch_size],
-                            _lens[j : j + batch_size],
-                            _node_ft,
-                            _spans,
-                            copy_position=_copy,
-                        )
-                        .detach()
-                        .cpu()
-                        .numpy()
+                        copy_pt = copy_pt[to_keep]
+                        copy_pt = copy_pt[sort_id]
+                        copy_nt = [item for item, flag in zip(copy_nt, to_keep) if flag]
+                        copy_nt = [copy_nt[i] for i in sort_id]
+                        copy_unk = [
+                            item for item, flag in zip(copy_unk, to_keep) if flag
+                        ]
+                        copy_unk = [copy_unk[i] for i in sort_id]
+
+                    batch_size = (
+                        len(node_features)
+                        if self.check_ppl_batch_size is None
+                        else self.check_ppl_batch_size
                     )
-                    ppl.append(np.exp(nll / np.array(_lens[j : j + batch_size])))
-                ppl = np.concatenate(ppl, 0)
-                chosen = np.argmin(ppl)
-                new_preds.append(
-                    (
-                        _ids[chosen],
-                        ppl[chosen],
-                        None if copy_pt is None else copy_unk[chosen],
+                    ppl = []
+                    for j in range(0, len(_ids), batch_size):
+                        real_batch_size = min(batch_size, len(_ids) - j)
+                        _node_ft = [node_features[i] for _ in range(real_batch_size)]
+                        _spans = [spans[i] for _ in range(real_batch_size)]
+                        if copy_pt is not None:
+                            _copy = (
+                                copy_pt[j : j + batch_size, :, : _ids_t.shape[1]],
+                                copy_nt[j : j + batch_size],
+                            )
+                        else:
+                            _copy = None
+                        max_len = max(_lens[j : j + batch_size])
+                        nll = (
+                            self(
+                                _ids_t[j : j + batch_size],
+                                _lens[j : j + batch_size],
+                                _node_ft,
+                                _spans,
+                                copy_position=_copy,
+                            )
+                            .detach()
+                            .cpu()
+                            .numpy()
+                        )
+                        ppl.append(np.exp(nll / np.array(_lens[j : j + batch_size])))
+                    ppl = np.concatenate(ppl, 0)
+                    chosen = np.argmin(ppl)
+                    new_preds.append(
+                        (
+                            _ids[chosen],
+                            ppl[chosen],
+                            None if copy_pt is None else copy_unk[chosen],
+                        )
                     )
-                )
-            preds = new_preds
+                preds = new_preds
         else:
             assert False, "Bad impl of score. see sample()."
             preds_ = []
@@ -410,14 +415,14 @@ class NeuralQCFGTgtParser(TgtParserBase):
             terms = terms.unsqueeze(1).expand(batch_size, n, pt, terms.size(2))
             x_expand = x.unsqueeze(2).expand(batch_size, n, pt).unsqueeze(3)
             terms = torch.gather(terms, 3, x_expand).squeeze(3)
-            if copy_position[0] is not None:
-                # TODO sanity check: pt_spans begin with (0,0), (1,1) ... (n-1,n-1)
-                terms = terms.view(batch_size, n, self.pt_states, -1)
-                terms[:, :, -1] = (
-                    0.1 * self.neg_huge * ~copy_position[0].transpose(1, 2)
-                )
-                terms = terms.view(batch_size, n, -1)
-            if copy_position[1] is not None:
+            if self.use_copy:
+                if copy_position[0] is not None:
+                    # TODO sanity check: pt_spans begin with (0,0), (1,1) ... (n-1,n-1)
+                    terms = terms.view(batch_size, n, self.pt_states, -1)
+                    terms[:, :, -1] = (
+                        0.1 * self.neg_huge * ~copy_position[0].transpose(1, 2)
+                    )
+                    terms = terms.view(batch_size, n, -1)
                 # mask=True will set to value
                 copy_nt = [
                     np.full(
@@ -427,22 +432,22 @@ class NeuralQCFGTgtParser(TgtParserBase):
                     )
                     for w in range(1, n)
                 ]
-                for batch_idx, (nt_spans_inst, possible_copy) in enumerate(
-                    zip(nt_spans, copy_position[1])
-                ):
-                    for i, (l, r, _) in enumerate(nt_spans_inst):
-                        w = r - l - 1
-                        t = None
-                        if w >= len(possible_copy):
-                            continue
-                        for possible_s, possible_t in possible_copy[w]:
-                            if possible_s == l:
-                                t = possible_t
-                                break
-                        if t is not None:
-                            copy_nt[w][batch_idx, t, -1, i] = 0
+                if copy_position[1] is not None:
+                    for batch_idx, (nt_spans_inst, possible_copy) in enumerate(
+                        zip(nt_spans, copy_position[1])
+                    ):
+                        for i, (l, r, _) in enumerate(nt_spans_inst):
+                            w = r - l - 1
+                            t = None
+                            if w >= len(possible_copy):
+                                continue
+                            for possible_s, possible_t in possible_copy[w]:
+                                if possible_s == l:
+                                    t = possible_t
+                                    break
+                            if t is not None:
+                                copy_nt[w][batch_idx, t, -1, i] = 0
                 copy_nt_ = []
-                # TODO mask can use expand
                 for item in copy_nt:
                     mask = np.zeros_like(item, dtype=np.bool8)
                     mask[:, :, -1] = True
@@ -496,7 +501,6 @@ class NeuralQCFGTgtParser(TgtParserBase):
             # indices = indices[:shuffle_start] + shuffle_parts + indices[-1:]
             # spans_inst = [spans_inst[i] for i in indices]
             # node_features_inst = [node_features_inst[i] for i in indices]
-
             for s, f in zip(spans_inst, node_features_inst):
                 s_len = s[1] - s[0] + 1
                 if s_len >= self.nt_span_range[0] and s_len <= self.nt_span_range[1]:

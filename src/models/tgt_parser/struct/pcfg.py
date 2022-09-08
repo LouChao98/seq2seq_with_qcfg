@@ -30,7 +30,6 @@ class PCFG:
         self.threshold = torch.nn.Threshold(1e-3, 0)
 
     def __call__(self, params, lens, decode=False, marginal=False):
-        # TODO remove pytorch-struct
         # terms: bsz x seqlen x pt
         # rules: bsz x nt x (nt+pt) x (nt+pt)
         # roots: bsz x nt

@@ -91,7 +91,7 @@ class ColorHelper:
 
     def copy_alignment(self, alignment):
         for src, tgt in alignment:
-            self.mapping[tgt] = self.mapping[src]
+            self.mapping[tgt] = self.mapping.get(src)
 
 
 class ColorHelper2:
@@ -115,51 +115,28 @@ class ColorHelper2:
 
 
 if __name__ == "__main__":
-    src = "((and ((mr. jackson) (probably (has opened)))) ((new checking) (accounts too)))"
-    tgt = "((and (((new checking) (accounts (probably (have been)))) ((opened by) (mr. jackson)))) too)"
+    src = "((the luxury auto maker) (last year) (sold (1,214 cars) (in (the u.s.))))"
+    tgt = "(((((1,214 cars) ((last year) were)) sold) by) (the (luxury (auto (maker (in (the u.s.)))))))"
     alignment = """
-  and (0, 1) - and (0, 1) COPY
-  accounts (8, 9) - accounts (3, 4) COPY
-  probably (3, 4) - probably (4, 5) COPY
-  has (4, 5) - have (5, 6)
-  has (4, 5) - been (6, 7)
-  opened (5, 6) - opened (7, 8) COPY
-  and (0, 1) - by (8, 9)
-  too (9, 10) - too (11, 12) COPY
-  new checking (6, 8) - new checking (1, 3) COPY
-  and mr. jackson probably has opened new checking accounts too (0, 10) - have been (5, 7)
-  and mr. jackson probably has opened new checking accounts too (0, 10) - opened by (7, 9)
-  mr. jackson (1, 3) - mr. jackson (9, 11) COPY
-  and mr. jackson probably has opened new checking accounts too (0, 10) - probably have been (4, 7)
-  and mr. jackson probably has opened new checking accounts too (0, 10) - accounts probably have been (3, 7)
-  and mr. jackson probably has opened new checking accounts too (0, 10) - opened by mr. jackson (7, 11)
-  and mr. jackson probably has opened new checking accounts too (0, 10) - new checking accounts probably have been (1, 7)
-  and mr. jackson probably has opened new checking accounts too (0, 10) - new checking accounts probably have been opened by mr. jackson (1, 11)
-  and mr. jackson probably has opened new checking accounts too (0, 10) - and new checking accounts probably have been opened by mr. jackson (0, 11)
-  and mr. jackson probably has opened new checking accounts too (0, 10) - and new checking accounts probably have been opened by mr. jackson too (0, 12)
+  cars (8, 9) - were (4, 5)
+  sold (6, 7) - sold (5, 6) COPY
+  the (0, 1) - by (6, 7)
+  the (0, 1) - the (7, 8) COPY
+  luxury (1, 2) - luxury (8, 9) COPY
+  auto (2, 3) - auto (9, 10) COPY
+  maker (3, 4) - maker (10, 11) COPY
+  1,214 cars (7, 9) - 1,214 cars (0, 2) COPY
+  last year (4, 6) - last year (2, 4) COPY
+  last year (4, 6) - last year were (2, 5)
+  in the u.s. (9, 12) - in the u.s. (11, 14) COPY
+  maker last year sold 1,214 cars in the u.s. (3, 12) - maker in the u.s. (10, 14)
+  1,214 cars (7, 9) - 1,214 cars last year were (0, 5)
+  auto maker last year sold 1,214 cars in the u.s. (2, 12) - auto maker in the u.s. (9, 14)
+  sold 1,214 cars in the u.s. (6, 12) - 1,214 cars last year were sold (0, 6)
+  luxury auto maker last year sold 1,214 cars in the u.s. (1, 12) - luxury auto maker in the u.s. (8, 14)
+  1,214 cars (7, 9) - 1,214 cars last year were sold by (0, 7)
+  the luxury auto maker last year sold 1,214 cars in the u.s. (0, 12) - the luxury auto maker in the u.s. (7, 14)
+  the luxury auto maker last year sold 1,214 cars in the u.s. (0, 12) - 1,214 cars last year were sold by the luxury auto maker in the u.s. (0, 14)
     """
-    #     src = "((((((((the luxury) (auto maker)) last) year) (sold 1,214)) cars) in) (the u.s.))"
-    #     tgt = "((((1,214 cars) (last year)) (were sold)) ((by (the luxury auto maker)) (in (the u.s.))))"
-    #     alignment = """
-    # 1,214 (7, 8) - 1,214 (0, 1) COPY
-    #   cars (8, 9) - cars (1, 2) COPY
-    #   last (4, 5) - last (2, 3) COPY
-    #   year (5, 6) - year (3, 4) COPY
-    #   sold (6, 7) - were (4, 5)
-    #   sold (6, 7) - sold (5, 6) COPY
-    #   last (4, 5) - by (6, 7)
-    #   in (9, 10) - in (11, 12) COPY
-    #   the luxury auto maker last year sold 1,214 cars (0, 9) - 1,214 cars (0, 2)
-    #   the luxury auto maker last year (0, 6) - last year (2, 4)
-    #   the luxury auto maker last year sold 1,214 (0, 8) - were sold (4, 6)
-    #   the u.s. (10, 12) - the u.s. (12, 14) COPY
-    #   the luxury auto maker last year sold 1,214 cars in the u.s. (0, 12) - in the u.s. (11, 14)
-    #   the luxury auto maker last year sold 1,214 cars (0, 9) - 1,214 cars last year (0, 4)
-    #   the luxury auto maker (0, 4) - the luxury auto maker (7, 11) COPY
-    #   the luxury auto maker last year (0, 6) - by the luxury auto maker (6, 11)
-    #   the luxury auto maker last year sold 1,214 cars in the u.s. (0, 12) - 1,214 cars last year were sold (0, 6)
-    #   the luxury auto maker last year sold 1,214 cars in the u.s. (0, 12) - by the luxury auto maker in the u.s. (6, 14)
-    #   the luxury auto maker last year sold 1,214 cars in the u.s. (0, 12) - 1,214 cars last year were sold by the luxury auto maker in the u.s. (0, 14)
-    #     """
     with open("tikz_fig.tex", "w") as f:
         f.write(make_latex_code(src, tgt, alignment))

@@ -1,16 +1,17 @@
 from enum import IntEnum
-from typing import Dict, List, Union
+from typing import Dict, List
 
 import numpy as np
 import torch
-import torch_semiring_einsum as tse
 from numba import jit, prange
 from torch import Tensor
 from torch.autograd import grad
 
 from ._fn import diagonal, diagonal_copy_, stripe
-from ._utils import checkpoint, process_param_for_marginal, reorder, weighted_random
+from ._utils import checkpoint, process_param_for_marginal, weighted_random
 from .td_style_base import TDStyleBase
+
+# import torch_semiring_einsum as tse
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
 
@@ -31,22 +32,277 @@ class D1PCFG(TDStyleBase):
     # ================
     # Time complexity: 6
 
-    # TODO fix nt_spans, and pt_spans. this impl assume nt_spans = pt_spans.
+    # This impl assume tgt_nt_states = tgt_pt_states
+    # This should be faster if PT and NT has no seperation in alignment
     def __init__(self, tgt_nt_states, tgt_pt_states) -> None:
         self.tgt_nt_states = tgt_nt_states
         self.tgt_pt_states = tgt_pt_states
-        self.block_size = 32
+        self.max_states = max(tgt_nt_states, tgt_pt_states)
+        # import torch_semiring_einsum as tse
 
-        self.eq_slr = tse.compile_equation("qrij, qrik->qrijk")
-        self.eq_qnkrj = tse.compile_equation("qnwjr,qnwkr->qnkrj")
-        self.eq_qnri = tse.compile_equation("qnkrj,qrijk->qnri")
-        self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
-        self.eq_tor = tse.compile_equation("xlpi,xrp->xlir")
-
+        # self.eq_slr = tse.compile_equation("qrij, qrik->qrijk")
+        # self.eq_qnkrj = tse.compile_equation("qnwjr,qnwkr->qnkrj")
+        # self.eq_qnri = tse.compile_equation("qnkrj,qrijk->qnri")
+        # self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
+        # self.eq_tor = tse.compile_equation("xlpi,xrp->xlir")
         self.threshold = torch.nn.Threshold(1e-3, 0)
 
-    @reorder
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
+        # if not decode and not marginal and params.get("copy_nt") is None:
+        #     return self.logZ(params, lens)
+        if decode:
+            marginal = True  # MBR decoding
+        if marginal:
+            grad_state = torch.is_grad_enabled()
+            torch.set_grad_enabled(True)
+            cm = torch.inference_mode(False)
+            cm.__enter__()
+            params = {k: process_param_for_marginal(v) for k, v in params.items()}
+        if not isinstance(lens, torch.Tensor):
+            lens = torch.tensor(lens)
+        assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
+
+        head = params["head"]  # (batch, NT, r), A[i] -> R
+        term = params["term"]  # (batch, seq_len, PT)
+        root = params["root"]  # (batch, NT)
+        copy_nt = params.get("copy_nt")
+
+        # ===== This routine is optimized for src_len < tgt_len =====
+
+        if "slr" in params:
+            SLR = params["slr"]
+        else:
+            SL = params["sl"]  # (batch, r, SRC_NT, SRC_NT), R, i -> j
+            SR = params["sr"]  # (batch, r, SRC_NT, SRC_NT), R, i -> k
+            SLR = SL.unsqueeze(-1) + SR.unsqueeze(-2)
+
+        # ===== End =====
+
+        batch, N, PT = term.shape
+        _, NT, R = head.shape
+        N += 1
+        nt_spans = NT // self.tgt_nt_states
+        pt_spans = PT // self.tgt_pt_states
+        max_spans = max(nt_spans, pt_spans)
+
+        head = head.view(batch, self.tgt_nt_states, nt_spans, R)
+        term = term.view(batch, -1, self.tgt_pt_states, pt_spans)
+        root = root.view(batch, self.tgt_nt_states, nt_spans)
+
+        # (batch, r, TGT_NT), R -> B/C
+        # (batch, r, TGT_PT), R -> B/C
+        size = (self.tgt_nt_states, self.tgt_pt_states)
+        TLNT, TLPT = torch.split(params["left"], size, -1)
+        TRNT, TRPT = torch.split(params["right"], size, -1)
+
+        if marginal:
+            span_indicator = term.new_ones(
+                batch, N, N, self.max_states, nt_spans, requires_grad=True
+            )
+            span_indicator_running = span_indicator[:, :, :, : self.tgt_nt_states]
+        else:
+            span_indicator = None
+
+        normalizer = term.new_full((batch, N, N), -1e9)
+        norm = term.flatten(2).max(-1)[0]
+        diagonal_copy_(normalizer, norm, w=1)
+        term = (term - norm[..., None, None]).exp()
+
+        left_s = term.new_full((batch, N, N, max_spans, R), -1e9)
+        right_s = term.new_full((batch, N, N, max_spans, R), -1e9)
+        if marginal:
+            indicator = (
+                span_indicator[:, :, :, : self.tgt_pt_states]
+                .diagonal(1, 1, 2)
+                .movedim(-1, 1)
+            )
+            term = term * indicator
+        left_term = torch.einsum("xlpi,xrp->xlir", term, TLPT)
+        right_term = torch.einsum("xlpi,xrp->xlir", term, TRPT)
+        diagonal_copy_(left_s, left_term, w=1)
+        diagonal_copy_(right_s, right_term, w=1)
+
+        # prepare length, same as the batch_size in PackedSequence
+        n_at_position = (
+            torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)
+        ).sum(1)
+
+        # w: span width
+        final = []
+        final_normalizer = []
+        for step, w in enumerate(range(2, N)):
+
+            # n: the number of spans of width w.
+            n = N - w
+            y = stripe(left_s, n, w - 1, (0, 1)).clone()
+            z = stripe(right_s, n, w - 1, (1, w), 0).clone()
+            y_normalizer = stripe(normalizer, n, w - 1, (0, 1))
+            z_normalizer = stripe(normalizer, n, w - 1, (1, w), 0)
+            x, x_normalizer = merge_h(y, z, y_normalizer, z_normalizer, SLR, head)
+
+            unfinished = n_at_position[step + 1]
+            current_bsz = n_at_position[step]
+
+            if copy_nt is not None:
+                value, mask = copy_nt[step]
+                if value.ndim > 0:
+                    value = value[:current_bsz]
+                mask = mask[:current_bsz]
+                x = torch.where(mask, (value - x_normalizer[..., None, None]).exp(), x)
+
+            if marginal:
+                indicator = span_indicator_running.diagonal(w, 1, 2).movedim(-1, 1)
+                x = x * indicator
+
+            if current_bsz - unfinished > 0:
+                final.insert(0, x[unfinished:current_bsz, :1])
+                final_normalizer.insert(0, x_normalizer[unfinished:current_bsz, :1])
+            if unfinished > 0:
+                if current_bsz > unfinished:
+                    x = x[:unfinished]
+                    left_s = left_s[:unfinished]
+                    right_s = right_s[:unfinished]
+                    SLR = SLR[:unfinished]
+                    head = head[:unfinished]
+                    TLNT = TLNT[:unfinished]
+                    TRNT = TRNT[:unfinished]
+                    normalizer = normalizer[:unfinished]
+                    x_normalizer = x_normalizer[:unfinished]
+                    if marginal:
+                        span_indicator_running = span_indicator_running[:unfinished]
+
+                left_x = torch.einsum("qnai,qra->qnir", x, TLNT)
+                right_x = torch.einsum("qnai,qra->qnir", x, TRNT)
+                diagonal_copy_(left_s, left_x, w)
+                diagonal_copy_(right_s, right_x, w)
+                diagonal_copy_(normalizer, x_normalizer, w)
+            if unfinished == 0:
+                break
+        final = torch.cat(final, dim=0)
+        final_normalizer = torch.cat(final_normalizer, dim=0)
+        final = (final + 1e-9).squeeze(1).log() + root
+        logZ = final.logsumexp((-2, -1)) + final_normalizer.squeeze(-1)
+        if decode:
+            spans = self.mbr_decoding(logZ, span_indicator, lens)
+            return spans
+        if marginal:
+            torch.set_grad_enabled(grad_state)
+            cm.__exit__(None, None, None)
+            return grad(logZ.sum(), [span_indicator])[0]
+        return -logZ
+
+    def logZ(self, params: Dict[str, Tensor], lens):
+        if not isinstance(lens, torch.Tensor):
+            lens = torch.tensor(lens)
+        assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
+
+        terms = params["term"]  # (batch, seq_len, PT)
+        root = params["root"]  # (batch, NT)
+
+        batch, N, PT = terms.shape
+        N += 1
+        NT = root.shape[1]
+        nt_spans = NT // self.tgt_nt_states
+        pt_spans = PT // self.tgt_pt_states
+
+        terms = terms.view(batch, -1, self.tgt_pt_states, pt_spans)
+        root = root.view(batch, self.tgt_nt_states, nt_spans)
+
+        H = params["head"]  # (batch, NT, r), A[i] -> R
+
+        # (batch, r, TGT_NT), R -> B/C
+        # (batch, r, TGT_PT), R -> B/C
+        size = (self.tgt_nt_states, self.tgt_pt_states)
+        TLNT, TLPT = torch.split(params["left"], size, -1)
+        TRNT, TRPT = torch.split(params["right"], size, -1)
+
+        R = H.shape[-1]
+        H = H.view(batch, self.tgt_nt_states, nt_spans, R)
+        HL = torch.einsum("qair,qla->qril", H, TLNT)
+        HR = torch.einsum("qair,qla->qril", H, TRNT)
+
+        # ===== This routine is optimized for src_len < tgt_len =====
+
+        if "slr" in params:
+            SLR = params["slr"]
+        else:
+            SL = params["sl"]  # (batch, r, SRC_NT, SRC_NT), R, i -> j
+            SR = params["sr"]  # (batch, r, SRC_NT, SRC_NT), R, i -> k
+            SLR = SL.unsqueeze(-1) + SR.unsqueeze(-2)
+
+        # ===== End =====
+
+        normalizer = terms.new_full((batch, N, N), -1e9)
+        norm = terms.flatten(2).max(-1)[0]
+        diagonal_copy_(normalizer, norm, w=1)
+        terms = (terms - norm[..., None, None]).exp()
+
+        left_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
+        right_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
+        left_term = torch.einsum("xlpi,xrp->xlir", terms, TLPT)
+        right_term = torch.einsum("xlpi,xrp->xlir", terms, TRPT)
+        diagonal_copy_(left_s, left_term, w=1)
+        diagonal_copy_(right_s, right_term, w=1)
+
+        # prepare length, same as the batch_size in PackedSequence
+        n_at_position = (
+            torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)
+        ).sum(1)
+
+        # w: span width
+        final = []
+        final_normalizer = []
+        for step, w in enumerate(range(2, N)):
+
+            # n: the number of spans of width w.
+            n = N - w
+            y = stripe(left_s, n, w - 1, (0, 1)).clone()
+            z = stripe(right_s, n, w - 1, (1, w), 0).clone()
+            y_normalizer = stripe(normalizer, n, w - 1, (0, 1))
+            z_normalizer = stripe(normalizer, n, w - 1, (1, w), 0)
+            x, x_normalizer = merge(y, z, y_normalizer, z_normalizer, SLR)
+
+            unfinished = n_at_position[step + 1]
+            current_bsz = n_at_position[step]
+
+            if current_bsz - unfinished > 0:
+                final.insert(
+                    0,
+                    torch.einsum(
+                        "qnri,qair->qnai",
+                        x[unfinished:current_bsz, :1],
+                        H[unfinished:current_bsz],
+                    ),
+                )
+                final_normalizer.insert(0, x_normalizer[unfinished:current_bsz, :1])
+            if unfinished > 0:
+                if current_bsz > unfinished:
+                    x = x[:unfinished]
+                    left_s = left_s[:unfinished]
+                    right_s = right_s[:unfinished]
+                    SLR = SLR[:unfinished]
+                    HL = HL[:unfinished]
+                    HR = HR[:unfinished]
+                    normalizer = normalizer[:unfinished]
+                    x_normalizer = x_normalizer[:unfinished]
+
+                left_x = torch.einsum("qnri,qril->qnil", x, HL)
+                right_x = torch.einsum("qnri,qril->qnil", x, HR)
+                diagonal_copy_(left_s, left_x, w)
+                diagonal_copy_(right_s, right_x, w)
+                diagonal_copy_(normalizer, x_normalizer, w)
+            if unfinished == 0:
+                break
+        final = torch.cat(final, dim=0)
+        final_normalizer = torch.cat(final_normalizer, dim=0)
+        final = (final + 1e-9).squeeze(1).log() + root
+        logZ = final.logsumexp((-2, -1)) + final_normalizer.squeeze(-1)
+        return -logZ
+
+    def inside_semiring_einsum(
+        self, params: Dict[str, Tensor], lens, decode=False, marginal=False
+    ):
+        # NOTE current scorer do not support this. because this need everything in log-space.
         if decode:
             marginal = True  # MBR decoding
         if marginal:
@@ -204,19 +460,19 @@ class D1PCFG(TDStyleBase):
         num_samples=10,
         max_length=100,
     ):
-        terms = params["term"].detach()
-        roots = params["root"].detach()
-        H = params["head"].detach()  # (batch, NT, r) r:=rank
-        L = params["left"].detach()  # (batch, r, TGT_NT + TGT_PT)
-        R = params["right"].detach()  # (batch, r, TGT_NT + TGT_PT)
-        SLR = params["slr"].detach()
+        terms = params["term"]
+        roots = params["root"]
+        H = params["head"]  # (batch, NT, r) r:=rank
+        L = params["left"]  # (batch, r, TGT_NT + TGT_PT)
+        R = params["right"]  # (batch, r, TGT_NT + TGT_PT)
+        SLR = params["slr"]
 
-        terms = self.threshold(terms.softmax(2)).cumsum(2)
-        roots = self.threshold(roots.softmax(1)).cumsum(1)
-        H = self.threshold(H.softmax(2)).cumsum(2)
-        L = self.threshold(L.softmax(2)).cumsum(2)
-        R = self.threshold(R.softmax(2)).cumsum(2)
-        SLR = self.threshold(SLR.flatten(3).softmax(3)).cumsum(3)
+        terms = self.threshold(terms.exp()).cumsum(2)
+        roots = self.threshold(roots.exp()).cumsum(1)
+        H = self.threshold(H).cumsum(2)
+        L = self.threshold(L).cumsum(2)
+        R = self.threshold(R).cumsum(2)
+        SLR = self.threshold(SLR.flatten(3)).cumsum(3)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()
@@ -256,7 +512,7 @@ class D1PCFG(TDStyleBase):
         return preds
 
     @staticmethod
-    @jit(nopython=True, parallel=True)
+    @jit(nopython=True)
     def sample(
         terms: np.ndarray,  # seqlen x pt, in normal space
         rules_head: np.ndarray,  # nt x r, in normal space
@@ -287,7 +543,7 @@ class D1PCFG(TDStyleBase):
             # score = roots[sample]
             nonterminals: List[int] = [sample]
             preterminals: List[int] = []
-            is_copy_pt: List[bool] = []
+            is_copy_nt: List[bool] = []
             failed = False
 
             while (
@@ -301,7 +557,7 @@ class D1PCFG(TDStyleBase):
                     if use_copy:
                         if nt_state == COPY_NT:
                             preterminals.append(nt_node)
-                            is_copy_pt.append(True)
+                            is_copy_nt.append(True)
                             continue
                     actions += 1
                     r = weighted_random(rules_head[s])
@@ -334,7 +590,7 @@ class D1PCFG(TDStyleBase):
                     )
                 else:
                     preterminals.append(s - NT)
-                    is_copy_pt.append(False)
+                    is_copy_nt.append(False)
 
             if failed:
                 # print('failed')
@@ -342,7 +598,7 @@ class D1PCFG(TDStyleBase):
 
             terminals: List[int] = []
             terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
-            for s, flag in zip(preterminals, is_copy_pt):
+            for s, flag in zip(preterminals, is_copy_nt):
                 if flag:
                     terminals.append(s)
                     terminal_type.append(_COPY_NT)
@@ -375,10 +631,10 @@ class D1PCFG(TDStyleBase):
         head = params["head"].view(b, nt_states, -1, r)
         rule = torch.einsum(
             "xair,xrb,xrc,xrijk->xaibjck",
-            head.exp(),
-            params["left"].exp(),
-            params["right"].exp(),
-            params["slr"].exp(),
+            head,
+            params["left"],
+            params["right"],
+            params["slr"],
         )
         shape = rule.shape
         rule = rule.reshape(
@@ -387,60 +643,32 @@ class D1PCFG(TDStyleBase):
         return {"term": params["term"], "rule": rule, "root": params["root"]}
 
 
-if __name__ == "__main__":
+@torch.jit.script
+def eq_qnkrj(v1, v2):
+    # "qnwjr,qnwkr->qnkrj"
+    v = v1.transpose(-1, -2).unsqueeze(-3) + v2.unsqueeze(-1)
+    return torch.logsumexp(v, dim=2)
 
-    from .pcfg import PCFG
 
-    torch.autograd.set_detect_anomaly(True)
-    torch.random.manual_seed(1)
-    B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r = 2, 6, 3, 3, 3, 3, 2
-    NT = TGT_NT * SRC_NT
-    T = TGT_PT * SRC_PT
-    device = "cuda"
+@checkpoint
+@torch.jit.script
+def merge(y, z, y_normalizer, z_normalizer, slr):
+    y = (y + 1e-9).log() + y_normalizer[..., None, None]
+    z = (z + 1e-9).log() + z_normalizer[..., None, None]
+    qnkrj = eq_qnkrj(y, z)
+    normalizer = qnkrj.flatten(2).max(-1)[0]
+    qnkrj = (qnkrj - normalizer[..., None, None, None]).exp()
+    x = torch.einsum("qnkrj,qrijk->qnri", qnkrj, slr)
+    return x, normalizer
 
-    slr = (
-        torch.randn(B, r, SRC_NT, SRC_NT, SRC_NT, device=device)
-        .view(B, r * SRC_NT, -1)
-        .log_softmax(-1)
-        .view(B, r, SRC_NT, SRC_NT, SRC_NT)
-    )
-    params = {
-        "term": torch.randn(B, N, T, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
-        "root": torch.randn(B, NT, device=device).log_softmax(-1).requires_grad_(True),
-        "head": torch.randn(B, NT, r, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
-        "left": torch.randn(B, r, TGT_NT + TGT_PT, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
-        "right": torch.randn(B, r, TGT_NT + TGT_PT, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
-        "slr": slr,
-    }
-    lens = torch.tensor([N - 4, N - 2], dtype=torch.long, device=device)
 
-    pcfg = D1PCFG(TGT_NT, TGT_PT)
-
-    print(pcfg(params, lens))
-    m1 = pcfg(params, lens, marginal=True)
-    print(m1.sum((1, 2)))
-
-    head = params["head"].view(B, TGT_NT, SRC_NT, r)
-    rule = torch.einsum(
-        "xair,xrb,xrc,xrijk->xaibjck",
-        head.exp(),
-        params["left"].exp(),
-        params["right"].exp(),
-        params["slr"].exp(),
-    )
-    shape = rule.shape
-    rule = rule.reshape(
-        shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
-    ).log()
-
-    params2 = {"term": params["term"], "rule": rule, "root": params["root"]}
-    pcfg2 = PCFG()
-    print(pcfg2(params2, lens))
+@checkpoint
+@torch.jit.script
+def merge_h(y, z, y_normalizer, z_normalizer, slr, h):
+    y = (y + 1e-9).log() + y_normalizer[..., None, None]
+    z = (z + 1e-9).log() + z_normalizer[..., None, None]
+    qnkrj = eq_qnkrj(y, z)
+    normalizer = qnkrj.flatten(2).max(-1)[0]
+    qnkrj = (qnkrj - normalizer[..., None, None, None]).exp()
+    x = torch.einsum("qnkrj,qrijk,qair->qnai", qnkrj, slr, h)
+    return x, normalizer

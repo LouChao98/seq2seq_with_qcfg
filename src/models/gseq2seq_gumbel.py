@@ -5,6 +5,7 @@ from typing import Any, List, Optional
 
 import numpy as np
 import torch
+from pytorch_lightning.profilers import PassThroughProfiler, SimpleProfiler
 
 from src.models.general_seq2seq import GeneralSeq2SeqModule
 from src.utils.fn import (
@@ -28,6 +29,10 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
         super().__init__(*args, **kwargs)
         self.save_hyperparameters(logger=False)
 
+    def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
+        super().setup(stage, datamodule)
+        self.profiler = self.trainer.profiler or PassThroughProfiler()
+
     def setup_patch(self, stage: Optional[str] = None, datamodule=None) -> None:
         self.span_encoder = CombinarySpanEncoder(
             in_dim=self.encoder.get_output_dim(),
@@ -39,25 +44,32 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
 
-        x = self.encode(batch)
+        with self.profiler.profile("compute_src_nll_and_sampling"):
+            dist = self.parser(src_ids, src_lens)
+            src_nll = -dist.partition
+            event, src_logprob, trace, buffer = self.parser.gumbel_sample(
+                src_ids, src_lens, dist
+            )
+            src_spans = extract_parses(event[-1], src_lens, inc=1)[0]
 
-        dist = self.parser(src_ids, src_lens)
-        src_nll = -dist.partition
-        event, src_logprob, trace, buffer = self.parser.gumbel_sample(
-            src_ids, src_lens, dist
-        )
-        src_spans = extract_parses(event[-1], src_lens, inc=1)[0]
+        with self.profiler.profile("src_encoding"):
+            x = self.encode(batch)
+            with self.profiler.profile("compose gumbel vec"):
+                spans, node_feats = self.collect_node_feature(
+                    src_spans, trace, buffer, x
+                )
+            node_feats, node_spans = self.tree_encoder(
+                node_feats, src_lens, spans=spans
+            )
 
-        spans, node_feats = self.collect_node_feature(src_spans, trace, buffer, x)
-        node_feats, node_spans = self.tree_encoder(node_feats, src_lens, spans=spans)
-
-        tgt_nll = self.decoder(
-            batch["tgt_ids"],
-            batch["tgt_lens"],
-            node_feats,
-            node_spans,
-            copy_position=copy_position,
-        )
+        with self.profiler.profile("compute_tgt_nll"):
+            tgt_nll = self.decoder(
+                batch["tgt_ids"],
+                batch["tgt_lens"],
+                node_feats,
+                node_spans,
+                copy_position=copy_position,
+            )
 
         del buffer
 
@@ -204,6 +216,7 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
                 processed_buffer[i] = item[0, :, :, 0, 0]  # <b, start, split>
         buffer = processed_buffer
 
+        x2 = x[:, :, None] + x[:, None]
         for b, spans_inst in enumerate(src_spans):
             features_inst = []
             seq_len = len(spans_inst) + 1
@@ -213,7 +226,8 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
             ]
 
             # s == e
-            single_x = x[b, :seq_len] * 2
+            # single_x = x[b, :seq_len] * 2
+            single_x = x2[b].diagonal().transpose(0, 1)
             features_inst.extend(list(self.span_encoder(single_x, single_x)))
             for s, e, _ in spans_inst:
                 w = e - s
@@ -223,12 +237,15 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
                 elif w == 1:
                     features_inst.append(self.span_encoder(single_x[s], single_x[e]))
                 else:
-                    left = x[b, s, None]
-                    right = x[b, e, None]
-                    mid1 = x[b, s:e]
-                    mid2 = x[b, s + 1 : e + 1]
+                    # left = x[b, s, None]
+                    # right = x[b, e, None]
+                    # mid1 = x[b, s:e]
+                    # mid2 = x[b, s + 1 : e + 1]
+                    # span = self.span_encoder(left + mid1, mid2 + right)
 
-                    span = self.span_encoder(left + mid1, mid2 + right)
+                    l2 = x2[b, s, s:e]
+                    r2 = x2[b, s + 1 : e + 1, e]
+                    span = self.span_encoder(l2, r2)
 
                     # XYZ XYz XyZ Xyz
                     switch = buffer_inst[invtrace[(w, "1234")]][s]

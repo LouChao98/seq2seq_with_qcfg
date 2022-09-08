@@ -1,19 +1,20 @@
 _target_: src.datamodules.penman_datamodule.PenmanDataModule
 
+# train_file: ${data_dir}/AMR/tdata_xfm/debug.txt
+# dev_file: ${data_dir}/AMR/tdata_xfm/debug.txt
+# test_file: ${data_dir}/AMR/tdata_xfm/debug.txt
 train_file: ${data_dir}/AMR/tdata_xfm/dev.txt.nowiki
 dev_file: ${data_dir}/AMR/tdata_xfm/dev.txt.nowiki
 test_file: ${data_dir}/AMR/tdata_xfm/dev.txt.nowiki
-# train_file: ${data_dir}/AMR/tdata_xfm/train.txt.nowiki
-# dev_file: ${data_dir}/AMR/tdata_xfm/dev.txt.nowiki
-# test_file: ${data_dir}/AMR/tdata_xfm/test.txt.nowiki
 
 copy_mode: "token"
+max_src_len: 32
 
-batch_size: ${in_debugger:2,20}
-token_size: 200
-eval_batch_size: ${in_debugger:2,6}
+batch_size: 4
+token_size: 100
+eval_batch_size: 1
 num_workers: ${in_debugger:0,4}
-pin_memory: false
+pin_memory: true
 
 cache_dir: ${data_dir}/cache
 enable_cache: false

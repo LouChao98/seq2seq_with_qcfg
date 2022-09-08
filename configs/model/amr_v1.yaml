@@ -2,7 +2,7 @@ defaults:
   - encoder: yzhang_lstm
   - parser: pcfg
   - tree_encoder: treelstm
-  - decoder: qcfg
+  - decoder: d1
   - test_metric: bleu1234
 
 _target_: src.models.amr_v1.AMRV1Module

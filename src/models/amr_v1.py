@@ -5,9 +5,10 @@ from typing import Any, List, Optional
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
+from pytorch_lightning.profilers import PassThroughProfiler, SimpleProfiler
 from torch_scatter import scatter_mean
 from torch_struct.distributions import SentCFG
-from torchmetrics import MinMetric
+from torchmetrics import MaxMetric, MinMetric
 from transformers import AutoModel
 
 from src.models.base import ModelBase
@@ -21,6 +22,7 @@ from src.utils.fn import (
     extract_parses,
     get_actions,
     get_tree,
+    report_ids_when_err,
 )
 from src.utils.metric import PerplexityMetric
 
@@ -30,57 +32,73 @@ log = logging.getLogger(__file__)
 
 
 class AMRV1Module(GeneralSeq2SeqModule):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.val_neq_e_metric = MaxMetric()
+
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
         super().setup(stage, datamodule)
         self.amr_neq_pr_task = AMRNeqQCFGTasks[type(self.decoder)]
+        self.profiler = self.trainer.profiler or PassThroughProfiler()
 
+    @report_ids_when_err
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
 
-        dist = self.parser(src_ids, src_lens)
-        src_nll = -dist.partition
-        src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
-        src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
+        with self.profiler.profile("compute_src_nll_and_sampling"):
+            dist = self.parser(src_ids, src_lens)
+            src_nll = -dist.partition
+            src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
+            src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
 
-        x = self.encode(batch)
-        node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
+        with self.profiler.profile("src_encoding"):
+            x = self.encode(batch)
+            node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
-        (
-            params,
-            pt_spans,
-            pt_num_nodes,
-            nt_spans,
-            nt_num_nodes,
-        ) = self.decoder.get_params(
-            node_features,
-            node_spans,
-            batch["tgt_ids"],
-            impossible_span_mask=batch["tgt_masks"],
-            copy_position=copy_position,
-        )
-        tgt_nll = self.decoder(
-            batch["tgt_ids"],
-            batch["tgt_lens"],
-            node_features,
-            node_spans,
-            params=params,
-            impossible_span_mask=batch["tgt_masks"],
-            copy_position=copy_position,
-        )
-
-        if self.training:
-            pt_neq_task = self.amr_neq_pr_task(
-                pt_num_nodes, self.decoder.pt_states, tgt_nll.device
+        with self.profiler.profile("compute_tgt_nll"):
+            (
+                params,
+                pt_spans,
+                pt_num_nodes,
+                nt_spans,
+                nt_num_nodes,
+            ) = self.decoder.get_params(
+                node_features,
+                node_spans,
+                batch["tgt_ids"],
+                impossible_span_mask=batch["tgt_masks"],
+                copy_position=copy_position,
             )
+            tgt_nll = self.decoder(
+                batch["tgt_ids"],
+                batch["tgt_lens"],
+                node_features,
+                node_spans,
+                params=params,
+                impossible_span_mask=batch["tgt_masks"],
+                copy_position=copy_position,
+            )
+
+        pt_neq_task = self.amr_neq_pr_task(
+            pt_num_nodes,
+            nt_num_nodes,
+            self.decoder.pt_states,
+            self.decoder.nt_states,
+            tgt_nll.device,
+        )
+        if self.training:
+            # TODO study whether we can avoid p.partition as it will be canceled by pt_neq_pr
             pt_neq_pr = compute_pr(
                 params, batch["tgt_lens"], batch["tgt_pt_neq_constraint"], pt_neq_task
-            )
+            ).mean()
 
             # # we have closed form of q
-            params = (params["term"], params["rule"], params["root"], params["copy_nt"])
-            pm = SentCFG(params, batch["tgt_lens"]).marginals[0]  # term marginals
-            pm = pm.view(*pm.shape[:2], -1, pt_num_nodes).sum(-2)
+            # params = (params["term"], params["rule"], params["root"], params["copy_nt"])
+            # pm = SentCFG(params, batch["tgt_lens"]).marginals[0]  # term marginals
+            # pm = pm.view(*pm.shape[:2], -1, pt_num_nodes).sum(-2)
+            pm = self.decoder.pcfg(params, batch["tgt_lens"], marginal=True).sum(3)
+            pm = pm.diagonal(offset=1, dim1=1, dim2=2).transpose(1, 2)
             pt_eq_pr = []
             for bidx, groups in enumerate(batch["tgt_pt_eq_constraint"]):
                 for group in groups:
@@ -94,37 +112,49 @@ class AMRV1Module(GeneralSeq2SeqModule):
                         d1, d2 = torch.split(d1, 1, 0)
                     pt_eq_pr.append(-((d1.log() + d2.log()) / 2).logsumexp(-1).mean())
             if len(pt_eq_pr) > 0:
-                pt_eq_pr = torch.stack(pt_eq_pr)
-                pr_terms = pt_neq_pr.mean() + pt_eq_pr.mean()
+                pt_eq_pr = torch.stack(pt_eq_pr).mean()
+                pr_terms = pt_neq_pr + pt_eq_pr
             else:
-                pr_terms = pt_neq_pr.mean()
+                pt_eq_pr = 0.0
+                pr_terms = pt_neq_pr
+            max_neq_e = -1
         else:
-            pr_terms = 0.0
+            pt_neq_pr, pt_eq_pr, pr_terms = 0.0, 0.0, 0.0
+            pt_neq_e = pt_neq_task.calc_e(
+                params, batch["tgt_lens"], batch["tgt_pt_neq_constraint"]
+            )
+            max_neq_e = pt_neq_e.max()
 
-        with torch.no_grad():
-            src_spans_argmax, src_logprob_argmax = self.parser.argmax(
-                src_ids, src_lens, dist=dist
-            )
-            src_spans_argmax = extract_parses(src_spans_argmax[-1], src_lens, inc=1)[0]
-            node_features_argmax, node_spans_argmax = self.tree_encoder(
-                x, src_lens, spans=src_spans_argmax
-            )
-            tgt_nll_argmax = self.decoder(
-                batch["tgt_ids"],
-                batch["tgt_lens"],
-                node_features_argmax,
-                node_spans_argmax,
-                copy_position=copy_position,
-                impossible_span_mask=batch["tgt_masks"],
-            )
-            neg_reward = (tgt_nll - tgt_nll_argmax).detach()
+        with self.profiler.profile("src_reward"):
+            with torch.no_grad():
+                src_spans_argmax, src_logprob_argmax = self.parser.argmax(
+                    src_ids, src_lens, dist=dist
+                )
+                src_spans_argmax = extract_parses(
+                    src_spans_argmax[-1], src_lens, inc=1
+                )[0]
+                node_features_argmax, node_spans_argmax = self.tree_encoder(
+                    x, src_lens, spans=src_spans_argmax
+                )
+                tgt_nll_argmax = self.decoder(
+                    batch["tgt_ids"],
+                    batch["tgt_lens"],
+                    node_features_argmax,
+                    node_spans_argmax,
+                    copy_position=copy_position,
+                    impossible_span_mask=batch["tgt_masks"],
+                )
+                neg_reward = (tgt_nll - tgt_nll_argmax).detach()
 
         return {
             "decoder": tgt_nll.mean() + pr_terms,
             "encoder": src_nll.mean() + (src_logprob * neg_reward).mean(),
             "tgt_nll": tgt_nll.mean(),
             "src_nll": src_nll.mean(),
+            "pt_neq_pr": pt_neq_pr,
+            "pt_eq_pr": pt_eq_pr,
             "reward": -neg_reward.mean(),
+            "max_neq_e": max_neq_e,
         }
 
     def forward_visualize(self, batch, sample=False):
@@ -143,11 +173,45 @@ class AMRV1Module(GeneralSeq2SeqModule):
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
+        # show PRed trees
+        # (
+        #     params,
+        #     pt_spans,
+        #     pt_num_nodes,
+        #     nt_spans,
+        #     nt_num_nodes,
+        # ) = self.decoder.get_params(
+        #     node_features,
+        #     node_spans,
+        #     batch["tgt_ids"],
+        #     # impossible_span_mask=batch["tgt_masks"],
+        #     copy_position=copy_position,
+        # )
+        # pt_neq_task = self.amr_neq_pr_task(
+        #         pt_num_nodes,
+        #         nt_num_nodes,
+        #         self.decoder.pt_states,
+        #         self.decoder.nt_states,
+        #         x.device,
+        #     )
+        # params = compute_pr(
+        #         params, batch["tgt_lens"], batch["tgt_pt_neq_constraint"], pt_neq_task, get_param=True
+        #     )
+        # params = (
+        #     params,
+        #     pt_spans,
+        #     pt_num_nodes,
+        #     nt_spans,
+        #     nt_num_nodes,
+        # )
+        # print(pt_neq_task.calc_e(params[0], batch['tgt_lens'], batch["tgt_pt_neq_constraint"]))
+
         tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(
             batch["tgt_ids"],
             batch["tgt_lens"],
             node_features,
             node_spans,
+            # params=params,
             copy_position=copy_position,
             # impossible_span_mask=batch["tgt_masks"],
         )
@@ -173,15 +237,15 @@ class AMRV1Module(GeneralSeq2SeqModule):
             copied = []
             # for tgt_span, src_span in zip(tgt_spans_inst, aligned_spans_inst):
             for i in idx:
+                # only show token alignment
                 tgt_span = tgt_spans_inst[i]
                 src_span = aligned_spans_inst[i]
+                if tgt_span[1] != tgt_span[0]:
+                    continue
                 is_copy = False
                 # TODO check all use_copy. we should not assume (NT-1) is always COPY
                 #   because it may be only use PT COPY.
-                if (
-                    getattr(self.decoder, "use_copy")
-                    and batch.get("copy_nt") is not None
-                ):
+                if getattr(self.decoder, "use_copy"):
                     should_skip = False
                     for copied_span in copied:
                         if (
@@ -196,7 +260,7 @@ class AMRV1Module(GeneralSeq2SeqModule):
                         is_copy = (
                             tgt_span[2] // num_pt_spans == self.decoder.pt_states - 1
                         )
-                    else:
+                    elif batch.get("copy_nt") is not None:
                         is_copy = (
                             tgt_span[2] // num_nt_spans == self.decoder.nt_states - 1
                         )
@@ -255,18 +319,19 @@ class AMRV1Module(GeneralSeq2SeqModule):
         self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
         self.log("train/ppl", ppl, prog_bar=True)
         self.log("train/decoder", output["decoder"], prog_bar=True)
+        self.log("train/pt_neq_pr", output["pt_neq_pr"], prog_bar=True)
+        self.log("train/pt_eq_pr", output["pt_eq_pr"], prog_bar=True)
         self.log("train/encoder", output["encoder"], prog_bar=True)
-        if "reward" in output:
-            self.log("train/reward", output["reward"])
+        self.log("train/reward", output["reward"])
 
         if batch_idx == 0:
             self.eval()
             single_inst = {
-                key: value[:2]
+                key: value[:1]
                 for key, value in batch.items()
                 if key not in {"tgt_masks"}
             }
-            single_inst["tgt_masks"] = [item[:2] for item in batch["tgt_masks"]]
+            single_inst["tgt_masks"] = [item[:1] for item in batch["tgt_masks"]]
             trees = self.forward_visualize(single_inst)
             self.print("=" * 79)
             for src, tgt, alg in zip(
@@ -283,6 +348,8 @@ class AMRV1Module(GeneralSeq2SeqModule):
 
     def on_validation_epoch_start(self) -> None:
         super().on_validation_epoch_start()
+        self.val_metric.reset()
+        self.val_neq_e_metric.reset()
         if self.hparams.track_param_norm:
             self.log(
                 "stat/parser_norm",
@@ -306,14 +373,17 @@ class AMRV1Module(GeneralSeq2SeqModule):
         output = self(batch)
         loss = output["decoder"] + output["encoder"]
         self.val_metric(output["tgt_nll"], batch["tgt_lens"])
+        self.val_neq_e_metric(output["max_neq_e"])
         return {"loss": loss}
 
     def validation_epoch_end(self, outputs: List[Any]):
         ppl = self.val_metric.compute()  # get val accuracy from current epoch
         self.val_best_metric.update(ppl)
         best_ppl = self.val_best_metric.compute()
+        max_neq_e = self.val_neq_e_metric.compute()
         self.log("val/ppl", ppl, on_epoch=True, prog_bar=True)
-        self.log("val/ppl_best", best_ppl, on_epoch=True, prog_bar=True)
+        # self.log("val/ppl_best", best_ppl, on_epoch=True, prog_bar=True)
+        self.log("val/max_neq_e", max_neq_e, on_epoch=True, prog_bar=True)
         self.print("val/ppl", str(ppl.item()))
 
     @torch.inference_mode(False)
