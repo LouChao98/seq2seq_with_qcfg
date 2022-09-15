@@ -49,7 +49,6 @@ def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
         #     for item in factorized_constraint
         # ]
         cparams = task.build_constrained_params(params, lambdas, constraints)
-        # TODO we can cache grads in BP and reuse them
         target = (-(lambdas * b).sum(-1) + task.nll(cparams, lens)).sum()
         target.backward()
         if (lambdas.grad.abs() < 1e-5).all():

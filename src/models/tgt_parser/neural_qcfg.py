@@ -117,12 +117,13 @@ class NeuralQCFGTgtParser(TgtParserBase):
         vocab_pair: VocabularyPair,
         src_ids: torch.Tensor,
         src: List[List[str]],
+        **kwargs
     ):
         # if check_ppl=True, I will compute ppl for samples, return the one with minimum ppl
         # else, just return the one with the maximum score
 
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
-            node_features, spans
+            node_features, spans, **kwargs
         )
 
         max_len = 40
@@ -309,6 +310,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         x: Optional[torch.Tensor] = None,
         copy_position=None,  # (pt, nt)
         impossible_span_mask=None,
+        filtered_spans=None,  # list of spans
         ignore_src=False,
     ):
         if copy_position is None or not self.use_copy:
@@ -408,8 +410,64 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         # A->a
         terms = F.log_softmax(self.vocab_out(pt_emb), 2)
-        copy_nt = None
 
+        if filtered_spans is not None:
+            masks = []
+            inds = []
+            new_nt_spans = []
+            for spans, to_be_preserved in zip(nt_spans, filtered_spans):
+                new_span = []
+                mask = []
+                ind = []
+                for i, span in enumerate(spans):
+                    if span in to_be_preserved:
+                        new_span.append(span)
+                        mask.append(False)
+                        ind.append(i)
+                    else:
+                        mask.append(True)
+                new_nt_spans.append(new_span)
+                mask = torch.tensor(mask)
+                mask = (
+                    mask.unsqueeze(0).expand(self.nt_states, -1).contiguous().flatten()
+                )
+                masks.append(mask)
+                inds.append(torch.tensor(ind))
+            masks = pad_sequence(masks, batch_first=True).to(roots.device)
+            roots = roots.clone()
+            roots[masks] = self.neg_huge
+            rules[masks] = self.neg_huge
+            inds_ = pad_sequence(inds, batch_first=True).to(roots.device)
+            inds_ = inds_.unsqueeze(1)
+            _state_offset = (
+                torch.arange(self.nt_states, device=roots.device)[None, :, None]
+                * nt_num_nodes
+            )
+            inds = (_state_offset + inds_).view(batch_size, -1)
+            roots = roots.gather(1, inds)
+            rules = rules.gather(
+                1, inds[..., None, None].expand(-1, -1, nt + pt, nt + pt)
+            )
+            rules11 = rules[:, :, :nt, :nt]
+            rules12 = rules[:, :, :nt, nt:]
+            rules21 = rules[:, :, nt:, :nt]
+            rules22 = rules[:, :, nt:, nt:]
+            n = inds.shape[1]
+            rules11 = rules11.gather(
+                2, inds[:, None, :, None].expand(-1, n, -1, nt)
+            ).gather(3, inds[:, None, None, :].expand(-1, n, n, -1))
+            rules12 = rules12.gather(2, inds[:, None, :, None].expand(-1, n, -1, pt))
+            rules21 = rules21.gather(3, inds[:, None, None, :].expand(-1, n, pt, -1))
+            rules = torch.empty((batch_size, n, n + pt, n + pt), device=rules11.device)
+            rules[:, :, :n, :n] = rules11
+            rules[:, :, :n, n:] = rules12
+            rules[:, :, n:, :n] = rules21
+            rules[:, :, n:, n:] = rules22
+            nt_spans = new_nt_spans
+            nt_num_nodes = n // self.nt_states
+            nt_num_nodes_list = [len(item) for item in new_nt_spans]
+
+        copy_nt = None
         if x is not None:
             n = x.size(1)
             terms = terms.unsqueeze(1).expand(batch_size, n, pt, terms.size(2))

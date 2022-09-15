@@ -120,3 +120,7 @@ AMRNeqQCFGTasks = {
     NeuralQCFGTgtParser: AMRNeqQCFGPrTask,
     NeuralQCFGD1TgtParser: AMRNeqD1PrTask,
 }
+
+
+class AMREqQCFGPrTask(PrTask):
+    ...

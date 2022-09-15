@@ -19,6 +19,14 @@ def get_nn(dim, cpd_rank):
     )
 
 
+@torch.jit.script
+def normalize(t: torch.Tensor):
+    t = t - t.amax((-2, -1), keepdim=True)
+    t = t.exp()
+    t = t / (t.sum((-2, -1), keepdim=True) + 1e-9)
+    return t
+
+
 class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
     def __init__(self, cpd_rank, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -106,6 +114,17 @@ class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
             max_length=max_len,
         )
 
+        # preds = PCFG().sampled_decoding(
+        #     self.pcfg.get_pcfg_rules({**params}, self.nt_states),
+        #     nt_spans,
+        #     self.nt_states,
+        #     pt_spans,
+        #     self.pt_states,
+        #     num_samples=self.num_samples,
+        #     use_copy=self.use_copy,
+        #     max_length=max_len,
+        # )
+
         # expand copied spans and build copy_position
         preds_ = []
         copy_positions = []
@@ -158,7 +177,7 @@ class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
 
                     if len(expanded) > max_len:
                         assert False
-                    expanded_batch.append((expanded, inst[2]))
+                    expanded_batch.append(expanded)
                     copy_pts.append(copy_pt)
                     copy_nts.append(copy_nt)
                     copy_unks.append(copy_unk)
@@ -182,9 +201,7 @@ class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
                     zip(preds, copy_positions)
                 ):
                     to_keep = [1 < len(inst) <= 60 for inst in preds_one_inp]
-                    _ids = [
-                        inst[0] for inst, flag in zip(preds_one_inp, to_keep) if flag
-                    ]
+                    _ids = [inst for inst, flag in zip(preds_one_inp, to_keep) if flag]
                     # TODO
                     sort_id = list(range(len(_ids)))
                     sort_id.sort(key=lambda x: len(_ids[x]), reverse=True)
@@ -335,16 +352,15 @@ class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
             self.rijk_weight,
             F.leaky_relu(i),
             F.leaky_relu(j[:, :, None] + k[:, None, :]),
-        ).clone()
+        )  # softmax
 
-        block = rule_slr[..., :nt_num_nodes, :nt_num_nodes]
-        block /= block.sum((-2, -1), keepdim=True)
-        block = rule_slr[..., :nt_num_nodes, nt_num_nodes:]
-        block /= block.sum((-2, -1), keepdim=True)
-        block = rule_slr[..., nt_num_nodes:, :nt_num_nodes]
-        block /= block.sum((-2, -1), keepdim=True)
-        block = rule_slr[..., nt_num_nodes:, nt_num_nodes:]
-        block /= block.sum((-2, -1), keepdim=True)
+        new_slr = torch.empty_like(rule_slr)
+        nnn = nt_num_nodes
+        new_slr[..., :nnn, :nnn] = normalize(rule_slr[..., :nnn, :nnn])
+        new_slr[..., :nnn, nnn:] = normalize(rule_slr[..., :nnn, nnn:])
+        new_slr[..., nnn:, :nnn] = normalize(rule_slr[..., nnn:, :nnn])
+        new_slr[..., nnn:, nnn:] = normalize(rule_slr[..., nnn:, nnn:])
+        rule_slr = new_slr
 
         # ijk = i[:, :, None, None] + j[:, None, :, None] + k[:, None, None, :]
         # num_nodes = nt_num_nodes  # + pt_num_nodes
@@ -388,6 +404,7 @@ class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
 
         # A->a
         terms = self.vocab_out(pt_emb).log_softmax(-1)
+        terms = terms.view(batch_size, -1, terms.shape[-1])
 
         copy_nt = None
         if x is not None:
@@ -397,10 +414,12 @@ class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
             x_expand = x.unsqueeze(2).expand(batch_size, n, pt).unsqueeze(3)
             terms = torch.gather(terms, 3, x_expand).squeeze(3)
             if copy_position[0] is not None:
-                terms = terms.view(batch_size, n, self.pt_states, -1)
-                terms[
-                    :, :, -1, : copy_position[0].shape[1]
-                ] = self.neg_huge * ~copy_position[0].transpose(1, 2)
+                terms = terms.view(batch_size, n, self.pt_states, -1).clone()
+                # copy_position may be longer than terms
+                #  and shorter than terms because terms are not shrinked
+                #   when constructed on a subbatch
+                copy_m = copy_position[0][:, : terms.shape[-1]].transpose(1, 2)
+                terms[:, :, -1, : copy_m.shape[2]] = self.neg_huge * ~copy_m
                 terms = terms.view(batch_size, n, -1)
             if copy_position[1] is not None:
                 # mask=True will set to value
@@ -447,6 +466,7 @@ class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
                         )
                     )
                 copy_nt = copy_nt_
+
         params = {
             "term": terms,
             "root": roots,

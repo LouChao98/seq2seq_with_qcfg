@@ -7,9 +7,9 @@ from ._fn import diagonal, diagonal_copy_, stripe
 class TDStyleBase:
     def mbr_decoding(self, logZ, span_indicator, lens):
         batch, seq_len = span_indicator.shape[:2]
+        marginals = grad(logZ.sum(), [span_indicator])[0].detach()
         # to avoid some trivial corner cases.
         if seq_len >= 3:
-            marginals = grad(logZ.sum(), [span_indicator])[0].detach()
             # return self._cky_zero_order(marginals.detach(), lens)
             scores = marginals.sum((3, 4))
             spans = self._cky_zero_order(scores.detach(), lens)

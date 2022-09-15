@@ -6,7 +6,7 @@
 defaults:
   - override /datamodule: amr3
   - override /model: styleptb
-  - override /model/decoder: d1
+  - override /model/decoder: d1_flex
   - override /callbacks: default
   - override /logger: tensorboard #wandb
   - override /trainer: default

@@ -1,6 +1,9 @@
+import logging
 from typing import List, Tuple
 
 from nltk.tree import Tree
+
+log = logging.getLogger(__file__)
 
 
 def extract_parses(matrix, lengths, kbest=False, inc=0):

@@ -31,6 +31,10 @@ defaults:
 hydra:
   job:
     chdir: true
+  job_logging:
+    handlers:
+      console:
+        class: src.utils.log_utils.TqdmLoggingHandler
 
 # path to original working directory
 # hydra hijacks working directory by changing it to the new log directory

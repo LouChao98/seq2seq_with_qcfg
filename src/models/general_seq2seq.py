@@ -19,6 +19,7 @@ from src.utils.fn import (
     extract_parses,
     get_actions,
     get_tree,
+    report_ids_when_err,
 )
 from src.utils.metric import PerplexityMetric
 
@@ -99,7 +100,7 @@ class GeneralSeq2SeqModule(ModelBase):
             )
             if "state_dict" in state_dict:
                 state_dict = state_dict["state_dict"]
-            self.load_state_dict(state_dict)
+            self.load_state_dict(state_dict, strict=False)
         else:
             init_func = {
                 "xavier_uniform": nn.init.xavier_uniform_,
@@ -132,6 +133,7 @@ class GeneralSeq2SeqModule(ModelBase):
         x = self.encoder(x, src_lens)
         return x
 
+    @report_ids_when_err
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
@@ -150,6 +152,13 @@ class GeneralSeq2SeqModule(ModelBase):
             tgt_nll = self.decoder(
                 batch["tgt_ids"],
                 batch["tgt_lens"],
+                node_features,
+                node_spans,
+                copy_position=copy_position,
+            )
+
+        if tgt_nll.isnan().any():
+            p = self.decoder.get_params(
                 node_features,
                 node_spans,
                 copy_position=copy_position,
@@ -183,6 +192,7 @@ class GeneralSeq2SeqModule(ModelBase):
             "reward": -neg_reward.mean(),
         }
 
+    @report_ids_when_err
     def forward_visualize(self, batch, sample=False):
         # parse and annotate brackets on src and tgt
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
@@ -268,6 +278,7 @@ class GeneralSeq2SeqModule(ModelBase):
             "alignment": alignments,
         }
 
+    @report_ids_when_err
     def forward_inference(self, batch):
         # actually predict the target sequence
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
@@ -287,12 +298,13 @@ class GeneralSeq2SeqModule(ModelBase):
             batch["src"],
         )
 
+        # import numpy as np
         # tgt_nll = self.decoder(
         #     batch["tgt_ids"],
         #     batch["tgt_lens"],
         #     node_features,
         #     node_spans,
-        #     (batch.get('copy_token'), batch.get('copy_phrase')),
+        #     copy_position=(batch.get("copy_token"), batch.get("copy_phrase")),
         # )
         # tgt_ppl = np.exp(tgt_nll.detach().cpu().numpy() / batch["tgt_lens"])
 

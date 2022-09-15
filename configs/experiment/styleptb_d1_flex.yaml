@@ -5,8 +5,9 @@
 
 defaults:
   - override /datamodule: styleptb
-  - override /model: styleptb_fixedsrctree
-  - override /model/parser: naive
+  - override /model: styleptb
+  - override /model/tree_encoder: gnn
+  - override /model/decoder: d1_flex
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -15,17 +16,13 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb_fixedsrctree"
+name: "styleptb_${hydra:runtime.choices.model/decoder}"
 
-datamodule:
-  load_gold_tree: true
-  copy_mode: "token"
 model:
-  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb_fixedsrctree/2022-09-08_11-16-12/checkpoints/last.ckpt
-  parser:
-    mode: rightbranching
+  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb_d1_flex/2022-09-13_22-31-30/checkpoints/last.ckpt
   decoder:
-    rule_constraint_type: 0
+    check_ppl_batch_size: 2
+    cpd_rank: 128
 
 trainer:
   max_epochs: 50

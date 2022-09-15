@@ -21,7 +21,7 @@ def checkpoint(func):
 def weighted_random(cumsum):
     # cumsum = np.cumsum(w)
 
-    rdm_unif = np.random.rand() * cumsum[-1]
+    rdm_unif = np.random.rand() * (cumsum[-1] - 1e-8)
     ind = np.searchsorted(cumsum, rdm_unif, side="right").item()
     return ind
 
@@ -29,7 +29,7 @@ def weighted_random(cumsum):
 def weighted_random_v2(cumsum):
     if cumsum[-1] == 0:
         raise ValueError("Sampling on masked NT.")
-    rdm_unif = np.random.rand() * cumsum[-1]
+    rdm_unif = np.random.rand() * (cumsum[-1] - 1e-8)
     ind = np.searchsorted(cumsum, rdm_unif, side="right").item()
     return ind
 

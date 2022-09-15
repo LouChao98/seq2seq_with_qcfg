@@ -118,7 +118,7 @@ class PCFG:
                 if len(sample) > 0
             ]  # len=0 when max_actions is reached but no PT rules applied
             if len(sample_scores) == 0:
-                sample_scores = ([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)
+                sample_scores = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)]
             preds.append(sample_scores)
         return preds
 

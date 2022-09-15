@@ -128,9 +128,19 @@ if __name__ == "__main__":
     from torch_geometric.nn import GCN
 
     spans_inst = [(0, 6), (1, 3), (1, 2), (4, 5)]
-    spans = [spans_inst, spans_inst]
+    spans = [spans_inst[:], spans_inst[:]]
     x = torch.randn(2, 7, 5)
-
-    model = GeneralGNN(GCN(5, 3, 2, 11))
-    features, spans = model(spans, x)
+    # GCN(5, 3, 2, 11)
+    model = GeneralGNN(
+        {
+            "_target_": "torch_geometric.nn.GCN",
+            "in_channels": 5,
+            "hidden_channels": 3,
+            "num_layers": 2,
+            "out_channels": 11,
+        },
+        global_pooling=None,
+        dim=5,
+    )
+    features, spans = model(x, None, spans)
     print(spans)

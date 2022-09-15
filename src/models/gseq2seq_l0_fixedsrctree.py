@@ -2,37 +2,89 @@ import logging
 import operator
 from typing import Any, List, Optional
 
-from src.models.general_seq2seq import GeneralSeq2SeqModule
+import torch
+from hydra.utils import instantiate
+
+from src.models.node_filter.base import NodeFilterBase
 from src.utils.fn import annotate_snt_with_brackets, report_ids_when_err
+
+from .gseq2seq_fixedsrctree import GeneralSeq2SeqWithFixedSrcParserModule
 
 log = logging.getLogger(__file__)
 
 
-class GeneralSeq2SeqWithFixedSrcParserModule(GeneralSeq2SeqModule):
+class GSeq2SeqL0WithFixedSrcParserModule(GeneralSeq2SeqWithFixedSrcParserModule):
+    """PR. when decoding, constraint is NOT applied."""
+
+    def __init__(self, node_filter=None, **kwargs):
+        super().__init__(**kwargs)
+        self.save_hyperparameters(logger=False)
+
+    def setup_patch(self, stage=None, datamodule=None) -> None:
+        self.node_filter: NodeFilterBase = instantiate(
+            self.hparams.node_filter, dim=self.tree_encoder.get_output_dim()
+        )
+
+    @report_ids_when_err
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
         src_spans = self.parser.get_spans(batch)
 
         x = self.encode(batch)
-        node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
+        node_features_all, node_spans_all = self.tree_encoder(
+            x, src_lens, spans=src_spans
+        )
+
+        gates = self.node_filter(node_spans_all, node_features_all, x)
+        nf_samples, nf_logprob = self.node_filter.sample(gates)
+        filtered_spans = self.node_filter.apply_filter(
+            nf_samples, node_spans_all, node_features_all
+        )
+        src_logprob = nf_logprob
+        src_nll = -nf_logprob
 
         tgt_nll = self.decoder(
             batch["tgt_ids"],
             batch["tgt_lens"],
-            node_features,
-            node_spans,
+            node_features_all,
+            node_spans_all,
             copy_position=copy_position,
+            filtered_spans=filtered_spans,
         )
+
+        alpha = 0.1
+        with torch.no_grad():
+            # nf_samples_argmax, nf_logprob_argmax = self.node_filter.argmax(gates)
+            # filtered_spans_argmax = self.node_filter.apply_filter(
+            #     nf_samples_argmax, node_spans_all, node_features_all
+            # )
+            # tgt_nll_argmax = self.decoder(
+            #     batch["tgt_ids"],
+            #     batch["tgt_lens"],
+            #     node_features_all,
+            #     node_spans_all,
+            #     copy_position=copy_position,
+            #     filtered_spans=filtered_spans_argmax,
+            # )
+            num_samples = torch.stack([item.sum() for item in nf_samples])
+            # num_samples_argmax = torch.stack([item.sum() for item in nf_samples_argmax])
+            neg_reward = tgt_nll.detach() + alpha * num_samples
+            # neg_reward = (tgt_nll - tgt_nll_argmax).detach() + alpha * (
+            #     num_samples - num_samples_argmax
+            # )
+
+        if "copy_phrase" in batch:
+            copy_nt = batch["copy_phrase"]
 
         return {
             "decoder": tgt_nll.mean(),
             "tgt_nll": tgt_nll.mean(),
+            "encoder": (src_logprob * neg_reward).mean(),
+            "src_nll": src_nll.mean(),
         }
 
-    @report_ids_when_err
     def forward_visualize(self, batch, sample=False):
-        # parse and annotate brackets on src and tgt
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
 
@@ -45,12 +97,19 @@ class GeneralSeq2SeqWithFixedSrcParserModule(GeneralSeq2SeqModule):
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
+        gates = self.node_filter(node_spans, node_features, x)
+        nf_samples, nf_logprob = self.node_filter.argmax(gates)
+        filtered_spans = self.node_filter.apply_filter(
+            nf_samples, node_spans, node_features
+        )
+
         tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(
             batch["tgt_ids"],
             batch["tgt_lens"],
             node_features,
             node_spans,
             copy_position=copy_position,
+            filtered_spans=filtered_spans,
         )
         tgt_annotated = []
         for snt, tgt_spans_inst in zip(batch["tgt"], tgt_spans):
@@ -123,23 +182,31 @@ class GeneralSeq2SeqWithFixedSrcParserModule(GeneralSeq2SeqModule):
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
+        gates = self.node_filter(node_spans, node_features, x)
+        nf_samples, nf_logprob = self.node_filter.argmax(gates)
+        filtered_spans = self.node_filter.apply_filter(
+            nf_samples, node_spans, node_features
+        )
+
         y_preds = self.decoder.generate(
             node_features,
             node_spans,
             self.datamodule.vocab_pair,
             batch["src_ids"],
             batch["src"],
+            filtered_spans=filtered_spans,
         )
 
         return {"pred": [item[0] for item in y_preds]}
 
     def training_step(self, batch: Any, batch_idx: int):
         output = self(batch)
-        loss = output["decoder"]
+        loss = output["decoder"] + output["encoder"]
         ppl = self.train_metric(output["tgt_nll"], batch["tgt_lens"])
         self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
         self.log("train/ppl", ppl, prog_bar=True)
         self.log("train/decoder", output["decoder"], prog_bar=True)
+        self.log("train/encoder", output["encoder"], prog_bar=True)
 
         if batch_idx == 0:
             self.eval()
@@ -160,6 +227,6 @@ class GeneralSeq2SeqWithFixedSrcParserModule(GeneralSeq2SeqModule):
 
     def validation_step(self, batch: Any, batch_idx: int):
         output = self(batch)
-        loss = output["decoder"]
+        loss = output["decoder"] + output["encoder"]
         self.val_metric(output["tgt_nll"], batch["tgt_lens"])
         return {"loss": loss}

@@ -1,3 +1,4 @@
+import logging
 from enum import IntEnum
 from typing import Dict, List, Tuple
 
@@ -9,6 +10,8 @@ from torch.autograd import grad
 from ._fn import diagonal_copy_, stripe
 from ._utils import checkpoint, process_param_for_marginal, weighted_random_v2
 from .td_style_base import TDStyleBase
+
+log = logging.getLogger(__file__)
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
 
@@ -147,7 +150,10 @@ class D1PCFGFlex(TDStyleBase):
                 if value.ndim > 0:
                     value = value[:current_bsz]
                 mask = mask[:current_bsz]
-                x = torch.where(mask, (value - xn[..., None, None]).exp(), x)
+                x_real = (x + 1e-9).log() + xn[..., None, None]
+                x_real = torch.where(mask, value, x_real)
+                xn = x_real.flatten(2).max(-1)[0]
+                x = (x_real - xn[..., None, None]).exp()
 
             if marginal:
                 indicator = span_indicator_running.diagonal(w, 1, 2).movedim(-1, 1)
@@ -156,6 +162,7 @@ class D1PCFGFlex(TDStyleBase):
             if current_bsz - unfinished > 0:
                 final.insert(0, x[unfinished:current_bsz, :1])
                 final_normalizer.insert(0, xn[unfinished:current_bsz, :1])
+
             if unfinished > 0:
                 if current_bsz > unfinished:
                     x = x[:unfinished]
@@ -177,15 +184,27 @@ class D1PCFGFlex(TDStyleBase):
                 diagonal_copy_(left_s, left_x, w, s3=nt_spans)
                 diagonal_copy_(right_s, right_x, w, s3=nt_spans)
                 diagonal_copy_(normalizer, xn, w)
+
             if unfinished == 0:
                 break
+
         final = torch.cat(final, dim=0)
         final_normalizer = torch.cat(final_normalizer, dim=0)
         final = (final + 1e-9).squeeze(1).log() + root
         logZ = final.logsumexp((-2, -1)) + final_normalizer.squeeze(-1)
         if decode:
             spans = self.mbr_decoding(logZ, span_indicator, lens)
-            return spans
+            processed = []
+            for spans_inst in spans:
+                newspans = []
+                for left, right, label in spans_inst:
+                    symbol, alignment = divmod(label, max_spans)
+                    if left == right:
+                        newspans.append((left, right, symbol * pt_spans + alignment))
+                    else:
+                        newspans.append((left, right, symbol * nt_spans + alignment))
+                processed.append(newspans)
+            return processed
         if marginal:
             torch.set_grad_enabled(grad_state)
             cm.__exit__(None, None, None)
@@ -336,11 +355,12 @@ class D1PCFGFlex(TDStyleBase):
         H = self.threshold(H).cumsum(2)
         L = self.threshold(L).cumsum(2)
         R = self.threshold(R).cumsum(2)
+        n = SLR.shape[2]
         SLR = self.threshold(SLR)
-        SL1R1 = SLR[..., tgt_nt_states:, tgt_nt_states:].flatten(3).cumsum(3)
-        SL1R = SLR[..., tgt_nt_states:, :tgt_nt_states].flatten(3).cumsum(3)
-        SLR1 = SLR[..., :tgt_nt_states, tgt_nt_states:].flatten(3).cumsum(3)
-        SLR = SLR[..., :tgt_nt_states, :tgt_nt_states].flatten(3).cumsum(3)
+        SL1R1 = SLR[..., n:, n:].flatten(3).cumsum(3)
+        SL1R = SLR[..., n:, :n].flatten(3).cumsum(3)
+        SLR1 = SLR[..., :n, n:].flatten(3).cumsum(3)
+        SLR = SLR[..., :n, :n].flatten(3).cumsum(3)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()
@@ -354,6 +374,7 @@ class D1PCFGFlex(TDStyleBase):
 
         max_nt_spans = max(len(item) for item in src_nt_spans)
         max_pt_spans = max(len(item) for item in src_pt_spans)
+        assert n == max_nt_spans
 
         preds = []
         for b in range(len(terms)):
@@ -391,11 +412,11 @@ class D1PCFGFlex(TDStyleBase):
         rules_head: np.ndarray,  # nt x r, in normal space
         rules_left: np.ndarray,  # (nt+pt) x r, in normal space
         rules_right: np.ndarray,  # (nt+pt) x r, in normal space
-        rules_sl1r1: np.ndarray,  # r x src x src x src, in normal space
-        rules_sl1r: np.ndarray,  # r x src x src x src, in normal space
-        rules_slr1: np.ndarray,  # r x src x src x src, in normal space
-        rules_slr: np.ndarray,  # r x src x src x src, in normal space
-        roots: np.ndarray,  # nt, in normal space
+        rules_sl1r1: np.ndarray,
+        rules_sl1r: np.ndarray,
+        rules_slr1: np.ndarray,
+        rules_slr: np.ndarray,
+        roots: np.ndarray,
         nt_num_nodes: int,
         nt_states: int,
         pt_num_nodes: int,
@@ -411,10 +432,10 @@ class D1PCFGFlex(TDStyleBase):
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
 
-        for _ in range(num_samples):
+        for sidx in range(num_samples):
             try:
-                sample = weighted_random_v2(roots)
-                state, i = divmod(s, nt_states)
+                s = weighted_random_v2(roots)
+                state, i = divmod(s, nt_num_nodes)
                 nonterminals: List[Tuple[int, int]] = [(state, i)]
                 preterminals: List[int] = []
                 actions = 0
@@ -427,14 +448,14 @@ class D1PCFGFlex(TDStyleBase):
                     actions += 1
                     s, i = nonterminals.pop()
 
-                    if s > nt_states:
+                    if s >= nt_states:
                         preterminals.append((s - nt_states, i, False))
                         continue
                     if use_copy and s == COPY_NT:
                         preterminals.append((s, i, True))
                         continue
 
-                    r = weighted_random_v2(rules_head[s])
+                    r = weighted_random_v2(rules_head[s * nt_num_nodes + i])
                     left = weighted_random_v2(rules_left[r])
                     right = weighted_random_v2(rules_right[r])
 
@@ -483,7 +504,7 @@ class D1PCFGFlex(TDStyleBase):
                         terminals.append(i)
                         terminal_type.append(_COPY_PT)
                     else:
-                        sample = weighted_random_v2(terms[s])
+                        sample = weighted_random_v2(terms[s * pt_num_nodes + i])
                         if use_copy and sample == UNK:
                             # force <unk> tokens to copy
                             terminals.append(i)
@@ -493,11 +514,12 @@ class D1PCFGFlex(TDStyleBase):
                             terminal_type.append(_VOCAB)
             except ValueError as e:
                 if str(e) == "Sampling on masked NT.":
+                    log.warning("Sampling on masked NT.")
                     continue
                 else:
                     raise e
-            samples[i] = terminals
-            types[i] = terminal_type
+            samples[sidx] = terminals
+            types[sidx] = terminal_type
         return samples, types
 
     @staticmethod
@@ -544,20 +566,32 @@ class D1PCFGFlex(TDStyleBase):
             (TGT_NT * SRC_NT) + (TGT_PT * SRC_PT),
         )
         shape = rule11.shape
-        rule[:, :, : TGT_NT * SRC_NT, : TGT_NT * SRC_NT] = rule11.reshape(
-            shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+        rule[:, :, : TGT_NT * SRC_NT, : TGT_NT * SRC_NT] = (
+            rule11.reshape(
+                shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+            )
+            + 1e-9
         ).log()
         shape = rule12.shape
-        rule[:, :, : TGT_NT * SRC_NT, TGT_NT * SRC_NT :] = rule12.reshape(
-            shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+        rule[:, :, : TGT_NT * SRC_NT, TGT_NT * SRC_NT :] = (
+            rule12.reshape(
+                shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+            )
+            + 1e-9
         ).log()
         shape = rule21.shape
-        rule[:, :, TGT_NT * SRC_NT :, : TGT_NT * SRC_NT] = rule21.reshape(
-            shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+        rule[:, :, TGT_NT * SRC_NT :, : TGT_NT * SRC_NT] = (
+            rule21.reshape(
+                shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+            )
+            + 1e-9
         ).log()
         shape = rule22.shape
-        rule[:, :, TGT_NT * SRC_NT :, TGT_NT * SRC_NT :] = rule22.reshape(
-            shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+        rule[:, :, TGT_NT * SRC_NT :, TGT_NT * SRC_NT :] = (
+            rule22.reshape(
+                shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+            )
+            + 1e-9
         ).log()
         return {"term": params["term"], "rule": rule, "root": params["root"]}
 
@@ -576,7 +610,7 @@ def merge(y, z, y_normalizer, z_normalizer, slr):
     y = (y[:, :, :, :num] + 1e-9).log() + y_normalizer[..., None, None]
     z = (z[:, :, :, :num] + 1e-9).log() + z_normalizer[..., None, None]
     qnkrj = eq_qnkrj(y, z)
-    normalizer = qnkrj.flatten(2).max(-1)[0]
+    normalizer = qnkrj.flatten(2).max(-1)[0].clamp(0)
     qnkrj = (qnkrj - normalizer[..., None, None, None]).exp()
     x = torch.einsum("qnkrj,qrijk->qnri", qnkrj, slr)
     return x, normalizer
@@ -590,13 +624,17 @@ def merge2(y, z, y_normalizer, z_normalizer, sl1r, slr1):
     z = (z + 1e-9).log() + z_normalizer[..., None, None]
     qnkrj1 = eq_qnkrj(y[:, :, :1, :num_pt], z[:, :, :1, :num_nt])
     qnkrj3 = eq_qnkrj(y[:, :, -1:, :num_nt], z[:, :, -1:, :num_pt])
-    normalizer = torch.stack(
-        [
-            qnkrj1.flatten(2).max(-1)[0],
-            qnkrj3.flatten(2).max(-1)[0],
-        ],
-        dim=-1,
-    ).max(-1)[0]
+    normalizer = (
+        torch.stack(
+            [
+                qnkrj1.flatten(2).max(-1)[0],
+                qnkrj3.flatten(2).max(-1)[0],
+            ],
+            dim=-1,
+        )
+        .max(-1)[0]
+        .clamp(0)
+    )
     qnkrj1 = (qnkrj1 - normalizer[..., None, None, None]).exp()
     qnkrj3 = (qnkrj3 - normalizer[..., None, None, None]).exp()
     x1 = torch.einsum("qnkrj,qrijk->qnri", qnkrj1, sl1r)
@@ -614,14 +652,18 @@ def merge3(y, z, y_normalizer, z_normalizer, sl1r, slr1, slr):
     qnkrj1 = eq_qnkrj(y[:, :, :1, :num_pt], z[:, :, :1, :num_nt])
     qnkrj2 = eq_qnkrj(y[:, :, 1:-1, :num_nt], z[:, :, 1:-1, :num_nt])
     qnkrj3 = eq_qnkrj(y[:, :, -1:, :num_nt], z[:, :, -1:, :num_pt])
-    normalizer = torch.stack(
-        [
-            qnkrj1.flatten(2).max(-1)[0],
-            qnkrj2.flatten(2).max(-1)[0],
-            qnkrj3.flatten(2).max(-1)[0],
-        ],
-        dim=-1,
-    ).max(-1)[0]
+    normalizer = (
+        torch.stack(
+            [
+                qnkrj1.flatten(2).max(-1)[0],
+                qnkrj2.flatten(2).max(-1)[0],
+                qnkrj3.flatten(2).max(-1)[0],
+            ],
+            dim=-1,
+        )
+        .max(-1)[0]
+        .clamp(0)
+    )
     qnkrj1 = (qnkrj1 - normalizer[..., None, None, None]).exp()
     qnkrj2 = (qnkrj2 - normalizer[..., None, None, None]).exp()
     qnkrj3 = (qnkrj3 - normalizer[..., None, None, None]).exp()
@@ -633,7 +675,7 @@ def merge3(y, z, y_normalizer, z_normalizer, sl1r, slr1, slr):
 
 
 @checkpoint
-@torch.jit.script
+# @torch.jit.script
 def merge_h(y, z, y_normalizer, z_normalizer, slr, h):
     num = slr.shape[3]
     y = (y[:, :, :, :num] + 1e-9).log() + y_normalizer[..., None, None]

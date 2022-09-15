@@ -20,7 +20,9 @@ def stat(src_path):
 
     fig, axs = plt.subplots(1, 2)
     axs[0].bar([item[0] for item in cnt_num_en], [item[1] for item in cnt_num_en])
+    axs[0].set_title("num reentrancy of sentence")
     axs[1].bar([item[0] for item in cnt_degree], [item[1] for item in cnt_degree])
+    axs[1].set_title("num of degree of a reentrance")
     fig.savefig("stat.png", figsize=(18, 6))
 
 

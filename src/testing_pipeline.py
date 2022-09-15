@@ -1,4 +1,5 @@
 import os
+from gc import callbacks
 from typing import List
 
 import hydra
@@ -57,7 +58,16 @@ def test(config: DictConfig) -> None:
     log.info(f"Instantiating trainer <{config.trainer._target_}>")
     trainer: Trainer = hydra.utils.instantiate(config.trainer, logger=logger)
 
-    # Log hyperparameters
+    # Send some parameters from config to all lightning loggers
+    log.info("Logging hyperparameters!")
+    utils.log_hyperparameters(
+        config=config,
+        model=model,
+        datamodule=datamodule,
+        trainer=trainer,
+        logger=logger,
+        callbacks=[],
+    )
     trainer.logger.log_hyperparams({"ckpt_path": config.ckpt_path})
 
     log.info("Starting testing!")
