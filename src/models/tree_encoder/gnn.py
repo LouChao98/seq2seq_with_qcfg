@@ -43,11 +43,12 @@ class GeneralGNN(torch.nn.Module):
             spans_inst += [(i, i) for i in range(max(x[1] for x in spans_inst) + 1)]
             # spans_inst = [(i, j-1, l) for i, j, l in spans_inst]
             s, p = spans2tree(spans_inst)
-
             index = list(range(len(s)))
             index.sort(key=lambda x: (s[x][1] - s[x][0], s[x][0]))
+            inv_index = list(range(len(s)))
+            inv_index.sort(key=lambda x: index[x])
             s = [s[i] for i in index]
-            p = [p[i] for i in index]
+            p = [inv_index[p[i]] if p[i] >= 0 else -1 for i in index]
 
             spans.append(s)
             parents.append(p)

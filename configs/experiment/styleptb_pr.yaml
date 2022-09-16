@@ -21,6 +21,14 @@ model:
     num_samples: 10
     check_ppl_batch_size: 1
 
+    rule_constraint_method: pr
+    rule_constraint_method_args:
+      b: 2
+      lbound: 1e-3
+      rbound: 1e2
+      num_point: 6
+      num_iter: 5
+
 trainer:
   max_epochs: 50
   accumulate_grad_batches: 1
@@ -29,5 +37,9 @@ trainer:
 logger:
   wandb:
     project: "styleptb"
-    tags: ["pr"]
+    tags:
+      - "${hydra:runtime.choices.model/parser}"
+      - "${hydra:runtime.choices.model/tree_encoder}"
+      - "${hydra:runtime.choices.model/decoder}"
+      - pr
     offline: ${in_cluster:}

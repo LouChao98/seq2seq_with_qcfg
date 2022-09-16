@@ -477,9 +477,8 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 if copy_position[0] is not None:
                     # TODO sanity check: pt_spans begin with (0,0), (1,1) ... (n-1,n-1)
                     terms = terms.view(batch_size, n, self.pt_states, -1)
-                    terms[:, :, -1] = (
-                        0.1 * self.neg_huge * ~copy_position[0].transpose(1, 2)
-                    )
+                    copy_m = copy_position[0][:, : terms.shape[-1]].transpose(1, 2)
+                    terms[:, :, -1, : copy_m.shape[2]] = self.neg_huge * ~copy_m
                     terms = terms.view(batch_size, n, -1)
                 # mask=True will set to value
                 copy_nt = [

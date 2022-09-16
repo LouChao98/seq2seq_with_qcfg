@@ -36,4 +36,4 @@ logger:
       - "${hydra:runtime.choices.model/parser}"
       - "${hydra:runtime.choices.model/tree_encoder}"
       - "${hydra:runtime.choices.model/decoder}"
-    offline: ${in_cluster:}
+    offline: True #${in_cluster:}

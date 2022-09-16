@@ -208,9 +208,8 @@ class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
             terms = torch.gather(terms, 3, x_expand).squeeze(3)
             if copy_position[0] is not None:
                 terms = terms.view(batch_size, n, self.pt_states, -1)
-                terms[:, :, -1, : copy_position[0].shape[1]] = (
-                    0.1 * self.neg_huge * ~copy_position[0].transpose(1, 2)
-                )
+                copy_m = copy_position[0][:, : terms.shape[-1]].transpose(1, 2)
+                terms[:, :, -1, : copy_m.shape[2]] = self.neg_huge * ~copy_m
                 terms = terms.view(batch_size, n, -1)
             if copy_position[1] is not None:
                 # mask=True will set to value

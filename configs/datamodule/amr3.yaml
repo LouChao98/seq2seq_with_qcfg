@@ -1,11 +1,11 @@
 _target_: src.datamodules.penman_datamodule.PenmanDataModule
 
-# train_file: ${data_dir}/AMR/tdata_xfm/debug.txt
-# dev_file: ${data_dir}/AMR/tdata_xfm/debug.txt
-# test_file: ${data_dir}/AMR/tdata_xfm/debug.txt
-train_file: ${data_dir}/AMR/tdata_xfm/dev.txt.nowiki
-dev_file: ${data_dir}/AMR/tdata_xfm/dev.txt.nowiki
-test_file: ${data_dir}/AMR/tdata_xfm/dev.txt.nowiki
+train_file: ${data_dir}/AMR/tdata_xfm/debug.txt
+dev_file: ${data_dir}/AMR/tdata_xfm/debug.txt
+test_file: ${data_dir}/AMR/tdata_xfm/debug.txt
+# train_file: ${data_dir}/AMR/tdata_xfm/dev.toy.txt
+# dev_file: ${data_dir}/AMR/tdata_xfm/dev.toy.txt
+# test_file: ${data_dir}/AMR/tdata_xfm/dev.toy.txt
 
 copy_mode: "token"
 max_src_len: 32

@@ -5,6 +5,7 @@ from typing import Any, List, Optional
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
+from prettytable import PrettyTable
 from pytorch_lightning.profilers import PassThroughProfiler, SimpleProfiler
 from torch_scatter import scatter_mean
 from torch_struct.distributions import SentCFG
@@ -12,7 +13,7 @@ from torchmetrics import MaxMetric, MinMetric
 from transformers import AutoModel
 
 from src.models.base import ModelBase
-from src.models.posterior_regularization.amr import AMRNeqQCFGPrTask, AMRNeqQCFGTasks
+from src.models.posterior_regularization.amr import AMRNeqTasks
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.src_parser.base import SrcParserBase
 from src.models.tgt_parser.base import TgtParserBase
@@ -38,7 +39,7 @@ class AMRV1Module(GeneralSeq2SeqModule):
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
         super().setup(stage, datamodule)
-        self.amr_neq_pr_task = AMRNeqQCFGTasks[type(self.decoder)]
+        self.amr_neq_pr_task = AMRNeqTasks[type(self.decoder)]
         self.profiler = self.trainer.profiler or PassThroughProfiler()
 
     @report_ids_when_err
@@ -174,44 +175,57 @@ class AMRV1Module(GeneralSeq2SeqModule):
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         # show PRed trees
-        # (
-        #     params,
-        #     pt_spans,
-        #     pt_num_nodes,
-        #     nt_spans,
-        #     nt_num_nodes,
-        # ) = self.decoder.get_params(
-        #     node_features,
-        #     node_spans,
-        #     batch["tgt_ids"],
-        #     # impossible_span_mask=batch["tgt_masks"],
-        #     copy_position=copy_position,
-        # )
-        # pt_neq_task = self.amr_neq_pr_task(
-        #         pt_num_nodes,
-        #         nt_num_nodes,
-        #         self.decoder.pt_states,
-        #         self.decoder.nt_states,
-        #         x.device,
-        #     )
-        # params = compute_pr(
-        #         params, batch["tgt_lens"], batch["tgt_pt_neq_constraint"], pt_neq_task, get_param=True
-        #     )
-        # params = (
-        #     params,
-        #     pt_spans,
-        #     pt_num_nodes,
-        #     nt_spans,
-        #     nt_num_nodes,
-        # )
-        # print(pt_neq_task.calc_e(params[0], batch['tgt_lens'], batch["tgt_pt_neq_constraint"]))
+        (
+            params,
+            pt_spans,
+            pt_num_nodes,
+            nt_spans,
+            nt_num_nodes,
+        ) = self.decoder.get_params(
+            node_features,
+            node_spans,
+            batch["tgt_ids"],
+            # impossible_span_mask=batch["tgt_masks"],
+            copy_position=copy_position,
+        )
+        pt_neq_task = self.amr_neq_pr_task(
+            pt_num_nodes,
+            nt_num_nodes,
+            self.decoder.pt_states,
+            self.decoder.nt_states,
+            x.device,
+        )
+        print(
+            pt_neq_task.calc_e(
+                params, batch["tgt_lens"], batch["tgt_pt_neq_constraint"]
+            )
+        )
+        params = compute_pr(
+            params,
+            batch["tgt_lens"],
+            batch["tgt_pt_neq_constraint"],
+            pt_neq_task,
+            get_param=True,
+        )
+        params = (
+            params,
+            pt_spans,
+            pt_num_nodes,
+            nt_spans,
+            nt_num_nodes,
+        )
+        print(
+            pt_neq_task.calc_e(
+                params[0], batch["tgt_lens"], batch["tgt_pt_neq_constraint"]
+            )
+        )
 
         tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(
             batch["tgt_ids"],
             batch["tgt_lens"],
             node_features,
             node_spans,
-            # params=params,
+            params=params,
             copy_position=copy_position,
             # impossible_span_mask=batch["tgt_masks"],
         )
@@ -240,11 +254,7 @@ class AMRV1Module(GeneralSeq2SeqModule):
                 # only show token alignment
                 tgt_span = tgt_spans_inst[i]
                 src_span = aligned_spans_inst[i]
-                if tgt_span[1] != tgt_span[0]:
-                    continue
                 is_copy = False
-                # TODO check all use_copy. we should not assume (NT-1) is always COPY
-                #   because it may be only use PT COPY.
                 if getattr(self.decoder, "use_copy"):
                     should_skip = False
                     for copied_span in copied:
@@ -327,22 +337,38 @@ class AMRV1Module(GeneralSeq2SeqModule):
         if batch_idx == 0:
             self.eval()
             single_inst = {
-                key: value[:1]
+                key: value[:2]
                 for key, value in batch.items()
                 if key not in {"tgt_masks"}
             }
             single_inst["tgt_masks"] = [item[:1] for item in batch["tgt_masks"]]
             trees = self.forward_visualize(single_inst)
             self.print("=" * 79)
-            for src, tgt, alg in zip(
-                trees["src_tree"], trees["tgt_tree"], trees["alignment"]
+            for src, tgt, alg, neqs, eqs in zip(
+                trees["src_tree"],
+                trees["tgt_tree"],
+                trees["alignment"],
+                batch["tgt_pt_neq_constraint"],
+                batch["tgt_pt_eq_constraint"],
             ):
                 self.print("Src:", src)
                 self.print("Tgt:", tgt)
-                self.print(
-                    "Alg:\n"
-                    + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
-                )
+                table = PrettyTable(["Src token", "Tgt token", "Is copy", "Neq", "Eq"])
+
+                eq_flag = ["" for _ in alg]
+                for gidx, group in enumerate(eqs):
+                    gidx = str(gidx)
+                    for item in group.tolist():
+                        eq_flag[item] = gidx
+
+                neq_flag = ["1" if item > 0 else "" for item in neqs.tolist()]
+                # neq_flag += [''] * (len(alg) - len(neq_flag))  # NOTE implicitly trunc span
+
+                for (s, t, c), n, e in zip(alg, neq_flag, eq_flag):
+                    if t[0] == ":":
+                        continue
+                    table.add_row((s, t, c, n, e))
+                self.print("\n", table, sep="")
             self.train()
         return {"loss": loss}
 

@@ -5,10 +5,12 @@ import pprint
 import re
 import sys
 import warnings
+from pathlib import Path
 from typing import Optional
 
+import pytorch_lightning as pl
 from pytorch_lightning import Callback
-from pytorch_lightning.callbacks import TQDMProgressBar
+from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers.wandb import WandbLogger
 from tqdm import tqdm
 
@@ -113,3 +115,21 @@ class CustomWandbLogger(WandbLogger):
             if os.path.exists(fname):
                 wandb.save(fname)
         return super().finalize(status)
+
+
+class PeriodicCheckpoint(ModelCheckpoint):
+    def __init__(self, every: int, **kwargs):
+        super().__init__(save_top_k=-1, every_n_train_steps=1, **kwargs)
+        self.every = every
+
+    def on_train_batch_end(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule, *args, **kwargs
+    ):
+        if pl_module.global_step % self.every == 0:
+            assert self.dirpath is not None
+            current = Path(self.dirpath) / f"latest-{pl_module.global_step}.ckpt"
+            prev = (
+                Path(self.dirpath) / f"latest-{pl_module.global_step - self.every}.ckpt"
+            )
+            trainer.save_checkpoint(current)
+            prev.unlink(missing_ok=True)
