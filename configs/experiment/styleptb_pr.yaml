@@ -23,11 +23,12 @@ model:
 
     rule_constraint_method: pr
     rule_constraint_method_args:
-      b: 2
+      b: 1
       lbound: 1e-3
       rbound: 1e2
       num_point: 6
       num_iter: 5
+    rule_constraint_type: 4
 
 trainer:
   max_epochs: 50

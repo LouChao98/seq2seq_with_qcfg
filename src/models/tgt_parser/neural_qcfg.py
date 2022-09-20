@@ -68,6 +68,14 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         self.reset_parameters()
 
+        self.get_rules_mask_func = {
+            1: self.get_rules_mask1,
+            2: self.get_rules_mask2,
+            # 3: self.get_rules_mask3,
+            4: self.get_rules_mask4,
+            40: self.get_rules_mask4,
+        }
+
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.src_nt_emb.data)
         nn.init.xavier_uniform_(self.src_pt_emb.data)
@@ -391,22 +399,16 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         constraint_mask = None
         if self.rule_constraint_type > 0:
-            if self.rule_constraint_type == 1:
-                constraint_mask = self.get_rules_mask1(
+            constraint_mask = self.get_rules_mask_func[self.rule_constraint_type](
+                batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
+            )
+            if self.rule_constraint_type == 4:
+                cm2 = self.get_rules_mask1(
                     batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
                 )
-            elif self.rule_constraint_type == 2:
-                constraint_mask = self.get_rules_mask2(
-                    batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
-                )
+                rules[~cm2] = self.neg_huge
             if self.rule_constraint_method == "hard":
                 rules[~constraint_mask] = self.neg_huge
-
-        # rules = (
-        #     rules.view(batch_size, nt, (nt + pt) ** 2)
-        #     .log_softmax(2)
-        #     .view(batch_size, nt, nt + pt, nt + pt)
-        # )
 
         # A->a
         terms = F.log_softmax(self.vocab_out(pt_emb), 2)
@@ -595,9 +597,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         )
 
     def get_pr_term(self, params, lens):
-        if self.rule_constraint_type in (1, 2, 3):
-            return self.get_pr_term_by_line_search(params, lens)
-        raise NotImplementedError
+        return self.get_pr_term_by_line_search(params, lens)
 
     def get_pr_term_by_line_search(self, params, lens):
         # E[constraint] <= b, constraint_mask 1=allow
@@ -860,4 +860,51 @@ class NeuralQCFGTgtParser(TgtParserBase):
                             nt_ptpt[b, :, i, :, j, :, k].fill_(True)
                             nt_ptpt[b, :, i, :, k, :, j].fill_(True)
 
+        return node_mask.view(batch_size, nt, nt + pt, nt + pt)
+
+    def get_rules_mask3(
+        self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
+    ):
+        raise NotImplementedError
+
+    def get_rules_mask4(
+        self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
+    ):
+        # for pr, penalty i=j=k
+        nt = nt_num_nodes * self.nt_states
+        pt = pt_num_nodes * self.pt_states
+        nt_node_mask = torch.ones(batch_size, nt_num_nodes, nt_num_nodes)
+        pt_node_mask = torch.ones(batch_size, nt_num_nodes, pt_num_nodes)
+
+        for b, nt_span in enumerate(nt_spans):
+            for i, _ in enumerate(nt_span):
+                nt_node_mask[b, i, i] = 0.0
+
+        nt_node_mask = (
+            nt_node_mask[:, None, :, None, :]
+            .expand(
+                batch_size,
+                self.nt_states,
+                nt_num_nodes,
+                self.nt_states,
+                nt_num_nodes,
+            )
+            .contiguous()
+        )
+        pt_node_mask = (
+            pt_node_mask[:, None, :, None, :]
+            .expand(
+                batch_size,
+                self.nt_states,
+                nt_num_nodes,
+                self.pt_states,
+                pt_num_nodes,
+            )
+            .contiguous()
+        )
+
+        nt_node_mask = nt_node_mask.view(batch_size, nt, nt)
+        pt_node_mask = pt_node_mask.view(batch_size, nt, pt)
+        node_mask = torch.cat([nt_node_mask, pt_node_mask], 2).to(device)
+        node_mask = node_mask.unsqueeze(3) + node_mask.unsqueeze(2)
         return node_mask.view(batch_size, nt, nt + pt, nt + pt)

@@ -45,7 +45,8 @@ class D1PCFG(TDStyleBase):
         # self.eq_qnri = tse.compile_equation("qnkrj,qrijk->qnri")
         # self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
         # self.eq_tor = tse.compile_equation("xlpi,xrp->xlir")
-        self.threshold = torch.nn.Threshold(1e-3, 0)
+        # self.threshold = torch.nn.Threshold(1e-3, 0)
+        self.threshold = torch.nn.Identity()
 
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
         # if not decode and not marginal and params.get("copy_nt") is None:
@@ -314,9 +315,7 @@ class D1PCFG(TDStyleBase):
             params = {k: process_param_for_marginal(v) for k, v in params.items()}
         if not isinstance(lens, torch.Tensor):
             lens = torch.tensor(lens)
-        assert (
-            lens[1:] <= lens[:-1]
-        ).all(), "You should sort samples by length descently."
+        assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
 
         terms = params["term"]  # (batch, seq_len, PT)
         root = params["root"]  # (batch, NT)
@@ -504,10 +503,10 @@ class D1PCFG(TDStyleBase):
             sample_scores = [
                 (sample, type_, score)
                 for sample, type_, score in zip(samples, types, scores)
-                if len(sample) > 0
+                if len(sample) > 1
             ]  # len=0 when max_actions is reached but no PT rules applied
             if len(sample_scores) == 0:
-                sample_scores = ([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)
+                sample_scores = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)]
             preds.append(sample_scores)
         return preds
 

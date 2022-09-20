@@ -219,7 +219,7 @@ class EmptyModule(nn.Module):
         super().__init__()
         self.input_dim = input_dim
 
-    def forward(self, x):
+    def forward(self, x, lens):
         return x
 
     def get_output_dim(self):

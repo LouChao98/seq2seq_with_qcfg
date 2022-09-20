@@ -30,4 +30,4 @@ scheduler:
   monitor: val/ppl
   args:
     _target_: src.utils.scheduler.get_exponential_lr_scheduler
-    gamma: 0.75**(1/5000)
+    gamma: 0.75**(1/10000)

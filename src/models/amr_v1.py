@@ -15,9 +15,6 @@ from transformers import AutoModel
 from src.models.base import ModelBase
 from src.models.posterior_regularization.amr import AMRNeqTasks
 from src.models.posterior_regularization.pr import compute_pr
-from src.models.src_parser.base import SrcParserBase
-from src.models.tgt_parser.base import TgtParserBase
-from src.models.tree_encoder.base import TreeEncoderBase
 from src.utils.fn import (
     annotate_snt_with_brackets,
     extract_parses,
@@ -122,7 +119,9 @@ class AMRV1Module(GeneralSeq2SeqModule):
         else:
             pt_neq_pr, pt_eq_pr, pr_terms = 0.0, 0.0, 0.0
             pt_neq_e = pt_neq_task.calc_e(
-                params, batch["tgt_lens"], batch["tgt_pt_neq_constraint"]
+                params,
+                batch["tgt_lens"],
+                pt_neq_task.process_constraint(batch["tgt_pt_neq_constraint"]),
             )
             max_neq_e = pt_neq_e.max()
 
@@ -195,11 +194,11 @@ class AMRV1Module(GeneralSeq2SeqModule):
             self.decoder.nt_states,
             x.device,
         )
-        print(
-            pt_neq_task.calc_e(
-                params, batch["tgt_lens"], batch["tgt_pt_neq_constraint"]
-            )
-        )
+        # print(
+        #     pt_neq_task.calc_e(
+        #         params, batch["tgt_lens"], pt_neq_task.process_constraint(batch["tgt_pt_neq_constraint"])
+        #     )
+        # )
         params = compute_pr(
             params,
             batch["tgt_lens"],
@@ -216,7 +215,9 @@ class AMRV1Module(GeneralSeq2SeqModule):
         )
         print(
             pt_neq_task.calc_e(
-                params[0], batch["tgt_lens"], batch["tgt_pt_neq_constraint"]
+                params[0],
+                batch["tgt_lens"],
+                pt_neq_task.process_constraint(batch["tgt_pt_neq_constraint"]),
             )
         )
 

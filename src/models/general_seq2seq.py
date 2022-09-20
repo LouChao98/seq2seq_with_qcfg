@@ -54,7 +54,10 @@ class GeneralSeq2SeqModule(ModelBase):
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
         super().setup(stage)
+
         self.profiler = self.trainer.profiler or PassThroughProfiler()
+        if not isinstance(self.profiler, PassThroughProfiler):
+            log.warning("Profiler is enabled.")
 
         assert datamodule is not None or self.trainer.datamodule is not None
         self.datamodule = datamodule or self.trainer.datamodule
@@ -112,7 +115,7 @@ class GeneralSeq2SeqModule(ModelBase):
             for name, param in self.named_parameters():
                 if param.dim() > 1:
                     init_func(param)
-                else:
+                elif "norm" not in name:
                     nn.init.zeros_(param)
 
     def setup_patch(self, stage: Optional[str] = None, datamodule=None):
@@ -152,13 +155,6 @@ class GeneralSeq2SeqModule(ModelBase):
             tgt_nll = self.decoder(
                 batch["tgt_ids"],
                 batch["tgt_lens"],
-                node_features,
-                node_spans,
-                copy_position=copy_position,
-            )
-
-        if tgt_nll.isnan().any():
-            p = self.decoder.get_params(
                 node_features,
                 node_spans,
                 copy_position=copy_position,
@@ -321,26 +317,27 @@ class GeneralSeq2SeqModule(ModelBase):
         if "reward" in output:
             self.log("train/reward", output["reward"])
 
-        if batch_idx == 0:
-            self.eval()
-            single_inst = {key: value[:2] for key, value in batch.items()}
-            trees = self.forward_visualize(single_inst)
-            self.print("=" * 79)
-            for src, tgt, alg in zip(
-                trees["src_tree"], trees["tgt_tree"], trees["alignment"]
-            ):
-                self.print("Src:", src)
-                self.print("Tgt:", tgt)
-                self.print(
-                    "Alg:\n"
-                    + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
-                )
-            self.train()
+        # if batch_idx == 0:
+        #     self.eval()
+        #     single_inst = {key: value[:2] for key, value in batch.items()}
+        #     trees = self.forward_visualize(single_inst)
+        #     self.print("=" * 79)
+        #     for src, tgt, alg in zip(
+        #         trees["src_tree"], trees["tgt_tree"], trees["alignment"]
+        #     ):
+        #         self.print("Src:", src)
+        #         self.print("Tgt:", tgt)
+        #         self.print(
+        #             "Alg:\n"
+        #             + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
+        #         )
+        #     self.train()
         return {"loss": loss}
 
     def on_validation_epoch_start(self) -> None:
         super().on_validation_epoch_start()
         self.val_metric.reset()
+        self.test_metric.reset()
         if self.hparams.track_param_norm:
             self.log(
                 "stat/parser_norm",
@@ -364,6 +361,24 @@ class GeneralSeq2SeqModule(ModelBase):
         output = self(batch)
         loss = output["decoder"] + output["encoder"]
         self.val_metric(output["tgt_nll"], batch["tgt_lens"])
+
+        if (self.current_epoch + 1) % 20 == 0:
+            self.test_step(batch, batch_idx=None)
+
+        # if batch_idx < 3:
+        #     single_inst = {key: value[:2] for key, value in batch.items()}
+        #     trees = self.forward_visualize(single_inst)
+        #     self.print("=" * 79)
+        #     for src, tgt, alg in zip(
+        #         trees["src_tree"], trees["tgt_tree"], trees["alignment"]
+        #     ):
+        #         self.print("Src:", src)
+        #         self.print("Tgt:", tgt)
+        #         self.print(
+        #             "Alg:\n"
+        #             + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
+        #         )
+
         return {"loss": loss}
 
     def validation_epoch_end(self, outputs: List[Any]):
@@ -372,7 +387,16 @@ class GeneralSeq2SeqModule(ModelBase):
         best_ppl = self.val_best_metric.compute()
         self.log("val/ppl", ppl, on_epoch=True, prog_bar=True)
         self.log("val/ppl_best", best_ppl, on_epoch=True, prog_bar=True)
+        self.print("val/epoch", str(self.current_epoch + 1))
         self.print("val/ppl", str(ppl.item()))
+        if (self.current_epoch + 1) % 20 == 0:
+            acc = self.test_metric.compute()
+            self.log_dict({"val/" + k: v for k, v in acc.items()})
+            self.print(acc)
+
+    def on_test_epoch_start(self) -> None:
+        self.test_metric.reset()
+        return super().on_test_epoch_start()
 
     @torch.inference_mode(False)
     def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = None):
@@ -385,19 +409,19 @@ class GeneralSeq2SeqModule(ModelBase):
 
         self.test_metric(preds, targets)
 
-        if batch_idx == 0:
-            single_inst = {key: value[:2] for key, value in batch.items()}
-            trees = self.forward_visualize(single_inst)
-            self.print("=" * 79)
-            for src, tgt, alg in zip(
-                trees["src_tree"], trees["tgt_tree"], trees["alignment"]
-            ):
-                self.print("Src:", src)
-                self.print("Tgt:", tgt)
-                self.print(
-                    "Alg:\n"
-                    + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
-                )
+        # if batch_idx == 0:
+        #     single_inst = {key: value[:2] for key, value in batch.items()}
+        #     trees = self.forward_visualize(single_inst)
+        #     self.print("=" * 79)
+        #     for src, tgt, alg in zip(
+        #         trees["src_tree"], trees["tgt_tree"], trees["alignment"]
+        #     ):
+        #         self.print("Src:", src)
+        #         self.print("Tgt:", tgt)
+        #         self.print(
+        #             "Alg:\n"
+        #             + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
+        #         )
 
         return {"preds": preds, "targets": targets, "id": batch["id"]}
 

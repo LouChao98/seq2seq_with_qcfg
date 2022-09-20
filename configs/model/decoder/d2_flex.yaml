@@ -1,4 +1,4 @@
-_target_: src.models.tgt_parser.neural_qcfg_d1_flex.NeuralQCFGD1FlexTgtParser
+_target_: src.models.tgt_parser.neural_qcfg_d2_flex.NeuralQCFGD2FlexTgtParser
 num_layers: 3
 dim: 512
 nt_states: 8 # src_nt_states in origin impl
@@ -8,6 +8,5 @@ use_copy: true
 num_samples: 100
 check_ppl: true
 cpd_rank: 64
-direction: 0
 nt_span_range: [2, 1000]
 pt_span_range: [1, 1]

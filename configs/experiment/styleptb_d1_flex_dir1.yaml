@@ -23,6 +23,7 @@ model:
   decoder:
     check_ppl_batch_size: 2
     cpd_rank: 128
+    direction: 1
 
 trainer:
   max_epochs: 100

@@ -20,7 +20,7 @@ class AMRNeqQCFGPrTask(PrTask):
 
     def get_init_lambdas(self, batch_size):
         return torch.full(
-            (batch_size, self.num_src_pt), 5.0, device=self.device, requires_grad=True
+            (batch_size, self.num_src_pt), 2.0, device=self.device, requires_grad=True
         )
 
     def process_constraint(self, constraints):
@@ -69,7 +69,15 @@ class AMRNeqQCFGPrTask(PrTask):
         )
         return ce
 
-    def calc_e(self, dist, constraints):
+    def calc_e(self, params, lens, constraints):
+        params = (
+            params["term"],
+            params["rule"],
+            params["root"],
+            params["copy_nt"],
+        )
+        dist = SentCFG(params, lens)
+
         m = dist.marginals[0]
         return (
             m.view(*m.shape[:2], self.num_tgt_pt, self.num_src_pt)
@@ -112,7 +120,7 @@ class AMRNeqD1PrTask(AMRNeqQCFGPrTask):
         # print("entropy of label dist", - (m * (m + 1e-9).log()).sum(-1))
         return (
             m.view(*m.shape[:2], self.num_tgt_pt, self.num_src_pt)
-            * self.process_constraint(constraints).unsqueeze(2)
+            * constraints.unsqueeze(2)
         ).sum((1, 2))
 
 

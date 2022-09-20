@@ -19,22 +19,20 @@ def get_nn(dim, cpd_rank):
     )
 
 
-@torch.jit.script
 def normalize(t: torch.Tensor):
-    t = t - t.amax((-2, -1), keepdim=True)
-    t = t.exp()
-    t = t / (t.sum((-2, -1), keepdim=True) + 1e-9)
-    return t
+    shape = t.shape
+    return t.flatten(-2).softmax(-1).view(shape)
 
 
 class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
-    def __init__(self, cpd_rank, *args, **kwargs):
+    def __init__(self, cpd_rank, direction, *args, **kwargs):
         super().__init__(*args, **kwargs)
         assert self.nt_states == self.pt_states
         dim = self.dim
         num_layers = self.num_layers
         self.cpd_rank = cpd_rank
-        self.pcfg = D1PCFGFlex(self.nt_states, self.pt_states)
+        self.direction = direction
+        self.pcfg = D1PCFGFlex(self.nt_states, self.pt_states, direction)
         # self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
         # self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
         # self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)
@@ -202,7 +200,6 @@ class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
                 ):
                     to_keep = [1 < len(inst) <= 60 for inst in preds_one_inp]
                     _ids = [inst for inst, flag in zip(preds_one_inp, to_keep) if flag]
-                    # TODO
                     sort_id = list(range(len(_ids)))
                     sort_id.sort(key=lambda x: len(_ids[x]), reverse=True)
                     _ids = [_ids[i] for i in sort_id]
@@ -337,12 +334,8 @@ class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
         rule_head = self.ai_r_nn(
             self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))
         ).softmax(-1)
-        rule_left = (
-            self.r_b_nn(self.rule_mlp_left(state_emb)).transpose(1, 2).softmax(-1)
-        )
-        rule_right = (
-            self.r_c_nn(self.rule_mlp_right(state_emb)).transpose(1, 2).softmax(-1)
-        )
+        rule_left = self.r_b_nn(self.rule_mlp_left(state_emb)).transpose(1, 2)
+        rule_right = self.r_c_nn(self.rule_mlp_right(state_emb)).transpose(1, 2)
 
         i = self.root_mlp_i(nt_node_emb)
         j = self.root_mlp_j(node_emb)
@@ -354,13 +347,37 @@ class NeuralQCFGD1FlexTgtParser(NeuralQCFGTgtParser):
             F.leaky_relu(j[:, :, None] + k[:, None, :]),
         )  # softmax
 
-        new_slr = torch.empty_like(rule_slr)
-        nnn = nt_num_nodes
-        new_slr[..., :nnn, :nnn] = normalize(rule_slr[..., :nnn, :nnn])
-        new_slr[..., :nnn, nnn:] = normalize(rule_slr[..., :nnn, nnn:])
-        new_slr[..., nnn:, :nnn] = normalize(rule_slr[..., nnn:, :nnn])
-        new_slr[..., nnn:, nnn:] = normalize(rule_slr[..., nnn:, nnn:])
-        rule_slr = new_slr
+        if self.direction == 0:
+            rule_left = rule_left.softmax(-1)
+            rule_right = rule_right.softmax(-1)
+            new_slr = torch.empty_like(rule_slr)
+            nnn = nt_num_nodes
+            new_slr[..., :nnn, :nnn] = normalize(rule_slr[..., :nnn, :nnn])
+            new_slr[..., :nnn, nnn:] = normalize(rule_slr[..., :nnn, nnn:])
+            new_slr[..., nnn:, :nnn] = normalize(rule_slr[..., nnn:, :nnn])
+            new_slr[..., nnn:, nnn:] = normalize(rule_slr[..., nnn:, nnn:])
+            rule_slr = new_slr
+        else:
+            new_left = torch.empty_like(rule_left)
+            new_left[..., : self.nt_states] = rule_left[..., : self.nt_states].softmax(
+                -1
+            )
+            new_left[..., self.nt_states :] = rule_left[..., self.nt_states :].softmax(
+                -1
+            )
+            rule_left = new_left
+
+            new_right = torch.empty_like(rule_right)
+            new_right[..., : self.nt_states] = rule_right[
+                ..., : self.nt_states
+            ].softmax(-1)
+            new_right[..., self.nt_states :] = rule_right[
+                ..., self.nt_states :
+            ].softmax(-1)
+            rule_right = new_right
+
+            shape = rule_slr.shape
+            rule_slr = rule_slr.flatten(3).softmax(-1).view(shape).clone()
 
         # ijk = i[:, :, None, None] + j[:, None, :, None] + k[:, None, None, :]
         # num_nodes = nt_num_nodes  # + pt_num_nodes

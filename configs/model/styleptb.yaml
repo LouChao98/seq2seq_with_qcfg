@@ -25,9 +25,10 @@ optimizer:
     eps: 1.0e-8
 
 scheduler:
-  interval: step
-  frequency: 1
-  monitor: val/ppl
-  args:
-    _target_: src.utils.scheduler.get_exponential_lr_scheduler
-    gamma: 0.75**(1/5000)
+  ~
+  # interval: step
+  # frequency: 1
+  # monitor: val/ppl
+  # args:
+  #   _target_: src.utils.scheduler.get_exponential_lr_scheduler
+  #   gamma: 0.75**(1/10000)

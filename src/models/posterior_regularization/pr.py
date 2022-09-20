@@ -17,16 +17,28 @@ class PrTask:
     def nll(self, params, lens):
         ...
 
-    def calc_e(self, dist, constraints):
+    def calc_e(self, params, lens, constraints):
         ...
 
     def ce(self, q_params, p_params, lens):
         ...
 
+    def get_dist(self, *args, **kwargs):
+        ...
+
 
 def compute_pr(params, lens, constraints, task: PrTask, get_param=False, **kwargs):
     constraints = task.process_constraint(constraints)
+
+    batch_size = len(lens)
+    e = task.calc_e(params, lens, constraints)
+    if (e < task.get_b(batch_size)).all():
+        if get_param:  # do nothing
+            return params
+        return torch.zeros(batch_size, device=constraints.device)
+
     lambdas = pgd_solver(params, lens, constraints, task, **kwargs).detach()
+    # print('Lambda', lambdas)
     cparams = task.build_constrained_params(params, lambdas, constraints)
     if get_param:
         return cparams
@@ -34,7 +46,7 @@ def compute_pr(params, lens, constraints, task: PrTask, get_param=False, **kwarg
 
 
 def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
-    num_iter = kwargs.get("num_iter", 3)
+    num_iter = kwargs.get("num_iter", 10)
 
     batch_size = len(lens)
     lambdas = task.get_init_lambdas(batch_size)
@@ -51,7 +63,7 @@ def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
         cparams = task.build_constrained_params(params, lambdas, constraints)
         target = (-(lambdas * b).sum(-1) + task.nll(cparams, lens)).sum()
         target.backward()
-        if (lambdas.grad.abs() < 1e-5).all():
+        if (lambdas.grad.abs() < 1e-4).all():
             break
         with torch.no_grad():
             # maximize target
@@ -71,5 +83,5 @@ def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
             lambdas += step_size * lambdas.grad
             lambdas.clamp_(0)
             lambdas.grad.zero_()
-
+    # print(itidx)
     return lambdas

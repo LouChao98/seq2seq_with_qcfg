@@ -3,6 +3,7 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence
 
 from src.utils.fn import spans2tree
@@ -15,7 +16,7 @@ class TreeLSTM(nn.Module):
         super(TreeLSTM, self).__init__()
         self.in_dim = in_dim
         self.mem_dim = mem_dim
-        self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
         self.first_layer = first_layer
         self.comb_method = comb_method
         self.iou_w = nn.Linear(self.mem_dim, 3 * self.mem_dim, bias=False)
@@ -113,47 +114,19 @@ class TreeLSTM(nn.Module):
         iou = self.iou_w(batch_ph) + self.iou_l(batch_lh) + self.iou_r(batch_rh)
 
         i, o, u = torch.split(iou, iou.size(1) // 3, dim=1)
-        # i = F.dropout(F.sigmoid(i + self.bi), p=self.dropout)
-        # o = F.dropout(F.sigmoid(o + self.bo), p=self.dropout)
-        # u = F.dropout(F.sigmoid(u + self.bu), p=self.dropout)
+        i = self.dropout(F.sigmoid(i))
+        o = self.dropout(F.sigmoid(o))
+        u = self.dropout(F.tanh(u))
 
-        i = F.dropout(F.sigmoid(i), p=self.dropout)
-        o = F.dropout(F.sigmoid(o), p=self.dropout)
-        u = F.dropout(F.tanh(u), p=self.dropout)
-
-        # logging.info(i)
-        # logging.info(o)
-        # logging.info(u)
-        #
-        # check = int((i != i).sum())
-        # if (check > 0):
-        #     logging.info("tree layer i contains Nan")
-        # else:
-        #     logging.info("tree layer i does not contain Nan, it might be other problem")
-        #
-        # check = int((o != o).sum())
-        # if (check > 0):
-        #     logging.info("tree layer o contains Nan")
-        # else:
-        #     logging.info("tree layer o does not contain Nan, it might be other problem")
-        #
-        # check = int((u != u).sum())
-        # if (check > 0):
-        #     logging.info("tree layer u contains Nan")
-        # else:
-        #     logging.info("tree layer u does not contain Nan, it might be other problem")
-
-        fl = F.dropout(
+        fl = self.dropout(
             F.sigmoid(
                 self.w_fl(batch_ph) + self.u_fl_l(batch_lh) + self.u_fl_r(batch_rh)
-            ),
-            p=self.dropout,
+            )
         )
-        fr = F.dropout(
+        fr = self.dropout(
             F.sigmoid(
                 self.w_fl(batch_ph) + self.u_fr_l(batch_lh) + self.u_fr_r(batch_rh)
-            ),
-            p=self.dropout,
+            )
         )
 
         # check = int((fl != fl).sum())
@@ -187,21 +160,19 @@ class TreeLSTM(nn.Module):
         iou = self.iou_w(batch_rh) + self.iou_l(batch_lh) + self.iou_p(batch_ph)
         i, o, u = torch.split(iou, iou.size(1) // 3, dim=1)
         # i, o, u = F.sigmoid(i), F.sigmoid(o), F.tanh(u)
-        i = F.dropout(F.sigmoid(i), p=self.dropout)
-        o = F.dropout(F.sigmoid(o), p=self.dropout)
-        u = F.dropout(F.tanh(u), p=self.dropout)
+        i = self.dropout(F.sigmoid(i))
+        o = self.dropout(F.sigmoid(o))
+        u = self.dropout(F.tanh(u))
 
-        fl = F.dropout(
+        fl = self.dropout(
             F.sigmoid(
                 self.w_fl(batch_rh) + self.u_fl_l(batch_lh) + self.u_fl_p(batch_ph)
-            ),
-            p=self.dropout,
+            )
         )
-        fp = F.dropout(
+        fp = self.dropout(
             F.sigmoid(
                 self.w_fp(batch_rh) + self.u_fp_l(batch_lh) + self.u_fp_p(batch_ph)
-            ),
-            p=self.dropout,
+            )
         )
 
         new_c = self.layernorm4(
@@ -223,21 +194,19 @@ class TreeLSTM(nn.Module):
         iou = self.iou_w(batch_lh) + self.iou_r(batch_rh) + self.iou_p(batch_ph)
         i, o, u = torch.split(iou, iou.size(1) // 3, dim=1)
         # i, o, u = F.sigmoid(i), F.sigmoid(o), F.tanh(u)
-        i = F.dropout(F.sigmoid(i), p=self.dropout)
-        o = F.dropout(F.sigmoid(o), p=self.dropout)
-        u = F.dropout(F.tanh(u), p=self.dropout)
+        i = self.dropout(F.sigmoid(i))
+        o = self.dropout(F.sigmoid(o))
+        u = self.dropout(F.tanh(u))
 
-        fr = F.dropout(
+        fr = self.dropout(
             F.sigmoid(
                 self.w_fr(batch_lh) + self.u_fr_r(batch_rh) + self.u_fr_p(batch_ph)
-            ),
-            p=self.dropout,
+            )
         )
-        fp = F.dropout(
+        fp = self.dropout(
             F.sigmoid(
                 self.w_fp(batch_lh) + self.u_fp_r(batch_rh) + self.u_fp_p(batch_ph)
-            ),
-            p=self.dropout,
+            )
         )
 
         new_c = self.layernorm5(
@@ -254,7 +223,7 @@ class TreeLSTM(nn.Module):
         returns: [B * num_rels, 3, D]
         """
         feature_dim = span_repr.size()[-1]
-        zero_feature = torch.zeros(feature_dim, device="cuda")
+        zero_feature = torch.zeros(feature_dim, device=child_rel.device)
         output = []
         for i, ex in enumerate(child_rel):
             for index in ex:
@@ -284,7 +253,7 @@ class TreeLSTM(nn.Module):
 
         out = []
         for batch in range(batch_size):
-            new = torch.zeros(new_shape, device="cuda")
+            new = torch.zeros(new_shape, device=span_rel_repr.device)
             for i, (a, b, c) in enumerate(child_rel[batch]):
                 if rel_mask[batch][i]:
                     new[a][0] = span_rel_repr[batch][i][0]
@@ -366,12 +335,12 @@ class TreeLSTM(nn.Module):
 
 
 class LayerwiseTreeLSTM_new(nn.Module):
-    def __init__(self, num_layers, feature_dim, span_net, dropout, comb_method="attn"):
+    def __init__(self, dim, num_layers, span_net, dropout, comb_method="attn"):
         super(LayerwiseTreeLSTM_new, self).__init__()
 
         self.num_layers = num_layers
-        self.feature_dim = feature_dim
-        self.span_net = span_net
+        self.span_net = instantiate(span_net, input_dim=dim, proj_dim=dim)
+        self.feature_dim = dim
         self.dropout = dropout
         self.comb_method = comb_method
 
@@ -401,8 +370,9 @@ class LayerwiseTreeLSTM_new(nn.Module):
     def forward(self, x, lens, spans):
         hyperedges = []
         spans_processed = []
+        spans_list = []
         for bidx, spans_inst in enumerate(spans):
-            spans_inst += [(i, i) for i in range(max(x[1] for x in spans_inst) + 1)]
+            spans_inst += [(i, i, -1) for i in range(max(x[1] for x in spans_inst) + 1)]
 
             s, p = spans2tree(spans_inst)
             index = list(range(len(s)))
@@ -422,12 +392,19 @@ class LayerwiseTreeLSTM_new(nn.Module):
                 assert len(children) == 2
                 a, b = children
                 if s[a][0] < s[b][0]:
-                    hyperedges_inst.append((p, a, b))
+                    hyperedges_inst.append((pj, a, b))
                 else:
-                    hyperedges_inst.append((p, b, a))
+                    hyperedges_inst.append((pj, b, a))
 
-            hyperedges.append(hyperedges_inst)
-            spans_processed.append(s)
+            hyperedges.append(torch.tensor(hyperedges_inst, device=x.device))
+            spans_processed.append(
+                torch.tensor([(l, r) for l, r, t, in s], device=x.device)
+            )
+            spans_list.append(s)
+
+        spans = pad_sequence(spans_processed, batch_first=True).flatten(1)
+        rel = pad_sequence(hyperedges, batch_first=True).flatten(1)
+        return self._forward(spans, x, rel, None), spans_list
 
     def _forward(self, spans, encoded_input, child_rel, tag_repr):
         """
@@ -481,3 +458,21 @@ class LayerwiseTreeLSTM_new(nn.Module):
         span_repr = span_repr.view(batch_size, num_spans, -1)
 
         return span_repr
+
+    def get_output_dim(self):
+        return self.feature_dim
+
+
+# if __name__ == "__main__":
+#     from src.models.components.span import AttnSpanRepr
+
+#     spans_inst = [(0, 4), (0, 2), (3, 4), (1, 2)]
+#     spans = [spans_inst[:], spans_inst[:]]
+#     x = torch.randn(2, 7, 5)
+
+#     span_net = AttnSpanRepr(5, use_proj=True, proj_dim=5)
+#     model = LayerwiseTreeLSTM_new(
+#         num_layers=1, feature_dim=5, span_net=span_net, dropout=0.2, comb_method="attn"
+#     )
+#     features, spans = model(x, None, spans)
+#     print(spans)

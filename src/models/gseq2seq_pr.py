@@ -54,14 +54,18 @@ class GSeq2SeqPosterioirRegularizationModule(GeneralSeq2SeqModule):
             params=tgt_params,
             copy_position=copy_position,
         )
-        tgt_pr = self.decoder.forward_pr(
-            batch["tgt_ids"],
-            batch["tgt_lens"],
-            node_features,
-            node_spans,
-            params=tgt_params,
-            copy_position=copy_position,
-        )
+
+        if self.training:
+            tgt_pr = self.decoder.forward_pr(
+                batch["tgt_ids"],
+                batch["tgt_lens"],
+                node_features,
+                node_spans,
+                params=tgt_params,
+                copy_position=copy_position,
+            ).mean()
+        else:
+            tgt_pr = 0.0
 
         with torch.no_grad():
             src_spans_argmax, src_logprob_argmax = self.parser.argmax(
@@ -81,7 +85,7 @@ class GSeq2SeqPosterioirRegularizationModule(GeneralSeq2SeqModule):
             neg_reward = (tgt_nll - tgt_nll_argmax).detach()
 
         return {
-            "decoder": tgt_nll.mean() + tgt_pr.mean(),
+            "decoder": tgt_nll.mean() + tgt_pr,
             "encoder": src_nll.mean() + (src_logprob * neg_reward).mean(),
             "tgt_nll": tgt_nll.mean(),
             "src_nll": src_nll.mean(),

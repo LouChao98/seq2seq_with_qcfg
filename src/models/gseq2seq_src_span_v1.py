@@ -13,6 +13,8 @@ log = logging.getLogger(__file__)
 class GSeq2seqSrcSpanV1(GeneralSeq2SeqModule):
     """Based on GeneralSeq2Seq
     + use copy_phrases to bonus src parser. use svm hinge loss
+
+    See https://aclanthology.org/2021.emnlp-main.395.pdf
     """
 
     def __init__(self, *args, hinge_loss_alpha=1.0, **kwargs):
@@ -25,7 +27,7 @@ class GSeq2seqSrcSpanV1(GeneralSeq2SeqModule):
 
         dist = self.parser(src_ids, src_lens)
         src_nll = -dist.partition
-        src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist)
+        src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
         src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
 
         x = self.encode(batch)
@@ -39,8 +41,9 @@ class GSeq2seqSrcSpanV1(GeneralSeq2SeqModule):
             copy_position=copy_position,
         )
 
+        # src_argmax now is used for computing struct svm loss.
         src_spans_argmax, src_logprob_argmax = self.parser.argmax(
-            src_ids, src_lens, dist
+            src_ids, src_lens, dist=dist
         )
         src_spans_argmax = extract_parses(src_spans_argmax[-1], src_lens, inc=1)[0]
         node_features_argmax, node_spans_argmax = self.tree_encoder(
@@ -55,6 +58,7 @@ class GSeq2seqSrcSpanV1(GeneralSeq2SeqModule):
         )
         neg_reward = (tgt_nll - tgt_nll_argmax).detach()
 
+        # TODO do augmented loss make sense for pcfg?
         copy_phrase = batch["copy_phrase"]
         batch_size, n, *_ = x.shape
         add_scores = [

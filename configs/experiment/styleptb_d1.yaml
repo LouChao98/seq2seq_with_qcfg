@@ -6,7 +6,7 @@
 defaults:
   - override /datamodule: styleptb
   - override /model: styleptb
-  - override /model/tree_encoder: treelstm
+  - override /model/tree_encoder: gnn
   - override /model/decoder: d1
   - override /callbacks: default
   - override /logger: wandb
@@ -21,7 +21,7 @@ name: "styleptb_${hydra:runtime.choices.model/decoder}"
 model:
   decoder:
     check_ppl_batch_size: 2
-    cpd_rank: 256
+    cpd_rank: 128
 
 trainer:
   max_epochs: 50

@@ -6,9 +6,9 @@ test_file: ${data_dir}/StylePTB/ATP/debug_overfit_val.tsv
 
 copy_mode: "phrase"
 
-batch_size: ${in_debugger:2,20}
-eval_batch_size: ${in_debugger:2,6}
-num_workers: ${in_debugger:0,4}
+batch_size: 4 #${in_debugger:2,4}
+eval_batch_size: 1 # ${in_debugger:2,6}
+num_workers: 0 #${in_debugger:0,4}
 pin_memory: false
 
 cache_dir: ${data_dir}/cache

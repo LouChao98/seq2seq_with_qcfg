@@ -57,9 +57,7 @@ class D2PCFG(TDStyleBase):
             params = {k: process_param_for_marginal(v) for k, v in params.items()}
         if not isinstance(lens, torch.Tensor):
             lens = torch.tensor(lens)
-        assert (
-            lens[1:] <= lens[:-1]
-        ).all(), "You should sort samples by length descently."
+        assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
 
         terms = params["term"]  # (batch, seq_len, PT)
         root = params["root"]  # (batch, NT)

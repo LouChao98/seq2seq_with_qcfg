@@ -8,7 +8,7 @@ from torch import Tensor
 from torch.autograd import grad
 
 from ._fn import diagonal, diagonal_copy_, stripe
-from ._utils import checkpoint, process_param_for_marginal, reorder, weighted_random
+from ._utils import checkpoint, process_param_for_marginal, weighted_random
 from .td_style_base import TDStyleBase
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
@@ -28,6 +28,9 @@ class FastestTDPCFG(TDStyleBase):
     # 2. remove unecessary tensor.clone()
     # 3. respect lens
 
+    # This DO NOT support:
+    # 1. copy
+    # 2. mbr on label
     def __init__(self) -> None:
         super().__init__()
         self.threshold = torch.nn.Threshold(1e-3, 0)
@@ -43,9 +46,7 @@ class FastestTDPCFG(TDStyleBase):
             cm.__enter__()
             params = {k: process_param_for_marginal(v) for k, v in params.items()}
         lens = torch.tensor(lens)
-        assert (
-            lens[1:] <= lens[:-1]
-        ).all(), "You should sort samples by length descently."
+        assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
 
         terms = params["term"]
         root = params["root"]
@@ -70,24 +71,22 @@ class FastestTDPCFG(TDStyleBase):
         H_L = torch.matmul(H, L_nonterm)
         H_R = torch.matmul(H, R_nonterm)
         if marginal:
-            span_indicator = terms.new_zeros(batch, N, N, NT).requires_grad_()
+            span_indicator = terms.new_ones(batch, N, N).requires_grad_()
             span_indicator_running = span_indicator[:]
-        else:
-            span_indicator = None
 
         normalizer = terms.new_full((batch, N, N), -1e9)
         norm = terms.max(-1)[0]
         diagonal_copy_(normalizer, norm, w=1)
         terms = (terms - norm.unsqueeze(-1)).exp()
         if marginal:
-            indicator = span_indicator_running.diagonal(1, 1, 2).movedim(-1, 1)
-            terms = terms + indicator
+            indicator = span_indicator_running.diagonal(1, 1, 2).unsqueeze(-1)
+            terms = terms * indicator
         left_term = torch.matmul(terms, L_term)
         right_term = torch.matmul(terms, R_term)
 
         # for caching V^{T}s_{i,k} and W^{T}s_{k+1,j}
-        left_s = terms.new_full((batch, N, N, L.shape[2]), -1e9)
-        right_s = terms.new_full((batch, N, N, L.shape[2]), -1e9)
+        left_s = terms.new_full((batch, N, N, L.shape[2]), 0.0)
+        right_s = terms.new_full((batch, N, N, L.shape[2]), 0.0)
         diagonal_copy_(left_s, left_term, w=1)
         diagonal_copy_(right_s, right_term, w=1)
 
@@ -103,22 +102,15 @@ class FastestTDPCFG(TDStyleBase):
 
             # n: the number of spans of width w.
             n = N - w
-            Y = stripe(left_s, n, w - 1, (0, 1))
-            Z = stripe(right_s, n, w - 1, (1, w), 0)
-            Y_normalizer = stripe(normalizer, n, w - 1, (0, 1))
-            Z_normalizer = stripe(normalizer, n, w - 1, (1, w), 0)
+            y = stripe(left_s, n, w - 1, (0, 1))
+            z = stripe(right_s, n, w - 1, (1, w), 0)
+            yn = stripe(normalizer, n, w - 1, (0, 1))
+            zn = stripe(normalizer, n, w - 1, (1, w), 0)
+            x, xn = merge(y, z, yn, zn)
+
             if marginal:
-                x, x_normalizer = merge_with_indicator(
-                    Y,
-                    Z,
-                    Y_normalizer,
-                    Z_normalizer,
-                    span_indicator_running.diagonal(w, 1, 2).movedim(-1, 1),
-                )
-            else:
-                x, x_normalizer = merge_without_indicator(
-                    Y, Z, Y_normalizer, Z_normalizer
-                )
+                indicator = span_indicator_running.diagonal(w, 1, 2).unsqueeze(-1)
+                x = x * indicator
 
             unfinished = n_at_position[step + 1]
             current_bsz = n_at_position[step]
@@ -130,7 +122,7 @@ class FastestTDPCFG(TDStyleBase):
                         x[unfinished:current_bsz, :1], H[unfinished:current_bsz]
                     ),
                 )
-                final_normalizer.insert(0, x_normalizer[unfinished:current_bsz, :1])
+                final_normalizer.insert(0, xn[unfinished:current_bsz, :1])
             if unfinished > 0:
                 x = x[:unfinished]
                 left_s = left_s[:unfinished]
@@ -138,7 +130,7 @@ class FastestTDPCFG(TDStyleBase):
                 H_L = H_L[:unfinished]
                 H_R = H_R[:unfinished]
                 normalizer = normalizer[:unfinished]
-                x_normalizer = x_normalizer[:unfinished]
+                xn = xn[:unfinished]
                 if marginal:
                     span_indicator_running = span_indicator_running[:unfinished]
 
@@ -146,7 +138,7 @@ class FastestTDPCFG(TDStyleBase):
                 right_x = torch.matmul(x, H_R)
                 diagonal_copy_(left_s, left_x, w)
                 diagonal_copy_(right_s, right_x, w)
-                diagonal_copy_(normalizer, x_normalizer, w)
+                diagonal_copy_(normalizer, xn, w)
 
         final_m = torch.cat(final_m, dim=0)
         final_normalizer = torch.cat(final_normalizer, dim=0)
@@ -154,13 +146,7 @@ class FastestTDPCFG(TDStyleBase):
         logZ = final.logsumexp(-1) + final_normalizer.squeeze(-1)
         if decode:
             spans = self.mbr_decoding(logZ, span_indicator, lens)
-            # spans = [[(span[0], span[1] - 1, 0) for span in inst] for inst in spans]
             return spans
-            # trees = []
-            # for spans_inst, l in zip(spans, lens.tolist()):
-            #     tree = self.convert_to_tree(spans_inst, l)
-            #     trees.append(tree)
-            # return trees, spans
         if marginal:
             torch.set_grad_enabled(grad_state)
             cm.__exit__(None, None, None)
@@ -219,7 +205,7 @@ class FastestTDPCFG(TDStyleBase):
             sample_scores = [
                 (sample, type_, score)
                 for sample, type_, score in zip(samples, types, scores)
-                if len(sample) > 0
+                if len(sample) > 1
             ]  # len=0 when max_actions is reached but no PT rules applied
             if len(sample_scores) == 0:
                 sample_scores = ([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)
@@ -315,61 +301,26 @@ class FastestTDPCFG(TDStyleBase):
             # scores[i] = score / len(terminals)
         return samples, types, scores
 
-
-@checkpoint
-def merge_with_indicator(Y, Z, y, z, indicator):
-    Y = (Y + 1e-9).log() + y.unsqueeze(-1)
-    Z = (Z + 1e-9).log() + z.unsqueeze(-1)
-    b_n_r = (Y + Z).logsumexp(-2) + indicator
-    normalizer = b_n_r.max(-1)[0]
-    b_n_r = (b_n_r - normalizer.unsqueeze(-1)).exp()
-    return b_n_r, normalizer
+    @staticmethod
+    def get_pcfg_rules(params, tgt_nt):
+        rule = torch.einsum(
+            "xar,xbr,xcr->xabc", params["head"], params["left"], params["right"]
+        ).log()
+        return {"term": params["term"], "rule": rule, "root": params["root"]}
 
 
 @checkpoint
-def merge_without_indicator(Y, Z, y, z):
+@torch.jit.script
+def merge(y, z, yn, zn):
     """
     :param Y: shape (batch, n, w, r)
     :param Z: shape (batch, n, w, r)
     :return: shape (batch, n, x)
     """
     # contract dimension w.
-    Y = (Y + 1e-9).log() + y.unsqueeze(-1)
-    Z = (Z + 1e-9).log() + z.unsqueeze(-1)
-    b_n_r = (Y + Z).logsumexp(-2)
+    y = (y + 1e-9).log() + yn.unsqueeze(-1)
+    z = (z + 1e-9).log() + zn.unsqueeze(-1)
+    b_n_r = (y + z).logsumexp(-2)
     normalizer = b_n_r.max(-1)[0]
     b_n_r = (b_n_r - normalizer.unsqueeze(-1)).exp()
     return b_n_r, normalizer
-
-
-if __name__ == "__main__":
-    from .pcfg import PCFG
-
-    torch.random.manual_seed(1)
-
-    B, N, T, NT, r = 4, 5, 3, 7, 2
-    device = "cpu"
-    params = {
-        "term": torch.randn(B, N, T, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
-        "root": torch.randn(B, NT, device=device).log_softmax(-1).requires_grad_(True),
-        "head": torch.randn(B, NT, r, device=device).softmax(-1).requires_grad_(True),
-        "left": torch.randn(B, NT + T, r, device=device)
-        .softmax(-2)
-        .requires_grad_(True),
-        "right": torch.randn(B, NT + T, r, device=device)
-        .softmax(-2)
-        .requires_grad_(True),
-    }
-    lens = torch.tensor([N, N - 1, N - 1, N - 3], dtype=torch.long, device=device)
-
-    # pcfg = PCFG()
-
-    # print(pcfg(params, lens))
-    # print(pcfg(params, lens, decode=True))
-
-    cfg = FastestTDPCFG()
-
-    logZ = cfg(params, lens)
-    print(logZ)
