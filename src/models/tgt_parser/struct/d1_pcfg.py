@@ -38,15 +38,12 @@ class D1PCFG(TDStyleBase):
         self.tgt_nt_states = tgt_nt_states
         self.tgt_pt_states = tgt_pt_states
         self.max_states = max(tgt_nt_states, tgt_pt_states)
-        # import torch_semiring_einsum as tse
 
         # self.eq_slr = tse.compile_equation("qrij, qrik->qrijk")
         # self.eq_qnkrj = tse.compile_equation("qnwjr,qnwkr->qnkrj")
         # self.eq_qnri = tse.compile_equation("qnkrj,qrijk->qnri")
         # self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
         # self.eq_tor = tse.compile_equation("xlpi,xrp->xlir")
-        # self.threshold = torch.nn.Threshold(1e-3, 0)
-        self.threshold = torch.nn.Identity()
 
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
         # if not decode and not marginal and params.get("copy_nt") is None:
@@ -466,12 +463,12 @@ class D1PCFG(TDStyleBase):
         R = params["right"]  # (batch, r, TGT_NT + TGT_PT)
         SLR = params["slr"]
 
-        terms = self.threshold(terms.exp()).cumsum(2)
-        roots = self.threshold(roots.exp()).cumsum(1)
-        H = self.threshold(H).cumsum(2)
-        L = self.threshold(L).cumsum(2)
-        R = self.threshold(R).cumsum(2)
-        SLR = self.threshold(SLR.flatten(3)).cumsum(3)
+        terms = terms.exp().cumsum(2)
+        roots = roots.exp().cumsum(1)
+        H = H.cumsum(2)
+        L = L.cumsum(2)
+        R = R.cumsum(2)
+        SLR = SLR.flatten(3).cumsum(3)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()
@@ -485,7 +482,7 @@ class D1PCFG(TDStyleBase):
 
         preds = []
         for b in range(len(terms)):
-            samples, types, scores = self.sample(
+            samples, types = self.sample(
                 terms[b],
                 H[b],
                 L[b],
@@ -501,12 +498,12 @@ class D1PCFG(TDStyleBase):
                 max_length=max_length,
             )
             sample_scores = [
-                (sample, type_, score)
-                for sample, type_, score in zip(samples, types, scores)
+                (sample, type_)
+                for sample, type_ in zip(samples, types)
                 if len(sample) > 1
             ]  # len=0 when max_actions is reached but no PT rules applied
             if len(sample_scores) == 0:
-                sample_scores = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)]
+                sample_scores = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB])]
             preds.append(sample_scores)
         return preds
 
@@ -534,12 +531,10 @@ class D1PCFG(TDStyleBase):
         COPY_PT = pt_states - 1
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
-        scores = [0.0 for _ in range(num_samples)]
 
         for i in prange(num_samples):
             actions = 0
             sample = weighted_random(roots)
-            # score = roots[sample]
             nonterminals: List[int] = [sample]
             preterminals: List[int] = []
             is_copy_nt: List[bool] = []
@@ -578,12 +573,6 @@ class D1PCFG(TDStyleBase):
                     if not ok:
                         failed = True
                         break
-                    # score += (
-                    #     rules_head[s, r]
-                    #     + rules_left[r, left]
-                    #     + rules_right[r, right]
-                    #     + rules_src[r, nt_node, jk]
-                    # )
                     nonterminals.extend(
                         [right * nt_num_nodes + k, left * nt_num_nodes + j]
                     )
@@ -592,7 +581,6 @@ class D1PCFG(TDStyleBase):
                     is_copy_nt.append(False)
 
             if failed:
-                # print('failed')
                 continue
 
             terminals: List[int] = []
@@ -609,7 +597,6 @@ class D1PCFG(TDStyleBase):
                         terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random(terms[s])
-                        # score += terms[s, sample]
                         if use_copy and sample == UNK:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
@@ -620,8 +607,7 @@ class D1PCFG(TDStyleBase):
                             terminal_type.append(_VOCAB)
             samples[i] = terminals
             types[i] = terminal_type
-            # scores[i] = score / (len(terminals) + 1e-9)
-        return samples, types, scores
+        return samples, types
 
     @staticmethod
     def get_pcfg_rules(params, nt_states):

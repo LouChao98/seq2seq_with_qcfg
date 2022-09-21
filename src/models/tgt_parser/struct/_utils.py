@@ -26,6 +26,7 @@ def weighted_random(cumsum):
     return ind
 
 
+@jit(nopython=True)
 def weighted_random_v2(cumsum):
     if cumsum[-1] == 0:
         raise ValueError("Sampling on masked NT.")

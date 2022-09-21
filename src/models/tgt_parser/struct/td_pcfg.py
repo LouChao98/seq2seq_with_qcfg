@@ -33,9 +33,7 @@ class FastestTDPCFG(TDStyleBase):
     # 2. mbr on label
     def __init__(self) -> None:
         super().__init__()
-        self.threshold = torch.nn.Threshold(1e-3, 0)
 
-    # @reorder
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
         if decode:
             marginal = True  # MBR decoding
@@ -171,11 +169,11 @@ class FastestTDPCFG(TDStyleBase):
         L = params["left"].detach()  # (batch, NT + T, r)
         R = params["right"].detach()  # (batch, NT + T, r)
 
-        terms = self.threshold(terms.softmax(2)).cumsum(2)
-        roots = self.threshold(roots.softmax(1)).cumsum(1)
-        H = self.threshold(H).cumsum(2)
-        L = self.threshold(L).cumsum(1)
-        R = self.threshold(R).cumsum(1)
+        terms = terms.softmax(2).cumsum(2)
+        roots = roots.softmax(1).cumsum(1)
+        H = H.cumsum(2)
+        L = L.cumsum(1)
+        R = R.cumsum(1)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()

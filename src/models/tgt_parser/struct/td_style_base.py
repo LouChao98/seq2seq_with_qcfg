@@ -63,6 +63,20 @@ class TDStyleBase:
                 tree[r] = tree[l] = span
         return tree[0]
 
+    def recompute_label_for_flex(self, spans, pt_spans, nt_spans):
+        processed = []
+        max_spans = max(pt_spans, nt_spans)
+        for spans_inst in spans:
+            newspans = []
+            for left, right, label in spans_inst:
+                symbol, alignment = divmod(label, max_spans)
+                if left == right:
+                    newspans.append((left, right, symbol * pt_spans + alignment))
+                else:
+                    newspans.append((left, right, symbol * nt_spans + alignment))
+            processed.append(newspans)
+        return processed
+
 
 def backtrack(p, i, j):
     if j == i + 1:

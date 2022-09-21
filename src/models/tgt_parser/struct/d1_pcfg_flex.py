@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
+from numba import jit, prange
 from torch import Tensor
 from torch.autograd import grad
 
@@ -85,7 +86,9 @@ class D1PCFGFlex(TDStyleBase):
             SR = params["sr"]  # (batch, r, SRC_NT, SRC_NT), R, i -> k
             SLR = SL.unsqueeze(-1) + SR.unsqueeze(-2)
 
-        # NOTE SL1R1, SL1R, SLR1, SLR should be normalized for each.
+        # NOTE SL1R1, SL1R, SLR1, SLR should be normalized for each. p(B)P(j|B)
+        #   or TL(TR)NT, TL(TR)PT should be normalized for each. p(j)p(B|j)
+
         SL1R1 = SLR[:, :, :, nt_spans:, nt_spans:]
         SL1R = SLR[:, :, :, nt_spans:, :nt_spans]
         SLR1 = SLR[:, :, :, :nt_spans, nt_spans:]
@@ -150,10 +153,11 @@ class D1PCFGFlex(TDStyleBase):
                 if value.ndim > 0:
                     value = value[:current_bsz]
                 mask = mask[:current_bsz]
-                x_real = (x + 1e-9).log() + xn[..., None, None]
-                x_real = torch.where(mask, value, x_real)
-                xn = x_real.flatten(2).max(-1)[0]
-                x = (x_real - xn[..., None, None]).exp()
+                x, xn = set_score(x, xn, mask, value)
+                # x_real = (x + 1e-9).log() + xn[..., None, None]
+                # x_real = torch.where(mask, value, x_real)
+                # xn = x_real.flatten(2).max(-1)[0]
+                # x = (x_real - xn[..., None, None]).exp()
 
             if marginal:
                 indicator = span_indicator_running.diagonal(w, 1, 2).movedim(-1, 1)
@@ -195,17 +199,7 @@ class D1PCFGFlex(TDStyleBase):
 
         if decode:
             spans = self.mbr_decoding(logZ, span_indicator, lens)
-            processed = []
-            for spans_inst in spans:
-                newspans = []
-                for left, right, label in spans_inst:
-                    symbol, alignment = divmod(label, max_spans)
-                    if left == right:
-                        newspans.append((left, right, symbol * pt_spans + alignment))
-                    else:
-                        newspans.append((left, right, symbol * nt_spans + alignment))
-                processed.append(newspans)
-            return processed
+            return self.recompute_label_for_flex(spans, pt_spans, nt_spans)
 
         if marginal:
             torch.set_grad_enabled(grad_state)
@@ -410,7 +404,7 @@ class D1PCFGFlex(TDStyleBase):
 
         preds = []
         for b in range(len(terms)):
-            samples, types = self.sample_jk_given_bc(
+            samples, types, is_safe = self.sample_jk_given_bc(
                 terms[b],
                 H[b],
                 L[b],
@@ -428,6 +422,8 @@ class D1PCFGFlex(TDStyleBase):
                 num_samples=num_samples,
                 max_length=max_length,
             )
+            if not all(is_safe):
+                log.warning("Possibly sampling on masked NT")
             sample_scores = [
                 (sample, type_)
                 for sample, type_ in zip(samples, types)
@@ -439,6 +435,7 @@ class D1PCFGFlex(TDStyleBase):
         return preds
 
     @staticmethod
+    @jit(nopython=True)
     def sample_jk_given_bc(
         terms: np.ndarray,  # seqlen x pt, in normal space
         rules_head: np.ndarray,  # nt x r, in normal space
@@ -463,6 +460,7 @@ class D1PCFGFlex(TDStyleBase):
         COPY_PT = pt_states - 1
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
+        is_safe = [True for _ in range(num_samples)]
 
         for sidx in range(num_samples):
             try:
@@ -525,11 +523,14 @@ class D1PCFGFlex(TDStyleBase):
                     j, k = divmod(jk, pt_num_nodes)
                     nonterminals.extend([(right, k), (left, j)])
 
-            except ValueError as e:
-                if str(e) == "Sampling on masked NT.":
-                    log.warning("Sampling on masked NT.")
-                else:
-                    raise e
+            except Exception:
+                is_safe[sidx] = False
+
+            # except ValueError as e:
+            #     if str(e) == "Sampling on masked NT.":
+            #         log.warning("Sampling on masked NT.")
+            #     else:
+            #         raise e
 
             terminals: List[int] = []
             terminal_type: List[int] = []
@@ -553,7 +554,7 @@ class D1PCFGFlex(TDStyleBase):
 
             samples[sidx] = terminals
             types[sidx] = terminal_type
-        return samples, types
+        return samples, types, is_safe
 
     @torch.no_grad()
     def sampled_decoding_direction1(
@@ -604,7 +605,7 @@ class D1PCFGFlex(TDStyleBase):
 
         preds = []
         for b in range(len(terms)):
-            samples, types = self.sample_bc_given_jk(
+            samples, types, is_safe = self.sample_bc_given_jk(
                 terms[b],
                 H[b],
                 LNT[b],
@@ -621,6 +622,8 @@ class D1PCFGFlex(TDStyleBase):
                 num_samples=num_samples,
                 max_length=max_length,
             )
+            if not all(is_safe):
+                log.warning("Possibly sampling on masked NT")
             sample_scores = [
                 (sample, type_)
                 for sample, type_ in zip(samples, types)
@@ -632,6 +635,7 @@ class D1PCFGFlex(TDStyleBase):
         return preds
 
     @staticmethod
+    @jit(nopython=True)
     def sample_bc_given_jk(
         terms: np.ndarray,  # seqlen x pt, in normal space
         rules_head: np.ndarray,  # nt x r, in normal space
@@ -655,6 +659,7 @@ class D1PCFGFlex(TDStyleBase):
         COPY_PT = pt_states - 1
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
+        is_safe = [True for _ in range(num_samples)]
         num_nodes = nt_num_nodes + pt_num_nodes
 
         for sidx in range(num_samples):
@@ -697,11 +702,14 @@ class D1PCFGFlex(TDStyleBase):
 
                     nonterminals.extend([(right, k), (left, j)])
 
-            except ValueError as e:
-                if str(e) == "Sampling on masked NT.":
-                    log.warning("Sampling on masked NT.")
-                else:
-                    raise e
+            except Exception:
+                is_safe[sidx] = False
+
+            # except ValueError as e:
+            #     if str(e) == "Sampling on masked NT.":
+            #         log.warning("Sampling on masked NT.")
+            #     else:
+            #         raise e
 
             terminals: List[int] = []
             terminal_type: List[int] = []
@@ -725,7 +733,7 @@ class D1PCFGFlex(TDStyleBase):
 
             samples[sidx] = terminals
             types[sidx] = terminal_type
-        return samples, types
+        return samples, types, is_safe
 
     @staticmethod
     def get_pcfg_rules(params, nt_states):
@@ -940,3 +948,12 @@ def merge_h3(y, z, y_normalizer, z_normalizer, sl1r, slr1, slr, h):
     x3 = torch.einsum("qnkrj,qrijk,qair->qnai", qnkrj3, slr1, h)
     x = x1 + x2 + x3
     return x, normalizer
+
+
+@torch.jit.script
+def set_score(x, xn, mask, value):
+    x_real = (x + 1e-9).log() + xn[..., None, None]
+    x_real = torch.where(mask, value, x_real)
+    xn = x_real.flatten(2).max(-1)[0]
+    x = (x_real - xn[..., None, None]).exp()
+    return x, xn
