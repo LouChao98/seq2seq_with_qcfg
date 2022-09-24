@@ -1,6 +1,8 @@
 import torch
 from torch_struct import SentCFG
 
+from src.utils.fn import apply_to_nested_tensor
+
 from ..tgt_parser.neural_qcfg import NeuralQCFGTgtParser
 from ..tgt_parser.neural_qcfg_d1 import NeuralQCFGD1TgtParser
 from ..tgt_parser.struct.d1_pcfg import D1PCFG
@@ -16,7 +18,7 @@ class AMRNeqQCFGPrTask(PrTask):
         self.device = device
 
     def get_b(self, batch_size):
-        return torch.ones(batch_size, self.num_src_pt, device=self.device)
+        return torch.ones(batch_size, self.num_src_pt, device=self.device) * 0
 
     def get_init_lambdas(self, batch_size):
         return torch.full(
@@ -26,7 +28,7 @@ class AMRNeqQCFGPrTask(PrTask):
     def process_constraint(self, constraints):
         return constraints.unsqueeze(-1).expand(-1, -1, self.num_src_pt)
 
-    def build_constrained_params(self, params, lambdas, constraints):
+    def build_constrained_params(self, params, lambdas, constraints, entropy_reg=None):
         cparams = {**params}
         cparams["term"] = (
             params["term"].view(
@@ -34,6 +36,9 @@ class AMRNeqQCFGPrTask(PrTask):
             )
             - (lambdas[:, None] * constraints).unsqueeze(2)
         ).flatten(2)
+        if entropy_reg is not None:
+            factor = 1 / (1 - entropy_reg)
+            cparams = apply_to_nested_tensor(cparams, lambda x: x * factor)
         return cparams
 
     def nll(self, params, lens):

@@ -1,11 +1,14 @@
 from re import L
 from typing import List, Tuple
 
+import matplotlib.pyplot as plt
+import networkx as nx
 import torch
 from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence
 from torch_geometric.data import Batch, Data
 from torch_geometric.nn import GAT, GlobalAttention
+from torch_geometric.utils import to_networkx
 
 from src.utils.fn import spans2tree
 
@@ -58,7 +61,9 @@ class GeneralGNN(torch.nn.Module):
                 if parent != -1:
                     edges.append((i, parent))
                     edges.append((parent, i))
-            graphs.append(Data(torch.stack(vertices, 0), torch.tensor(edges).T))
+            graph = Data(torch.stack(vertices, 0), torch.tensor(edges).T)
+            graph.node_label = torch.tensor([(l, r) for l, r, t in s])
+            graphs.append(graph)
 
         return (
             Batch.from_data_list(graphs).to(x.device),
@@ -77,6 +82,13 @@ class GeneralGNN(torch.nn.Module):
 
     def get_output_dim(self):
         return self.nn.out_channels
+
+    @staticmethod
+    def draw_graph(graph):
+        graph = to_networkx(graph, node_attrs=["node_label"])
+        labels = nx.get_node_attributes(graph, "node_label")
+        nx.draw(graph, labels=labels)
+        plt.savefig("/home/louchao/project/semantic_parsing_qcfg/graph.png")
 
 
 class GeneralGNNForGumbel(GeneralGNN):

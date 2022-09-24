@@ -43,7 +43,7 @@ class PCFGRandomizedDP(FastestTDPCFG):
             params = {k: process_param_for_marginal(v) for k, v in params.items()}
 
         terms, rules, roots = params["term"], params["rule"], params["root"]
-        copy_nts = params.get("copy_nt")
+        constraint = params.get("constraint")
 
         s = terms.new_full((batch, N, N, RS), -1e9)
         s_ind = terms.new_zeros(batch, N, N, RS, dtype=torch.long)
@@ -87,8 +87,8 @@ class PCFGRandomizedDP(FastestTDPCFG):
 
             x, ind = sample(x, topk, sample_size, smooth)
 
-            if copy_nts is not None:
-                value, mask = copy_nts[step]
+            if constraint is not None:
+                value, mask = constraint[step]
                 value = value.gather(2, ind)
                 mask = mask.gather(2, ind)
                 x = torch.where(mask, value, x)

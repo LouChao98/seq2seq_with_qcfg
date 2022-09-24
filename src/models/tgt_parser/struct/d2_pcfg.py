@@ -61,7 +61,7 @@ class D2PCFG(TDStyleBase):
 
         terms = params["term"]  # (batch, seq_len, PT)
         root = params["root"]  # (batch, NT)
-        copy_nts = params.get("copy_nt")
+        constraint = params.get("constraint")
 
         batch, N, PT = terms.shape
         N += 1
@@ -139,8 +139,8 @@ class D2PCFG(TDStyleBase):
             unfinished = n_at_position[step + 1]
             current_bsz = n_at_position[step]
 
-            if copy_nts is not None:
-                value, mask = copy_nts[step]
+            if constraint is not None:
+                value, mask = constraint[step]
                 value = value[:current_bsz]
                 mask = mask[:current_bsz]
                 x = torch.where(mask, value, x)

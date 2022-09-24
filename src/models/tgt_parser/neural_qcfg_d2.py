@@ -111,7 +111,7 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
             .expand(batch_size, 1, -1)
         )
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
-        roots = torch.where(mask == allowed, roots, roots.new_full((1,), self.neg_huge))
+        roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
         roots = roots.view(batch_size, -1)
         roots = F.log_softmax(roots, 1)
 

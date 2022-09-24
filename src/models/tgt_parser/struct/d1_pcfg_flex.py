@@ -58,7 +58,7 @@ class D1PCFGFlex(TDStyleBase):
         head = params["head"]  # (batch, NT, r), A[i] -> R
         term = params["term"]  # (batch, seq_len, PT)
         root = params["root"]  # (batch, NT)
-        copy_nt = params.get("copy_nt")
+        constraint = params.get("constraint")
 
         batch, N, PT = term.shape
         _, NT, R = head.shape
@@ -148,8 +148,8 @@ class D1PCFGFlex(TDStyleBase):
             unfinished = n_at_position[step + 1]
             current_bsz = n_at_position[step]
 
-            if copy_nt is not None:
-                value, mask = copy_nt[step]
+            if constraint is not None:
+                value, mask = constraint[step]
                 if value.ndim > 0:
                     value = value[:current_bsz]
                 mask = mask[:current_bsz]
@@ -424,14 +424,15 @@ class D1PCFGFlex(TDStyleBase):
             )
             if not all(is_safe):
                 log.warning("Possibly sampling on masked NT")
-            sample_scores = [
+            samples = [
                 (sample, type_)
                 for sample, type_ in zip(samples, types)
                 if len(sample) > 1
             ]
-            if len(sample_scores) == 0:
-                sample_scores = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB])]
-            preds.append(sample_scores)
+            if len(samples) == 0:
+                log.warning("All trials are failed.")
+                samples = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB])]
+            preds.append(samples)
         return preds
 
     @staticmethod
@@ -624,14 +625,15 @@ class D1PCFGFlex(TDStyleBase):
             )
             if not all(is_safe):
                 log.warning("Possibly sampling on masked NT")
-            sample_scores = [
+            samples = [
                 (sample, type_)
                 for sample, type_ in zip(samples, types)
                 if len(sample) > 1
             ]  # any case for len(sample) = 0 in new imp?
-            if len(sample_scores) == 0:
-                sample_scores = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB])]
-            preds.append(sample_scores)
+            if len(samples) == 0:
+                log.warning("All trials are failed.")
+                samples = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB])]
+            preds.append(samples)
         return preds
 
     @staticmethod

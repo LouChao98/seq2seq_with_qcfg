@@ -11,7 +11,7 @@ class PrTask:
     def process_constraint(self, constraints):
         ...
 
-    def build_constrained_params(self, params, lambdas, constraints):
+    def build_constrained_params(self, params, lambdas, constraints, entropy_reg=None):
         ...
 
     def nll(self, params, lens):
@@ -29,6 +29,7 @@ class PrTask:
 
 def compute_pr(params, lens, constraints, task: PrTask, get_param=False, **kwargs):
     constraints = task.process_constraint(constraints)
+    entropy_reg = kwargs.get("entropy_reg", 0.0)
 
     batch_size = len(lens)
     e = task.calc_e(params, lens, constraints)
@@ -39,7 +40,7 @@ def compute_pr(params, lens, constraints, task: PrTask, get_param=False, **kwarg
 
     lambdas = pgd_solver(params, lens, constraints, task, **kwargs).detach()
     # print('Lambda', lambdas)
-    cparams = task.build_constrained_params(params, lambdas, constraints)
+    cparams = task.build_constrained_params(params, lambdas, constraints, entropy_reg)
     if get_param:
         return cparams
     return task.ce(cparams, params, lens)
@@ -47,6 +48,7 @@ def compute_pr(params, lens, constraints, task: PrTask, get_param=False, **kwarg
 
 def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
     num_iter = kwargs.get("num_iter", 10)
+    entropy_reg = kwargs.get("entropy_reg", 0.0)
 
     batch_size = len(lens)
     lambdas = task.get_init_lambdas(batch_size)
@@ -60,8 +62,12 @@ def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
         #     -(lambdas[:, None, None, None] * item).sum(-1)
         #     for item in factorized_constraint
         # ]
-        cparams = task.build_constrained_params(params, lambdas, constraints)
-        target = (-(lambdas * b).sum(-1) + task.nll(cparams, lens)).sum()
+        cparams = task.build_constrained_params(
+            params, lambdas, constraints, entropy_reg
+        )
+        target = (
+            -(lambdas * b).sum(-1) + (1 - entropy_reg) * task.nll(cparams, lens)
+        ).sum()
         target.backward()
         if (lambdas.grad.abs() < 1e-4).all():
             break

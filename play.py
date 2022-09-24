@@ -3,6 +3,7 @@ from collections import defaultdict
 from itertools import product
 from pprint import pprint
 
+import pytorch_lightning as pl
 import torch
 from torch_struct.distributions import SentCFG
 
@@ -10,6 +11,8 @@ from src.models.posterior_regularization.amr import AMRNeqQCFGPrTask
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.tgt_parser.struct.pcfg import PCFG
 from src.utils.fn import spans2tree
+
+pl.seed_everything(1)
 
 
 def enumerate_tree(i, j, nt, pt):
@@ -103,7 +106,15 @@ def calculate_e(params, x, n, nt, pt, src_pt):
         src_pt_inst += arr * prob
 
     records.sort(key=lambda x: x[0], reverse=True)
-    pprint(records[:4])
+    pprint(records[:10])
+
+    cnt_by_phi = defaultdict(float)
+    for prob, arr in records:
+        arr = "".join(map(str, arr.long().tolist()))
+        cnt_by_phi[arr] += prob
+    cnt_by_phi = list(cnt_by_phi.items())
+    cnt_by_phi.sort(key=lambda x: x[1], reverse=True)
+    pprint(cnt_by_phi[:4])
     return src_pt_inst
 
 
@@ -127,6 +138,19 @@ def log_likelihood2(params, x, n, nt, pt):
         ll.append(stree)
 
     return torch.tensor(ll).logsumexp(0)
+
+
+def entropy(params, x, n, nt, pt):
+    ll = []
+
+    for tree in enumerate_tree(0, n, nt, pt):
+        tree = [(l, r - 1, t) for l, r, t in tree]
+        stree = score2(params, x, tree, nt)
+        ll.append(stree)
+
+    ll = torch.tensor(ll)
+    ll = ll.log_softmax(0)
+    return -(ll * ll.exp()).sum()
 
 
 def convert(params):
@@ -185,18 +209,56 @@ if (ec < pr_task.get_b(len(lens))).all():
 
 print("======")
 
-cparams = compute_pr(
-    params_x, lens, torch.ones_like(seq), pr_task, get_param=True, num_iter=3
-)
-ec = calculate_e(cparams, seq_inst, N, NT, PT, SRC_PT)
-print("After PR", ec)
+# cparams = compute_pr(
+#     params_x, lens, torch.ones_like(seq), pr_task, get_param=True, num_iter=3
+# )
+# ec = calculate_e(cparams, seq_inst, N, NT, PT, SRC_PT)
+# print("After PR", ec)
 
-print("======")
+# print("======")
 
 cparams = compute_pr(
     params_x, lens, torch.ones_like(seq), pr_task, get_param=True, num_iter=100
 )
 ec = calculate_e(cparams, seq_inst, N, NT, PT, SRC_PT)
 print("After PR", ec)
+print("Entropy", entropy(cparams, seq_inst, N, NT, PT))
+print("======")
+
+cparams = compute_pr(
+    params_x,
+    lens,
+    torch.ones_like(seq),
+    pr_task,
+    get_param=True,
+    num_iter=100,
+    entropy_reg=0.5,
+)
+ec = calculate_e(cparams, seq_inst, N, NT, PT, SRC_PT)
+print("After PR", ec)
+print("Entropy", entropy(cparams, seq_inst, N, NT, PT))
+print("======")
+
+cparams = compute_pr(
+    params_x,
+    lens,
+    torch.ones_like(seq),
+    pr_task,
+    get_param=True,
+    num_iter=100,
+    entropy_reg=0.1,
+)
+ec = calculate_e(cparams, seq_inst, N, NT, PT, SRC_PT)
+print("After PR", ec)
+print("Entropy", entropy(cparams, seq_inst, N, NT, PT))
+
+# print("======")
+
+# cparams = compute_pr(
+#     params_x, lens, torch.ones_like(seq), pr_task, get_param=True, num_iter=200, entropy_reg=0.5
+# )
+# ec = calculate_e(cparams, seq_inst, N, NT, PT, SRC_PT)
+# print("After PR", ec)
+# print('Entropy', entropy(cparams, seq_inst, N, NT, PT))
 
 # print(pr_task.calc_e(SentCFG(convert(cparams), lens), cc))

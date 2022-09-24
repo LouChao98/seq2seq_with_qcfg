@@ -1,4 +1,4 @@
-_target_: src.models.tgt_parser.neural_qcfg_d1.NeuralQCFGD1TgtParser
+_target_: src.models.tgt_parser.neural_qcfg_d1_log_param.NeuralQCFGD1LogParamTgtParser
 _recursive_: false
 
 # base

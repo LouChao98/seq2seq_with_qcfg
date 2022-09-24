@@ -1,6 +1,7 @@
 import logging
 from typing import List, Tuple
 
+import torch
 from nltk.tree import Tree
 
 log = logging.getLogger(__file__)
@@ -212,3 +213,15 @@ def report_ids_when_err(func):
             raise e
 
     return wrapper
+
+
+def apply_to_nested_tensor(nested, func):
+    if isinstance(nested, (list, tuple)):
+        return [apply_to_nested_tensor(item, func) for item in nested]
+    if isinstance(nested, dict):
+        return {
+            key: apply_to_nested_tensor(value, func) for key, value in nested.items()
+        }
+    if isinstance(nested, torch.Tensor):
+        return func(nested)
+    return nested

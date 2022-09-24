@@ -54,7 +54,7 @@ class D2PCFGFlex(TDStyleBase):
         head = params["head"]  # (batch, NT, r), A[i] -> R
         term = params["term"]  # (batch, seq_len, PT)
         root = params["root"]  # (batch, NT)
-        copy_nt = params.get("copy_nt")
+        constraint = params.get("constraint")
 
         batch, N, PT = term.shape
         _, NT, R = head.shape
@@ -142,8 +142,8 @@ class D2PCFGFlex(TDStyleBase):
             unfinished = n_at_position[step + 1]
             current_bsz = n_at_position[step]
 
-            if copy_nt is not None:
-                value, mask = copy_nt[step]
+            if constraint is not None:
+                value, mask = constraint[step]
                 if value.ndim > 0:
                     value = value[:current_bsz]
                 mask = mask[:current_bsz]

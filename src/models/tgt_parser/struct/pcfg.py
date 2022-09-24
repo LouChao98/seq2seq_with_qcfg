@@ -1,3 +1,4 @@
+import logging
 from enum import IntEnum
 from typing import Dict, List
 
@@ -9,6 +10,7 @@ from torch_struct import SentCFG
 
 from ._utils import process_param_for_marginal, weighted_random
 
+log = logging.getLogger(__file__)
 # I don't know how to use IntEnum with numba's jit.
 # So I use this workaround.
 # TODO can we move this to _utils but not break numba? not tested.
@@ -39,9 +41,9 @@ class PCFG:
             terms,
             rules,
             roots,
-            params.get("copy_nt"),
-            None,
-            params.get("add_scores"),
+            params.get("constraint"),
+            params.get("lse"),
+            params.get("add"),
         )
 
         if decode or marginal:
@@ -100,7 +102,7 @@ class PCFG:
 
         preds = []
         for b in range(len(terms)):
-            samples, types, scores = self.sample(
+            samples, types = self.sample(
                 terms[b],
                 rules[b],
                 roots[b],
@@ -112,14 +114,15 @@ class PCFG:
                 num_samples=num_samples,
                 max_length=max_length,
             )
-            sample_scores = [
-                (sample, type_, score)
-                for sample, type_, score in zip(samples, types, scores)
+            samples = [
+                (sample, type_)
+                for sample, type_ in zip(samples, types)
                 if len(sample) > 1
             ]  # len=0 when max_actions is reached but no PT rules applied
-            if len(sample_scores) == 0:
-                sample_scores = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)]
-            preds.append(sample_scores)
+            if len(samples) == 0:
+                log.warning("All trials are failed.")
+                samples = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB])]
+            preds.append(samples)
         return preds
 
     @staticmethod
@@ -154,12 +157,10 @@ class PCFG:
         COPY_PT = pt_states - 1
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
-        scores = [0.0 for _ in range(num_samples)]
 
         for i in range(num_samples):
             actions = 0
             sample = weighted_random(roots)
-            # score = roots[sample]
             nonterminals: List[int] = [sample]
             preterminals: List[int] = []
             is_copy_pt: List[bool] = []
@@ -180,7 +181,6 @@ class PCFG:
                             continue
                     actions += 1
                     sample = weighted_random(rules[s])
-                    # score += rules[s, sample]
                     left, right = divmod(sample, S)
                     nonterminals.extend([right, left])
                 else:
@@ -201,7 +201,6 @@ class PCFG:
                         terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random(terms[s])
-                        # score += terms[s, sample]
                         if use_copy and sample == UNK:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
@@ -212,8 +211,7 @@ class PCFG:
                             terminal_type.append(_VOCAB)
             samples[i] = terminals
             types[i] = terminal_type
-            # scores[i] = score / (len(terminals) + 1e-9)
-        return samples, types, scores
+        return samples, types
 
     @staticmethod
     def sample_inspect(
@@ -399,6 +397,16 @@ class PCFG:
             types[i] = terminal_type
             # scores[i] = score / len(terminals)
         return samples, types, scores
+
+    def ce(self, q, p, lens):
+        # ce(q, p)
+        q_margin = self(q, lens, marginal=True)
+        return (
+            self(p, lens)
+            - (q_margin[0].detach() * p[0]).sum((1, 2))
+            - (q_margin[1].detach() * p[1]).sum((1, 2, 3))
+            - (q_margin[2].detach() * p[2]).sum(1)
+        )
 
 
 if __name__ == "__main__":

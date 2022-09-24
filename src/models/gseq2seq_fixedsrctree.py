@@ -126,7 +126,6 @@ class GeneralSeq2SeqWithFixedSrcParserModule(GeneralSeq2SeqModule):
         y_preds = self.decoder.generate(
             node_features,
             node_spans,
-            self.datamodule.vocab_pair,
             batch["src_ids"],
             batch["src"],
         )

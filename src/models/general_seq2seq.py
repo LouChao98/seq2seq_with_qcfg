@@ -5,7 +5,7 @@ from typing import Any, List, Optional
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
-from pytorch_lightning.profilers import PassThroughProfiler, SimpleProfiler
+from pytorch_lightning.profilers import PassThroughProfiler
 from torch_scatter import scatter_mean
 from torchmetrics import MinMetric
 from transformers import AutoModel
@@ -87,6 +87,7 @@ class GeneralSeq2SeqModule(ModelBase):
         self.decoder: TgtParserBase = instantiate(
             self.hparams.decoder,
             vocab=len(self.datamodule.tgt_vocab),
+            vocab_pair=self.datamodule.vocab_pair,
             src_dim=self.tree_encoder.get_output_dim(),
         )
 
@@ -289,7 +290,6 @@ class GeneralSeq2SeqModule(ModelBase):
         y_preds = self.decoder.generate(
             node_features,
             node_spans,
-            self.datamodule.vocab_pair,
             batch["src_ids"],
             batch["src"],
         )
@@ -317,21 +317,21 @@ class GeneralSeq2SeqModule(ModelBase):
         if "reward" in output:
             self.log("train/reward", output["reward"])
 
-        # if batch_idx == 0:
-        #     self.eval()
-        #     single_inst = {key: value[:2] for key, value in batch.items()}
-        #     trees = self.forward_visualize(single_inst)
-        #     self.print("=" * 79)
-        #     for src, tgt, alg in zip(
-        #         trees["src_tree"], trees["tgt_tree"], trees["alignment"]
-        #     ):
-        #         self.print("Src:", src)
-        #         self.print("Tgt:", tgt)
-        #         self.print(
-        #             "Alg:\n"
-        #             + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
-        #         )
-        #     self.train()
+        if batch_idx == 0:
+            self.eval()
+            single_inst = {key: value[:2] for key, value in batch.items()}
+            trees = self.forward_visualize(single_inst)
+            self.print("=" * 79)
+            for src, tgt, alg in zip(
+                trees["src_tree"], trees["tgt_tree"], trees["alignment"]
+            ):
+                self.print("Src:", src)
+                self.print("Tgt:", tgt)
+                self.print(
+                    "Alg:\n"
+                    + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
+                )
+            self.train()
         return {"loss": loss}
 
     def on_validation_epoch_start(self) -> None:

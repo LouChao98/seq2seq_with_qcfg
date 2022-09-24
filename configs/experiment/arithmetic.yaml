@@ -4,34 +4,37 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: styleptb
-  - override /model: styleptb
-  - override /model/tree_encoder: gnn
-  - override /model/decoder: d1_flex
+  - override /datamodule: arithmetic
+  - override /model: scan
   - override /callbacks: default
-  - override /logger: wandb
+  - override /logger: tensorboard
   - override /trainer: default
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb_${hydra:runtime.choices.model/decoder}"
+name: "arithmetic"
+
+# ~17GB
+datamodule:
+  batch_size: 2
+  eval_batch_size: 1
+  max_src_len: 100
 
 model:
-  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb_d1_flex/2022-09-13_22-31-30/checkpoints/last.ckpt
   decoder:
-    check_ppl_batch_size: 2
-    cpd_rank: 128
+    num_samples: 8
+    nt_states: 4
 
 trainer:
-  max_epochs: 100
-  accumulate_grad_batches: 1
+  max_epochs: 20
+  accumulate_grad_batches: 10
   gradient_clip_val: 3
 
 logger:
   wandb:
-    project: "styleptb"
+    project: arithmetic
     tags:
       - "${hydra:runtime.choices.model/parser}"
       - "${hydra:runtime.choices.model/tree_encoder}"

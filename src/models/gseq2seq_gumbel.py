@@ -185,7 +185,6 @@ class GSeq2seqGumbel(GeneralSeq2SeqModule):
         y_preds = self.decoder.generate(
             node_feats,
             node_spans,
-            self.datamodule.vocab_pair,
             batch["src_ids"],
             batch["src"],
         )

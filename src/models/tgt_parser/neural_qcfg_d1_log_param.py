@@ -1,36 +1,24 @@
+import random
+from collections import defaultdict
 from typing import Optional
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
 
-from ..components.common import MultiResidualLayer
-from .neural_qcfg import NeuralQCFGTgtParser
-from .neural_qcfg_d1_flex import NeuralQCFGD1FlexTgtParser
-from .struct.d2_pcfg_flex import D2PCFGFlex
-from .struct.pcfg import PCFG
+from .neural_qcfg_d1 import NeuralQCFGD1TgtParser
+from .struct.d1_pcfg_tse import D1PCFGTSE
 
 
-def get_nn(dim, cpd_rank):
-    return nn.Sequential(
-        nn.LeakyReLU(), nn.Linear(dim, cpd_rank)  # , nn.LayerNorm(cpd_rank)
-    )
+class NeuralQCFGD1LogParamTgtParser(NeuralQCFGD1TgtParser):
 
+    # This produce log-space params.
+    # The impl of struct is much slower than counterparts.
+    # Just for debug.
 
-@torch.jit.script
-def normalize(t: torch.Tensor):
-    t = t - t.amax((-2, -1), keepdim=True)
-    t = t.exp()
-    t = t / (t.sum((-2, -1), keepdim=True) + 1e-9)
-    return t
-
-
-class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.pcfg = D2PCFGFlex(self.nt_states, self.pt_states)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.pcfg = D1PCFGTSE(self.nt_states, self.pt_states)
 
     def get_params(
         self,
@@ -38,6 +26,7 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
         spans,
         x: Optional[torch.Tensor] = None,
         copy_position=None,  # (pt, nt)
+        impossible_span_mask=None,
     ):
         if copy_position is None or not self.use_copy:
             copy_position = (None, None)
@@ -79,22 +68,33 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
 
         # A->BC
         state_emb = torch.cat([nt_state_emb, pt_state_emb], 1)
-        node_emb = torch.cat([nt_node_emb, pt_node_emb], 1)
+        node_emb = nt_node_emb  # torch.cat([nt_node_emb, pt_node_emb], 1)
         rule_head = self.ai_r_nn(
             self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))
-        ).softmax(-1)
-
-        combined_emb = nt_node_emb[:, :, None] + state_emb[:, None, :]
+        ).log_softmax(-1)
         rule_left = (
-            self.r_b_nn(self.rule_mlp_left(combined_emb)).movedim(3, 1).softmax(-1)
+            self.r_b_nn(self.rule_mlp_left(state_emb)).transpose(1, 2).log_softmax(-1)
         )
         rule_right = (
-            self.r_c_nn(self.rule_mlp_right(combined_emb)).movedim(3, 1).softmax(-1)
+            self.r_c_nn(self.rule_mlp_right(state_emb)).transpose(1, 2).log_softmax(-1)
         )
 
-        i = self.root_mlp_i(nt_node_emb)
+        i = self.root_mlp_i(node_emb)
         j = self.root_mlp_j(node_emb)
         k = self.root_mlp_k(node_emb)
+        rule_slr = torch.einsum(
+            "rab,xia,xjkb->xrijk",
+            self.rijk_weight,
+            F.leaky_relu(i),
+            F.leaky_relu(j[:, :, None] + k[:, None, :]),
+        )
+        num_nodes = nt_num_nodes  # + pt_num_nodes
+        rule_slr = (
+            rule_slr.view(batch_size, self.cpd_rank, num_nodes, -1)
+            .log_softmax(-1)
+            .view(batch_size, self.cpd_rank, num_nodes, num_nodes, num_nodes)
+            .clone()
+        )
         # ijk = i[:, :, None, None] + j[:, None, :, None] + k[:, None, None, :]
         # num_nodes = nt_num_nodes  # + pt_num_nodes
         # rule_slr = (
@@ -105,20 +105,6 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
         #     .view(batch_size, self.cpd_rank, num_nodes, num_nodes, num_nodes)
         #     .clone()
         # )
-        rule_slr = torch.einsum(
-            "rab,xia,xjkb->xrijk",
-            self.rijk_weight,
-            F.leaky_relu(i),
-            F.leaky_relu(j[:, :, None] + k[:, None, :]),
-        )  # softmax
-
-        new_slr = torch.empty_like(rule_slr)
-        nnn = nt_num_nodes
-        new_slr[..., :nnn, :nnn] = normalize(rule_slr[..., :nnn, :nnn])
-        new_slr[..., :nnn, nnn:] = normalize(rule_slr[..., :nnn, nnn:])
-        new_slr[..., nnn:, :nnn] = normalize(rule_slr[..., nnn:, :nnn])
-        new_slr[..., nnn:, nnn:] = normalize(rule_slr[..., nnn:, nnn:])
-        rule_slr = new_slr
 
         # fmt: off
         nt_mask = torch.arange(nt_num_nodes, device=i.device).unsqueeze(0) \
@@ -126,10 +112,10 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
         pt_mask = torch.arange(pt_num_nodes, device=i.device).unsqueeze(0) \
             < torch.tensor(pt_num_nodes_list, device=i.device).unsqueeze(1)
         # fmt: on
-        mask = torch.cat([nt_mask, pt_mask], dim=1)
-        mask = torch.einsum("bx,by,bz->bxyz", nt_mask, mask, mask)
+        mask = nt_mask  # torch.cat([nt_mask, pt_mask], dim=1)
+        mask = torch.einsum("bx,by,bz->bxyz", mask, mask, mask)
         mask = mask.unsqueeze(1).expand(-1, self.cpd_rank, -1, -1, -1)
-        rule_slr[~mask] = 0  # = self.neg_huge
+        rule_slr[~mask] = self.neg_huge
 
         if self.rule_constraint_type > 0:
             if self.rule_constraint_type == 1:
@@ -147,11 +133,39 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
             else:
                 raise ValueError("Bad constraint_type")
             mask = mask.unsqueeze(1).expand(-1, self.cpd_rank, -1, -1, -1)
-            rule_slr[~mask] = 0  # = self.neg_huge
+            rule_slr[~mask] = self.neg_huge
 
         # A->a
         terms = self.vocab_out(pt_emb).log_softmax(-1)
+        # temperory fix
+        is_multi = np.ones((batch_size, pt_num_nodes), dtype=np.bool8)
+        for b, pt_spans_inst in enumerate(pt_spans):
+            for span in pt_spans_inst:
+                if span[0] == span[1]:
+                    is_multi[b, span[0]] = False
+        terms = terms.clone()
+        mask = torch.from_numpy(is_multi)[:, None, :, None]
+        mask = mask.expand(-1, terms.shape[1], -1, terms.shape[3])
+        terms[mask] = self.neg_huge
         terms = terms.view(batch_size, -1, terms.shape[-1])
+        mask = torch.from_numpy(is_multi)[:, None, :, None, None]
+        mask = mask.expand(-1, rule_slr.shape[1], -1, *rule_slr.shape[-2:])
+        rule_slr[~mask] = self.neg_huge
+
+        # debug_m = (rule_slr[0, 0].exp() > 1e-4).nonzero().tolist()
+        # debug_spans = nt_spans[0]
+        # children = defaultdict(set)
+        # for i, j, k in debug_m:
+        #     children[i].add(j)
+        #     children[i].add(k)
+        # for i, vset in children.items():
+        #     print(f'Parent={debug_spans[i]}')
+        #     print('  ' + ', '.join(str(debug_spans[j]) for j in vset))
+        # print('===')
+        # debug_m = terms.view(batch_size, self.pt_states, -1, terms.shape[-1])
+        # debug_m = debug_m[0, 0, :, 0].exp().nonzero().squeeze(-1).tolist()
+        # for i in debug_m:
+        #     print(pt_spans[0][i], end=', ')
 
         copy_nt = None
         if x is not None:
@@ -181,7 +195,7 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
                     for i, (l, r, _) in enumerate(nt_spans_inst):
                         w = r - l - 1
                         t = None
-                        if w >= len(possible_copy) or w <= 0:
+                        if w >= len(possible_copy) or w < 0:
                             continue
                         for possible_s, possible_t in possible_copy[w]:
                             if possible_s == l:
@@ -198,6 +212,18 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
                     copy_nt_.append((item.to(terms.device), mask.to(terms.device)))
                 copy_nt = copy_nt_
 
+            if impossible_span_mask is not None:
+                assert copy_position[1] is None, "Not implemented"
+                copy_nt_ = []  # TODO rename to some meaningful name
+                neg_huge = terms.new_tensor(self.neg_huge)
+                for item in impossible_span_mask:
+                    copy_nt_.append(
+                        (
+                            neg_huge,
+                            item[..., None, None],
+                        )
+                    )
+                copy_nt = copy_nt_
         params = {
             "term": terms,
             "root": roots,

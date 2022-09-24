@@ -28,7 +28,7 @@ def weighted_random(cumsum):
 
 @jit(nopython=True)
 def weighted_random_v2(cumsum):
-    if cumsum[-1] == 0:
+    if cumsum[-1] < 1e-6:
         raise ValueError("Sampling on masked NT.")
     rdm_unif = np.random.rand() * (cumsum[-1] - 1e-8)
     ind = np.searchsorted(cumsum, rdm_unif, side="right").item()

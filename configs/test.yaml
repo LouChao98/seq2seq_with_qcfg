@@ -19,7 +19,11 @@ defaults:
 hydra:
   job:
     chdir: true
-    
+  job_logging:
+    handlers:
+      console:
+        class: src.utils.log_utils.TqdmLoggingHandler
+
 original_work_dir: ${hydra:runtime.cwd}
 
 data_dir: ${original_work_dir}/data/

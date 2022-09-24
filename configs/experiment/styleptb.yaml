@@ -18,10 +18,6 @@ defaults:
 # name of the run determines folder name in logs
 name: "styleptb_${hydra:runtime.choices.model/decoder}"
 
-model:
-  decoder:
-    check_ppl_batch_size: 1
-
 trainer:
   max_epochs: 50
   accumulate_grad_batches: 1

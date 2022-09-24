@@ -85,6 +85,7 @@ class GSeq2SeqL0Module(GeneralSeq2SeqModule):
         self.decoder: TgtParserBase = instantiate(
             self.hparams.decoder,
             vocab=len(self.datamodule.tgt_vocab),
+            vocab_pair=self.datamodule.vocab_pair,
             src_dim=self.tree_encoder.get_output_dim(),
         )
 

@@ -7,12 +7,19 @@ nt_states: ${.pt_states}
 pt_span_range: [1, 1000]
 nt_span_range: ${.pt_span_range}
 use_copy: true
-rule_hard_constraint:
+rule_hard_constraint: ~
+rule_soft_constraint:
   _target_: src.models.constraint.unfolded.USimpleHierarchy
   pt_states: ${..pt_states}
   nt_states: ${..nt_states}
-rule_soft_constraint: ~
-rule_soft_constraint_solver: ~
+rule_soft_constraint_solver:
+  _target_: src.models.posterior_regularization.linear.UngroundedPRLineSearchSolver
+  on: "rule"
+  b: 2.0
+  lbound: 1.0e-4
+  rbound: 100
+  num_point: 16
+  num_iter: 3
 generation_max_length: 40
 generation_num_samples: 10
 generation_ppl_batch_size: 1

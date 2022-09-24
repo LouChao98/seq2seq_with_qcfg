@@ -18,7 +18,6 @@ name: "scan"
 
 # ~17GB
 datamodule:
-  test_file: ${data_dir}/SCAN/tasks_train_length.txt
   # batch_size: 1
   # eval_batch_size: 1
   batch_size: 10

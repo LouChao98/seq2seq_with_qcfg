@@ -22,7 +22,6 @@ decoder:
   rule_constraint_type: 1
   use_copy: false
   num_samples: 8
-  check_ppl: true
 
 optimizer:
   groups: ~

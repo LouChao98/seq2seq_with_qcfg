@@ -4,6 +4,7 @@ from typing import Dict, List
 
 import numpy as np
 import torch
+import torch_semiring_einsum as tse
 from numba import jit
 from torch import Tensor
 from torch.autograd import grad
@@ -18,7 +19,6 @@ from ._utils import (
 from .td_style_base import TDStyleBase
 
 log = logging.getLogger(__file__)
-# import torch_semiring_einsum as tse
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
 
@@ -29,7 +29,7 @@ class TokenType(IntEnum):
     COPY_PT = _COPY_PT
 
 
-class D1PCFG(TDStyleBase):
+class D1PCFGTSE(TDStyleBase):
     # A[i] -> B[j], C[k]
     # ================
     # A[i] -> R
@@ -45,16 +45,14 @@ class D1PCFG(TDStyleBase):
         self.tgt_nt_states = tgt_nt_states
         self.tgt_pt_states = tgt_pt_states
         self.max_states = max(tgt_nt_states, tgt_pt_states)
-
-        # self.eq_slr = tse.compile_equation("qrij, qrik->qrijk")
-        # self.eq_qnkrj = tse.compile_equation("qnwjr,qnwkr->qnkrj")
-        # self.eq_qnri = tse.compile_equation("qnkrj,qrijk->qnri")
-        # self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
-        # self.eq_tor = tse.compile_equation("xlpi,xrp->xlir")
+        self.block_size = 32
+        self.eq_slr = tse.compile_equation("qrij, qrik->qrijk")
+        self.eq_qnkrj = tse.compile_equation("qnwjr,qnwkr->qnkrj")
+        self.eq_qnri = tse.compile_equation("qnkrj,qrijk->qnri")
+        self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
+        self.eq_tor = tse.compile_equation("xlpi,xrp->xlir")
 
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
-        # if not decode and not marginal and params.get("copy_nt") is None:
-        #     return self.logZ(params, lens)
         if decode:
             marginal = True  # MBR decoding
         if marginal:
@@ -67,142 +65,9 @@ class D1PCFG(TDStyleBase):
             lens = torch.tensor(lens)
         assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
 
-        head = params["head"]  # (batch, NT, r), A[i] -> R
-        term = params["term"]  # (batch, seq_len, PT)
-        root = params["root"]  # (batch, NT)
-        constraint = params.get("constraint")
-
-        # ===== This routine is optimized for src_len < tgt_len =====
-
-        if "slr" in params:
-            SLR = params["slr"]
-        else:
-            SL = params["sl"]  # (batch, r, SRC_NT, SRC_NT), R, i -> j
-            SR = params["sr"]  # (batch, r, SRC_NT, SRC_NT), R, i -> k
-            SLR = SL.unsqueeze(-1) + SR.unsqueeze(-2)
-
-        # ===== End =====
-
-        batch, N, PT = term.shape
-        _, NT, R = head.shape
-        N += 1
-        nt_spans = NT // self.tgt_nt_states
-        pt_spans = PT // self.tgt_pt_states
-        max_spans = max(nt_spans, pt_spans)
-
-        head = head.view(batch, self.tgt_nt_states, nt_spans, R)
-        term = term.view(batch, -1, self.tgt_pt_states, pt_spans)
-        root = root.view(batch, self.tgt_nt_states, nt_spans)
-
-        # (batch, r, TGT_NT), R -> B/C
-        # (batch, r, TGT_PT), R -> B/C
-        size = (self.tgt_nt_states, self.tgt_pt_states)
-        TLNT, TLPT = torch.split(params["left"], size, -1)
-        TRNT, TRPT = torch.split(params["right"], size, -1)
-
-        if marginal:
-            span_indicator = term.new_ones(
-                batch, N, N, self.max_states, nt_spans, requires_grad=True
-            )
-            span_indicator_running = span_indicator[:, :, :, : self.tgt_nt_states]
-        else:
-            span_indicator = None
-
-        normalizer = term.new_full((batch, N, N), -1e9)
-        norm = term.flatten(2).max(-1)[0]
-        diagonal_copy_(normalizer, norm, w=1)
-        term = (term - norm[..., None, None]).exp()
-
-        left_s = term.new_full((batch, N, N, max_spans, R), -1e9)
-        right_s = term.new_full((batch, N, N, max_spans, R), -1e9)
-        if marginal:
-            indicator = (
-                span_indicator[:, :, :, : self.tgt_pt_states]
-                .diagonal(1, 1, 2)
-                .movedim(-1, 1)
-            )
-            term = term * indicator
-        left_term = torch.einsum("xlpi,xrp->xlir", term, TLPT)
-        right_term = torch.einsum("xlpi,xrp->xlir", term, TRPT)
-        diagonal_copy_(left_s, left_term, w=1)
-        diagonal_copy_(right_s, right_term, w=1)
-
-        # prepare length, same as the batch_size in PackedSequence
-        n_at_position = (
-            torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)
-        ).sum(1)
-
-        # w: span width
-        final = []
-        final_normalizer = []
-        for step, w in enumerate(range(2, N)):
-
-            # n: the number of spans of width w.
-            n = N - w
-            y = stripe(left_s, n, w - 1, (0, 1)).clone()
-            z = stripe(right_s, n, w - 1, (1, w), 0).clone()
-            y_normalizer = stripe(normalizer, n, w - 1, (0, 1))
-            z_normalizer = stripe(normalizer, n, w - 1, (1, w), 0)
-            x, x_normalizer = merge_h(y, z, y_normalizer, z_normalizer, SLR, head)
-
-            unfinished = n_at_position[step + 1]
-            current_bsz = n_at_position[step]
-
-            if constraint is not None:
-                value, mask = constraint[step]
-                if value.ndim > 0:
-                    value = value[:current_bsz]
-                mask = mask[:current_bsz]
-                x = torch.where(mask, (value - x_normalizer[..., None, None]).exp(), x)
-
-            if marginal:
-                indicator = span_indicator_running.diagonal(w, 1, 2).movedim(-1, 1)
-                x = x * indicator
-
-            if current_bsz - unfinished > 0:
-                final.insert(0, x[unfinished:current_bsz, :1])
-                final_normalizer.insert(0, x_normalizer[unfinished:current_bsz, :1])
-            if unfinished > 0:
-                if current_bsz > unfinished:
-                    x = x[:unfinished]
-                    left_s = left_s[:unfinished]
-                    right_s = right_s[:unfinished]
-                    SLR = SLR[:unfinished]
-                    head = head[:unfinished]
-                    TLNT = TLNT[:unfinished]
-                    TRNT = TRNT[:unfinished]
-                    normalizer = normalizer[:unfinished]
-                    x_normalizer = x_normalizer[:unfinished]
-                    if marginal:
-                        span_indicator_running = span_indicator_running[:unfinished]
-
-                left_x = torch.einsum("qnai,qra->qnir", x, TLNT)
-                right_x = torch.einsum("qnai,qra->qnir", x, TRNT)
-                diagonal_copy_(left_s, left_x, w)
-                diagonal_copy_(right_s, right_x, w)
-                diagonal_copy_(normalizer, x_normalizer, w)
-            if unfinished == 0:
-                break
-        final = torch.cat(final, dim=0)
-        final_normalizer = torch.cat(final_normalizer, dim=0)
-        final = (final + 1e-9).squeeze(1).log() + root
-        logZ = final.logsumexp((-2, -1)) + final_normalizer.squeeze(-1)
-        if decode:
-            spans = self.mbr_decoding(logZ, span_indicator, lens)
-            return spans
-        if marginal:
-            torch.set_grad_enabled(grad_state)
-            cm.__exit__(None, None, None)
-            return grad(logZ.sum(), [span_indicator])[0]
-        return -logZ
-
-    def logZ(self, params: Dict[str, Tensor], lens):
-        if not isinstance(lens, torch.Tensor):
-            lens = torch.tensor(lens)
-        assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
-
         terms = params["term"]  # (batch, seq_len, PT)
         root = params["root"]  # (batch, NT)
+        constraint = params.get("constraint")
 
         batch, N, PT = terms.shape
         N += 1
@@ -213,18 +78,20 @@ class D1PCFG(TDStyleBase):
         terms = terms.view(batch, -1, self.tgt_pt_states, pt_spans)
         root = root.view(batch, self.tgt_nt_states, nt_spans)
 
+        # {source,target}{left,right}[{nonterminal,preterminal}]
         H = params["head"]  # (batch, NT, r), A[i] -> R
-
-        # (batch, r, TGT_NT), R -> B/C
-        # (batch, r, TGT_PT), R -> B/C
-        size = (self.tgt_nt_states, self.tgt_pt_states)
-        TLNT, TLPT = torch.split(params["left"], size, -1)
-        TRNT, TRPT = torch.split(params["right"], size, -1)
-
+        # (batch, r, TGT_NT), R -> B
+        # (batch, r, TGT_PT), R -> B
+        TLNT, TLPT = torch.split(
+            params["left"], (self.tgt_nt_states, self.tgt_pt_states), -1
+        )
+        # (batch, r, TGT_NT), R -> C
+        # (batch, r, TGT_PT), R -> C
+        TRNT, TRPT = torch.split(
+            params["right"], (self.tgt_nt_states, self.tgt_pt_states), -1
+        )
         R = H.shape[-1]
         H = H.view(batch, self.tgt_nt_states, nt_spans, R)
-        HL = torch.einsum("qair,qla->qril", H, TLNT)
-        HR = torch.einsum("qair,qla->qril", H, TRNT)
 
         # ===== This routine is optimized for src_len < tgt_len =====
 
@@ -233,19 +100,28 @@ class D1PCFG(TDStyleBase):
         else:
             SL = params["sl"]  # (batch, r, SRC_NT, SRC_NT), R, i -> j
             SR = params["sr"]  # (batch, r, SRC_NT, SRC_NT), R, i -> k
-            SLR = SL.unsqueeze(-1) + SR.unsqueeze(-2)
+            SLR = tse.log_einsum(self.eq_slr, SL, SR, block_size=self.block_size)
 
         # ===== End =====
 
-        normalizer = terms.new_full((batch, N, N), -1e9)
-        norm = terms.flatten(2).max(-1)[0]
-        diagonal_copy_(normalizer, norm, w=1)
-        terms = (terms - norm[..., None, None]).exp()
+        if marginal:
+            span_indicator = terms.new_zeros(
+                batch, N, N, self.tgt_nt_states, nt_spans
+            ).requires_grad_()
+            # span_indicator = terms.new_zeros(batch, N, N).requires_grad_()
+            span_indicator_running = span_indicator[:]
+        else:
+            span_indicator = None
 
         left_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
         right_s = terms.new_full((batch, N, N, nt_spans, R), -1e9)
-        left_term = torch.einsum("xlpi,xrp->xlir", terms, TLPT)
-        right_term = torch.einsum("xlpi,xrp->xlir", terms, TRPT)
+        if marginal:
+            indicator = span_indicator_running.diagonal(1, 1, 2).movedim(-1, 1)
+            terms = terms + indicator
+        left_term = tse.log_einsum(self.eq_tor, terms, TLPT, block_size=self.block_size)
+        right_term = tse.log_einsum(
+            self.eq_tor, terms, TRPT, block_size=self.block_size
+        )
         diagonal_copy_(left_s, left_term, w=1)
         diagonal_copy_(right_s, right_term, w=1)
 
@@ -256,52 +132,67 @@ class D1PCFG(TDStyleBase):
 
         # w: span width
         final = []
-        final_normalizer = []
         for step, w in enumerate(range(2, N)):
 
             # n: the number of spans of width w.
             n = N - w
             y = stripe(left_s, n, w - 1, (0, 1)).clone()
             z = stripe(right_s, n, w - 1, (1, w), 0).clone()
-            y_normalizer = stripe(normalizer, n, w - 1, (0, 1))
-            z_normalizer = stripe(normalizer, n, w - 1, (1, w), 0)
-            x, x_normalizer = merge(y, z, y_normalizer, z_normalizer, SLR)
+
+            qnkrj = tse.log_einsum(self.eq_qnkrj, y, z, block_size=self.block_size)
+            qnri = tse.log_einsum(self.eq_qnri, qnkrj, SLR, block_size=self.block_size)
+            x = tse.log_einsum(self.eq_qnai, qnri, H, block_size=self.block_size)
 
             unfinished = n_at_position[step + 1]
             current_bsz = n_at_position[step]
 
-            if current_bsz - unfinished > 0:
-                final.insert(
-                    0,
-                    torch.einsum(
-                        "qnri,qair->qnai",
-                        x[unfinished:current_bsz, :1],
-                        H[unfinished:current_bsz],
-                    ),
-                )
-                final_normalizer.insert(0, x_normalizer[unfinished:current_bsz, :1])
-            if unfinished > 0:
-                if current_bsz > unfinished:
-                    x = x[:unfinished]
-                    left_s = left_s[:unfinished]
-                    right_s = right_s[:unfinished]
-                    SLR = SLR[:unfinished]
-                    HL = HL[:unfinished]
-                    HR = HR[:unfinished]
-                    normalizer = normalizer[:unfinished]
-                    x_normalizer = x_normalizer[:unfinished]
+            if constraint is not None:
+                value, mask = constraint[step]
+                value = value[:current_bsz]
+                mask = mask[:current_bsz]
+                x = torch.where(mask, value, x)
 
-                left_x = torch.einsum("qnri,qril->qnil", x, HL)
-                right_x = torch.einsum("qnri,qril->qnil", x, HR)
+            if marginal:
+                indicator = span_indicator_running.diagonal(w, 1, 2).movedim(-1, 1)
+                # indicator = span_indicator_running.diagonal(w, 1, 2)[..., None, None]
+                x += indicator
+
+            if current_bsz - unfinished > 0:
+                final.insert(0, x[unfinished:current_bsz, :1])
+            if unfinished > 0:
+                x = x[:unfinished]
+                left_s = left_s[:unfinished]
+                right_s = right_s[:unfinished]
+                SLR = SLR[:unfinished]
+                H = H[:unfinished]
+                TLNT = TLNT[:unfinished]
+                TRNT = TRNT[:unfinished]
+                if marginal:
+                    span_indicator_running = span_indicator_running[:unfinished]
+
+                left_x = tse.log_einsum(
+                    self.eq_tor, x, TLNT, block_size=self.block_size
+                )
+                right_x = tse.log_einsum(
+                    self.eq_tor, x, TRNT, block_size=self.block_size
+                )
                 diagonal_copy_(left_s, left_x, w)
                 diagonal_copy_(right_s, right_x, w)
-                diagonal_copy_(normalizer, x_normalizer, w)
             if unfinished == 0:
                 break
+
         final = torch.cat(final, dim=0)
-        final_normalizer = torch.cat(final_normalizer, dim=0)
-        final = (final + 1e-9).squeeze(1).log() + root
-        logZ = final.logsumexp((-2, -1)) + final_normalizer.squeeze(-1)
+
+        final = final.squeeze(1) + root
+        logZ = final.logsumexp((-2, -1))
+        if decode:
+            spans = self.mbr_decoding(logZ, span_indicator, lens)
+            # spans = [[(span[0], span[1] - 1, 0) for span in inst] for inst in spans]
+            return spans
+        if marginal:
+            torch.set_grad_enabled(grad_state)
+            cm.__exit__(None, None, None)
+            return grad(logZ.sum(), [span_indicator])[0]
         return -logZ
 
     @torch.no_grad()
@@ -325,10 +216,10 @@ class D1PCFG(TDStyleBase):
 
         terms = terms.exp().cumsum(2)
         roots = roots.exp().cumsum(1)
-        H = H.cumsum(2)
-        L = L.cumsum(2)
-        R = R.cumsum(2)
-        SLR = SLR.flatten(3).cumsum(3)
+        H = H.exp().cumsum(2)
+        L = L.exp().cumsum(2)
+        R = R.exp().cumsum(2)
+        SLR = SLR.exp().flatten(3).cumsum(3)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()
@@ -464,44 +355,13 @@ class D1PCFG(TDStyleBase):
         head = params["head"].view(b, nt_states, -1, r)
         rule = torch.einsum(
             "xair,xrb,xrc,xrijk->xaibjck",
-            head,
-            params["left"],
-            params["right"],
-            params["slr"],
+            head.exp(),
+            params["left"].exp(),
+            params["right"].exp(),
+            params["slr"].exp(),
         )
         shape = rule.shape
         rule = rule.reshape(
             shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
         ).log()
         return {"term": params["term"], "rule": rule, "root": params["root"]}
-
-
-@torch.jit.script
-def eq_qnkrj(v1, v2):
-    # "qnwjr,qnwkr->qnkrj"
-    v = v1.transpose(-1, -2).unsqueeze(-3) + v2.unsqueeze(-1)
-    return torch.logsumexp(v, dim=2)
-
-
-@checkpoint
-@torch.jit.script
-def merge(y, z, y_normalizer, z_normalizer, slr):
-    y = (y + 1e-9).log() + y_normalizer[..., None, None]
-    z = (z + 1e-9).log() + z_normalizer[..., None, None]
-    qnkrj = eq_qnkrj(y, z)
-    normalizer = qnkrj.flatten(2).max(-1)[0]
-    qnkrj = (qnkrj - normalizer[..., None, None, None]).exp()
-    x = torch.einsum("qnkrj,qrijk->qnri", qnkrj, slr)
-    return x, normalizer
-
-
-@checkpoint
-@torch.jit.script
-def merge_h(y, z, y_normalizer, z_normalizer, slr, h):
-    y = (y + 1e-9).log() + y_normalizer[..., None, None]
-    z = (z + 1e-9).log() + z_normalizer[..., None, None]
-    qnkrj = eq_qnkrj(y, z)
-    normalizer = qnkrj.flatten(2).max(-1)[0]
-    qnkrj = (qnkrj - normalizer[..., None, None, None]).exp()
-    x = torch.einsum("qnkrj,qrijk,qair->qnai", qnkrj, slr, h)
-    return x, normalizer

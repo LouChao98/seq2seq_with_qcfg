@@ -1,3 +1,4 @@
+import logging
 from enum import IntEnum
 from typing import Dict, List, Union
 
@@ -11,6 +12,7 @@ from ._fn import diagonal, diagonal_copy_, stripe
 from ._utils import checkpoint, process_param_for_marginal, weighted_random
 from .td_style_base import TDStyleBase
 
+log = logging.getLogger(__file__)
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
 
 
@@ -186,7 +188,7 @@ class FastestTDPCFG(TDStyleBase):
 
         preds = []
         for b in range(len(terms)):
-            samples, types, scores = self.sample(
+            samples, types = self.sample(
                 terms[b],
                 H[b],
                 L[b],
@@ -200,14 +202,15 @@ class FastestTDPCFG(TDStyleBase):
                 num_samples=num_samples,
                 max_length=max_length,
             )
-            sample_scores = [
-                (sample, type_, score)
-                for sample, type_, score in zip(samples, types, scores)
+            samples = [
+                (sample, type_)
+                for sample, type_ in zip(samples, types)
                 if len(sample) > 1
             ]  # len=0 when max_actions is reached but no PT rules applied
-            if len(sample_scores) == 0:
-                sample_scores = ([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)
-            preds.append(sample_scores)
+            if len(samples) == 0:
+                log.warning("All trials are failed.")
+                samples = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB])]
+            preds.append(samples)
         return preds
 
     @staticmethod
@@ -233,12 +236,10 @@ class FastestTDPCFG(TDStyleBase):
         COPY_PT = pt_states - 1
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
-        scores = [0.0 for _ in range(num_samples)]
 
         for i in prange(num_samples):
             actions = 0
             sample = weighted_random(roots)
-            # score = roots[sample]
             nonterminals: List[int] = [sample]
             preterminals: List[int] = []
             is_copy_pt: List[bool] = []
@@ -261,11 +262,6 @@ class FastestTDPCFG(TDStyleBase):
                     head = weighted_random(rules_head[s])
                     left = weighted_random(rules_left[:, head])
                     right = weighted_random(rules_right[:, head])
-                    # score += (
-                    #     rules_head[s, head]
-                    #     + rules_left[left, head]
-                    #     + rules_right[right, head]
-                    # )
                     nonterminals.extend([right, left])
                 else:
                     preterminals.append(s - NT)
@@ -296,8 +292,7 @@ class FastestTDPCFG(TDStyleBase):
                             terminal_type.append(_VOCAB)
             samples[i] = terminals
             types[i] = terminal_type
-            # scores[i] = score / len(terminals)
-        return samples, types, scores
+        return samples, types
 
     @staticmethod
     def get_pcfg_rules(params, tgt_nt):
