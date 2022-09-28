@@ -1,26 +1,26 @@
-_target_: src.models.tgt_parser.neural_qcfg_d1.NeuralQCFGD1TgtParser
+_target_: src.models.tgt_parser.neural_qcfg.NeuralQCFGTgtParser
 _recursive_: false
 
 # base
 pt_states: 8
-nt_states: ${.pt_states}
-pt_span_range: [1, 1000]
-nt_span_range: ${.pt_span_range}
+nt_states: 8
+pt_span_range: [1, 1]
+nt_span_range: [2, 1000]
 use_copy: true
 rule_hard_constraint: ~
 rule_soft_constraint:
-  _target_: src.models.constraint.unfolded.USimpleHierarchy
+  _target_: src.models.constraint.fully_parameterized.FPSimpleHierarchy
   pt_states: ${..pt_states}
   nt_states: ${..nt_states}
 rule_soft_constraint_solver:
   _target_: src.models.posterior_regularization.linear.UngroundedPRLineSearchSolver
-  field: "slr"
+  field: "rule"
   b: 2.0
   lbound: 1.0e-4
   rbound: 100
   num_point: 16
   num_iter: 3
-  log_input: false
+  log_input: true
 generation_max_length: 40
 generation_num_samples: 10
 generation_ppl_batch_size: 1
@@ -28,4 +28,3 @@ generation_ppl_batch_size: 1
 # NeuralQCFGTgtParser
 dim: 512
 num_layers: 3
-cpd_rank: 256

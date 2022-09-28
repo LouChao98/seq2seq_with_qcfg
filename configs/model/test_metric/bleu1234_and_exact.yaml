@@ -2,19 +2,14 @@ _target_: src.utils.metric.MultiMetric
 bleu-1:
   _target_: torchmetrics.BLEUScore
   n_gram: 1
-  compute_on_step: false
 bleu-2:
   _target_: torchmetrics.BLEUScore
   n_gram: 2
-  compute_on_step: false
 bleu-3:
   _target_: torchmetrics.BLEUScore
   n_gram: 3
-  compute_on_step: false
 bleu-4:
   _target_: torchmetrics.BLEUScore
   n_gram: 4
-  compute_on_step: false
 exact:
   _target_: src.utils.metric.WholeSentMatchAccuracy
-  compute_on_step: false

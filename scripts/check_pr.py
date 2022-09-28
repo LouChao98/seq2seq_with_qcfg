@@ -1,3 +1,6 @@
+import sys
+
+sys.path.insert(0, "..")
 import math
 from collections import defaultdict
 from itertools import product

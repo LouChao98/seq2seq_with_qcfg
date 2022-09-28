@@ -11,7 +11,6 @@ import numpy as np
 import torch
 from amrlib.utils.logging import silence_penman
 from nltk.tokenize import word_tokenize
-from numba import jit
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer

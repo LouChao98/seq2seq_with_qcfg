@@ -40,6 +40,17 @@ def extract_parse(span, length, inc=0):
     return spans, tree[0]
 
 
+def extract_parses_span_only(matrix, lengths, kbest=False, inc=0):
+    cover = matrix.nonzero()
+    b, w, l, A = cover.unbind(1)
+    w += inc
+    r = l + w
+    spans = [[] for _ in range(len(matrix))]
+    for bi, li, ri, Ai in zip(b.tolist(), l.tolist(), r.tolist(), A.tolist()):
+        spans[bi].append((li, ri, Ai))
+    return spans
+
+
 def get_actions(tree, SHIFT=0, REDUCE=1, OPEN="(", CLOSE=")"):
     # input tree in bracket form: ((A B) (C D))
     # output action sequence: S S R S S R R

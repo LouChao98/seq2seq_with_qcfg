@@ -134,27 +134,6 @@ class NeuralQCFGTgtParser(TgtParserBase):
         rule_emb_child = rule_emb_left[:, :, None, :] + rule_emb_right[:, None, :, :]
         rule_emb_child = rule_emb_child.view(batch_size, (nt + pt) ** 2, self.dim)
 
-        # # legacy implementation. It produces ill-defined distribution because
-        # # valid_mask is applied after normalization.
-        # rules = (
-        #     torch.matmul(rule_emb_parent, rule_emb_child.transpose(1, 2))
-        #     .log_softmax(-1)
-        #     .clone()
-        # )
-        # rules = rules.view(batch_size, nt, nt + pt, nt + pt)
-
-        # # fmt: off
-        # nt_mask = torch.arange(nt_num_nodes, device=rules.device).unsqueeze(0) \
-        #     < torch.tensor(nt_num_nodes_list, device=rules.device).unsqueeze(1)
-        # pt_mask = torch.arange(pt_num_nodes, device=rules.device).unsqueeze(0) \
-        #     < torch.tensor(pt_num_nodes_list, device=rules.device).unsqueeze(1)
-        # lhs_mask = nt_mask.unsqueeze(1).expand(-1, self.nt_states, -1).reshape(batch_size, -1)
-        # _pt_rhs_mask = pt_mask.unsqueeze(1).expand(-1, self.pt_states, -1).reshape(batch_size, -1)
-        # # fmt: on
-        # rhs_mask = torch.cat([lhs_mask, _pt_rhs_mask], dim=1)
-        # mask = torch.einsum("bx,by,bz->bxyz", lhs_mask, rhs_mask, rhs_mask)
-        # rules[~mask] = self.neg_huge
-
         rules = torch.matmul(rule_emb_parent, rule_emb_child.transpose(1, 2))
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
 
@@ -190,9 +169,10 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         nt_constraint = None
         if x is not None:
-            terms, nt_constraint, _, _ = self.build_terms_and_extra_rules_give_tgt(
+            terms, roots, nt_constraint, _, _ = self.build_rules_give_tgt(
                 x,
                 terms,
+                roots,
                 pt_num_nodes,
                 pt_spans,
                 nt_num_nodes,

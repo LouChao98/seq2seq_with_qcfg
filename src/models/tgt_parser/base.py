@@ -1,3 +1,4 @@
+from logging import root
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -72,7 +73,7 @@ class TgtParserBase(nn.Module):
         params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = params
         batch_size = len(lengths)
         device = x.device
-        constraint_feature = self.rule_soft_constraint.get_score(
+        constraint_feature = self.rule_soft_constraint.get_feature(
             batch_size, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device
         )
         return self.rule_soft_constraint_solver(
@@ -106,11 +107,13 @@ class TgtParserBase(nn.Module):
         spans,
         src_ids: torch.Tensor,
         src: List[List[str]],
+        params=None,
         **kwargs,
     ):
-        params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = self.get_params(
-            node_features, spans, **kwargs
-        )
+        if params is None:
+            params = self.get_params(node_features, spans, **kwargs)
+        params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = params
+
         preds = self.pcfg.sampled_decoding(
             params,
             nt_spans,
@@ -265,6 +268,7 @@ class TgtParserBase(nn.Module):
                 )
                 ppl.append(np.exp(nll / np.array(_lens[j : j + batch_size])))
             ppl = np.concatenate(ppl, 0)
+            assert not np.any(np.isnan(ppl))
             chosen = np.argmin(ppl)
             new_preds.append(
                 (
@@ -350,10 +354,11 @@ class TgtParserBase(nn.Module):
         for i, item in zip(range(num_terms), pt_spans):
             assert item[0] == item[1] == i
 
-    def build_terms_and_extra_rules_give_tgt(
+    def build_rules_give_tgt(
         self,
         tgt: torch.Tensor,
         terms: torch.Tensor,
+        roots: torch.Tensor,
         max_pt_spans: int,
         pt_spans: List[List[Tuple[int, int, int]]],
         max_nt_spans: int,
@@ -385,6 +390,14 @@ class TgtParserBase(nn.Module):
                     nt_copy,
                     constraint_scores,
                 )
+            else:
+                constraint_scores = self.get_init_nt_constraint(
+                    batch_size, n, max_nt_spans
+                )
+
+            roots = roots.clone().view(batch_size, self.nt_states, -1)
+            roots[:, -1] = self.neg_huge
+            roots = roots.view(batch_size, -1)
 
         if observed_mask is not None:
             constraint_scores = self.build_observed_span_constraint(
@@ -396,7 +409,7 @@ class TgtParserBase(nn.Module):
                 constraint_scores, tgt.device
             )
 
-        return terms, constraint_scores, lse_scores, add_scores
+        return terms, roots, constraint_scores, lse_scores, add_scores
 
     def build_pt_copy_constraint(self, terms, constraint):
         batch_size, n = terms.shape[:2]
@@ -476,3 +489,11 @@ class PCFGProxy:
             attribute_obj = getattr(obj, attribute)
             self.__dict__["attribute_obj"] = attribute_obj
         return getattr(attribute_obj, key)
+
+    def __call__(self, *args, **kwargs):
+        if (attribute_obj := self.__dict__["attribute_obj"]) is None:
+            obj = self.__dict__["obj"]
+            attribute = self.__dict__["attribute"]
+            attribute_obj = getattr(obj, attribute)
+            self.__dict__["attribute_obj"] = attribute_obj
+        return attribute_obj(*args, **kwargs)

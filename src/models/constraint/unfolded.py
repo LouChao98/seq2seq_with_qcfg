@@ -29,7 +29,7 @@ class USimpleHierarchy:
         return node_mask
 
     def get_feature(self, *args, **kwargs):
-        return 1.0 - self.get_mask(*args, **kwargs).float()
+        return (1.0 - self.get_mask(*args, **kwargs).float()).unsqueeze(1)
 
     def get_mask_impl2(
         self, batch_size, max_pt_spans, max_nt_spans, pt_spans, nt_spans, device

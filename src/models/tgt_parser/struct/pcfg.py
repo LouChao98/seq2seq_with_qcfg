@@ -8,13 +8,15 @@ from numba import jit, prange
 from torch import Tensor
 from torch_struct import SentCFG
 
-from ._utils import process_param_for_marginal, weighted_random
+from ._utils import process_param_for_marginal, weighted_random, weighted_random_v2
 
 log = logging.getLogger(__file__)
+
 # I don't know how to use IntEnum with numba's jit.
 # So I use this workaround.
 # TODO can we move this to _utils but not break numba? not tested.
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
+_OK, _SONMASK, _REACHLIMIT = 0, 1, 2
 
 
 class TokenType(IntEnum):
@@ -29,7 +31,7 @@ class PCFG:
     COPY_NT = 2
 
     def __init__(self):
-        pass
+        self.threshold = torch.nn.Threshold(1e-8, 0, True)
 
     def __call__(self, params, lens, decode=False, marginal=False):
         # terms: bsz x seqlen x pt
@@ -85,14 +87,16 @@ class PCFG:
         use_copy=True,
         num_samples=10,
         max_length=100,
+        strict=False,
     ):
         terms = params["term"].detach()
         rules = params["rule"].detach()
         roots = params["root"].detach()
 
-        terms = terms.softmax(2).cumsum(2)
-        rules = rules.flatten(2).softmax(2).cumsum(2)
-        roots = roots.softmax(1).cumsum(1)
+        terms = terms.exp().cumsum(2)
+        # rules = rules.exp().flatten(2).cumsum(2)
+        rules = self.threshold(rules.exp()).flatten(2).cumsum(2)
+        roots = roots.exp().cumsum(1)
         terms = terms.cpu().numpy()
         rules = rules.cpu().numpy()
         roots = roots.cpu().numpy()
@@ -102,7 +106,7 @@ class PCFG:
 
         preds = []
         for b in range(len(terms)):
-            samples, types = self.sample(
+            samples, types, status = self.sample(
                 terms[b],
                 rules[b],
                 roots[b],
@@ -114,10 +118,14 @@ class PCFG:
                 num_samples=num_samples,
                 max_length=max_length,
             )
+            if (cnt := sum(item == _REACHLIMIT for item in status)) > 0:
+                log.warning(f"{cnt} trials are terminated due to REACHLIMIT")
+            if (cnt := sum(item == _SONMASK for item in status)) > 0:
+                log.warning(f"{cnt} trials are terminated due to SONMASK")
             samples = [
                 (sample, type_)
-                for sample, type_ in zip(samples, types)
-                if len(sample) > 1
+                for sample, type_, status_ in zip(samples, types, status)
+                if len(sample) > 1 and (not strict or status_ == _OK)
             ]  # len=0 when max_actions is reached but no PT rules applied
             if len(samples) == 0:
                 log.warning("All trials are failed.")
@@ -144,7 +152,6 @@ class PCFG:
         # Kim's impl derive the rightmost NT first. But I change it to left first.
         # My order (LL) should be more nature to combine with LM, as the generation order
         # of mine is left-to-right.
-        # TODO inspect how often the sampling reaches max_length and max_actions.
         # TODO try bfs.
         #
         # Kim's impl seems to be wrong when deriving COPY. The order of left/right PT
@@ -157,61 +164,75 @@ class PCFG:
         COPY_PT = pt_states - 1
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
+        status = [_OK for _ in range(num_samples)]
 
         for i in range(num_samples):
-            actions = 0
-            sample = weighted_random(roots)
-            nonterminals: List[int] = [sample]
-            preterminals: List[int] = []
-            is_copy_pt: List[bool] = []
+            try:
+                sample = weighted_random(roots)
+                nonterminals: List[int] = [sample]
+                preterminals: List[int] = []
+                is_copy_pt: List[bool] = []
+                actions = 0
 
-            while (
-                len(nonterminals) > 0
-                and len(preterminals) < max_length
-                and actions < max_actions
-            ):
-                s = nonterminals.pop()  # get the last element
-                if s < NT:
-                    if use_copy:
-                        nt_state = s // nt_num_nodes
-                        if nt_state == COPY_NT:
-                            nt_node = s % nt_num_nodes
-                            preterminals.append(nt_node)
-                            is_copy_pt.append(True)
-                            continue
-                    actions += 1
-                    sample = weighted_random(rules[s])
-                    left, right = divmod(sample, S)
-                    nonterminals.extend([right, left])
-                else:
-                    preterminals.append(s - NT)
-                    is_copy_pt.append(False)
-
-            terminals: List[int] = []
-            terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
-            for s, flag in zip(preterminals, is_copy_pt):
-                if flag:
-                    terminals.append(s)
-                    terminal_type.append(_COPY_NT)
-                else:
-                    src_pt_state = s // pt_num_nodes
-                    if use_copy and src_pt_state == COPY_PT:
-                        src_node = s % pt_num_nodes
-                        terminals.append(src_node)
-                        terminal_type.append(_COPY_PT)
+                while (
+                    len(nonterminals) > 0
+                    and len(preterminals) < max_length
+                    and actions < max_actions
+                ):
+                    s = nonterminals.pop()  # get the last element
+                    if s < NT:
+                        if use_copy:
+                            nt_state = s // nt_num_nodes
+                            if nt_state == COPY_NT:
+                                nt_node = s % nt_num_nodes
+                                preterminals.append(nt_node)
+                                is_copy_pt.append(True)
+                                continue
+                        actions += 1
+                        sample = weighted_random_v2(rules[s])
+                        left, right = divmod(sample, S)
+                        nonterminals.extend([right, left])
                     else:
-                        sample = weighted_random(terms[s])
-                        if use_copy and sample == UNK:
-                            # force <unk> tokens to copy
+                        preterminals.append(s - NT)
+                        is_copy_pt.append(False)
+
+            except Exception:
+                status[i] = _SONMASK
+
+            if actions == max_actions or (
+                len(preterminals) == max_length and len(nonterminals) > 0
+            ):
+                status[i] = _REACHLIMIT
+
+            try:
+                terminals: List[int] = []
+                terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
+                for s, flag in zip(preterminals, is_copy_pt):
+                    if flag:
+                        terminals.append(s)
+                        terminal_type.append(_COPY_NT)
+                    else:
+                        src_pt_state = s // pt_num_nodes
+                        if use_copy and src_pt_state == COPY_PT:
                             src_node = s % pt_num_nodes
                             terminals.append(src_node)
                             terminal_type.append(_COPY_PT)
                         else:
-                            terminals.append(sample)
-                            terminal_type.append(_VOCAB)
+                            sample = weighted_random_v2(terms[s])
+                            if use_copy and sample == UNK:
+                                # force <unk> tokens to copy
+                                src_node = s % pt_num_nodes
+                                terminals.append(src_node)
+                                terminal_type.append(_COPY_PT)
+                            else:
+                                terminals.append(sample)
+                                terminal_type.append(_VOCAB)
+            except Exception:
+                status[i] = _SONMASK
+
             samples[i] = terminals
             types[i] = terminal_type
-        return samples, types
+        return samples, types, status
 
     @staticmethod
     def sample_inspect(
@@ -252,7 +273,6 @@ class PCFG:
             actions = 0
             sample = weighted_random(roots)
             trajectory.append(("r", sample))
-            # score = roots[sample]
             nonterminals: List[int] = [sample]
             preterminals: List[int] = []
             is_copy_pt: List[bool] = []
@@ -334,7 +354,7 @@ class PCFG:
         COPY_PT = pt_states - 1
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
-        scores = [0.0 for _ in range(num_samples)]
+        status = [_OK for _ in range(num_samples)]
 
         for i in range(num_samples):
             actions = 0
@@ -360,7 +380,6 @@ class PCFG:
                             continue
                     actions += 1
                     sample = weighted_random(rules[s])
-                    # score += rules[s, sample]
                     left, right = divmod(sample, S)
                     nonterminals.extend([left, right])
                 else:
@@ -384,7 +403,6 @@ class PCFG:
                         terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random(terms[s])
-                        # score += terms[s, sample]
                         if use_copy and sample == UNK:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
@@ -395,18 +413,33 @@ class PCFG:
                             terminal_type.append(_VOCAB)
             samples[i] = terminals
             types[i] = terminal_type
-            # scores[i] = score / len(terminals)
-        return samples, types, scores
+        return samples, types, status
 
     def ce(self, q, p, lens):
-        # ce(q, p)
+        # ce(q, p) = part(p) - <marginal, param(p)>
         q_margin = self(q, lens, marginal=True)
-        return (
-            self(p, lens)
-            - (q_margin[0].detach() * p[0]).sum((1, 2))
-            - (q_margin[1].detach() * p[1]).sum((1, 2, 3))
-            - (q_margin[2].detach() * p[2]).sum(1)
+        pl = (p["term"], p["rule"], p["root"])
+        ce = (
+            -self(p, lens)
+            - (q_margin[0].detach() * pl[0]).sum((1, 2))
+            - (q_margin[1].detach() * pl[1]).sum((1, 2, 3))
+            - (q_margin[2].detach() * pl[2]).sum(1)
         )
+        return ce
+
+    def kl(self, q, p, lens):
+        # kl(q, p) = part(p) - part(q) - <marginal, param(p) - param(q)>
+        q_margin = self(q, lens, marginal=True)
+        pl = (p["term"], p["rule"], p["root"])
+        ql = (q["term"], q["rule"], q["root"])
+        kl = (
+            self(q, lens)
+            - self(p, lens)
+            - (q_margin[0].detach() * (pl[0] - ql[0])).sum((1, 2))
+            - (q_margin[1].detach() * (pl[1] - ql[1])).sum((1, 2, 3))
+            - (q_margin[2].detach() * (pl[2] - ql[2])).sum(1)
+        )
+        return kl
 
 
 if __name__ == "__main__":

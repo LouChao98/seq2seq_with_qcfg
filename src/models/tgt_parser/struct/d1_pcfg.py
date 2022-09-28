@@ -17,10 +17,13 @@ from ._utils import (
 )
 from .td_style_base import TDStyleBase
 
-log = logging.getLogger(__file__)
 # import torch_semiring_einsum as tse
 
+
+log = logging.getLogger(__file__)
+
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
+_OK, _SONMASK, _REACHLIMIT = 0, 1, 2
 
 
 class TokenType(IntEnum):
@@ -45,6 +48,7 @@ class D1PCFG(TDStyleBase):
         self.tgt_nt_states = tgt_nt_states
         self.tgt_pt_states = tgt_pt_states
         self.max_states = max(tgt_nt_states, tgt_pt_states)
+        self.threshold = torch.nn.Threshold(1e-8, 0, True)
 
         # self.eq_slr = tse.compile_equation("qrij, qrik->qrijk")
         # self.eq_qnkrj = tse.compile_equation("qnwjr,qnwkr->qnkrj")
@@ -141,9 +145,9 @@ class D1PCFG(TDStyleBase):
             n = N - w
             y = stripe(left_s, n, w - 1, (0, 1)).clone()
             z = stripe(right_s, n, w - 1, (1, w), 0).clone()
-            y_normalizer = stripe(normalizer, n, w - 1, (0, 1))
-            z_normalizer = stripe(normalizer, n, w - 1, (1, w), 0)
-            x, x_normalizer = merge_h(y, z, y_normalizer, z_normalizer, SLR, head)
+            yn = stripe(normalizer, n, w - 1, (0, 1))
+            zn = stripe(normalizer, n, w - 1, (1, w), 0)
+            x, xn = merge_h(y, z, yn, zn, SLR, head)
 
             unfinished = n_at_position[step + 1]
             current_bsz = n_at_position[step]
@@ -153,7 +157,7 @@ class D1PCFG(TDStyleBase):
                 if value.ndim > 0:
                     value = value[:current_bsz]
                 mask = mask[:current_bsz]
-                x = torch.where(mask, (value - x_normalizer[..., None, None]).exp(), x)
+                x, xn = set_score(x, xn, mask, value)
 
             if marginal:
                 indicator = span_indicator_running.diagonal(w, 1, 2).movedim(-1, 1)
@@ -161,7 +165,7 @@ class D1PCFG(TDStyleBase):
 
             if current_bsz - unfinished > 0:
                 final.insert(0, x[unfinished:current_bsz, :1])
-                final_normalizer.insert(0, x_normalizer[unfinished:current_bsz, :1])
+                final_normalizer.insert(0, xn[unfinished:current_bsz, :1])
             if unfinished > 0:
                 if current_bsz > unfinished:
                     x = x[:unfinished]
@@ -172,7 +176,7 @@ class D1PCFG(TDStyleBase):
                     TLNT = TLNT[:unfinished]
                     TRNT = TRNT[:unfinished]
                     normalizer = normalizer[:unfinished]
-                    x_normalizer = x_normalizer[:unfinished]
+                    xn = xn[:unfinished]
                     if marginal:
                         span_indicator_running = span_indicator_running[:unfinished]
 
@@ -180,7 +184,7 @@ class D1PCFG(TDStyleBase):
                 right_x = torch.einsum("qnai,qra->qnir", x, TRNT)
                 diagonal_copy_(left_s, left_x, w)
                 diagonal_copy_(right_s, right_x, w)
-                diagonal_copy_(normalizer, x_normalizer, w)
+                diagonal_copy_(normalizer, xn, w)
             if unfinished == 0:
                 break
         final = torch.cat(final, dim=0)
@@ -196,7 +200,7 @@ class D1PCFG(TDStyleBase):
             return grad(logZ.sum(), [span_indicator])[0]
         return -logZ
 
-    def logZ(self, params: Dict[str, Tensor], lens):
+    def inside_with_fused_factor(self, params: Dict[str, Tensor], lens):
         if not isinstance(lens, torch.Tensor):
             lens = torch.tensor(lens)
         assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
@@ -315,6 +319,7 @@ class D1PCFG(TDStyleBase):
         use_copy=True,
         num_samples=10,
         max_length=100,
+        strict=False,
     ):
         terms = params["term"]
         roots = params["root"]
@@ -326,15 +331,22 @@ class D1PCFG(TDStyleBase):
         terms = terms.exp().cumsum(2)
         roots = roots.exp().cumsum(1)
         H = H.cumsum(2)
-        L = L.cumsum(2)
-        R = R.cumsum(2)
-        SLR = SLR.flatten(3).cumsum(3)
+        LNT, LPT = L.split((self.tgt_nt_states, self.tgt_pt_states), 2)
+        LNT = LNT.cumsum(2)
+        LPT = LPT.cumsum(2)
+        RNT, RPT = R.split((self.tgt_nt_states, self.tgt_pt_states), 2)
+        RNT = RNT.cumsum(2)
+        RPT = RPT.cumsum(2)
+        SLR = self.threshold(SLR).flatten(3).cumsum(3)
+        # SLR = SLR.flatten(3).cumsum(3)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()
         H = H.cpu().numpy()
-        L = L.cpu().numpy()
-        R = R.cpu().numpy()
+        LNT = LNT.cpu().numpy()
+        LPT = LPT.cpu().numpy()
+        RNT = RNT.cpu().numpy()
+        RPT = RPT.cpu().numpy()
         SLR = SLR.cpu().numpy()
 
         max_nt_spans = max(len(item) for item in nt_spans)
@@ -342,11 +354,13 @@ class D1PCFG(TDStyleBase):
 
         preds = []
         for b in range(len(terms)):
-            samples, types = self.sample(
+            samples, types, status = self.sample(
                 terms[b],
                 H[b],
-                L[b],
-                R[b],
+                LNT[b],
+                LPT[b],
+                RNT[b],
+                RPT[b],
                 SLR[b],
                 roots[b],
                 max_nt_spans,
@@ -357,10 +371,14 @@ class D1PCFG(TDStyleBase):
                 num_samples=num_samples,
                 max_length=max_length,
             )
+            if (cnt := sum(item == _REACHLIMIT for item in status)) > 0:
+                log.warning(f"{cnt} trials are terminated due to REACHLIMIT")
+            if (cnt := sum(item == _SONMASK for item in status)) > 0:
+                log.warning(f"{cnt} trials are terminated due to SONMASK")
             samples = [
                 (sample, type_)
-                for sample, type_ in zip(samples, types)
-                if len(sample) > 1
+                for sample, type_, status_ in zip(samples, types, status)
+                if len(sample) > 1 and (not strict or status_ == _OK)
             ]  # len=0 when max_actions is reached but no PT rules applied
             if len(samples) == 0:
                 log.warning("All trials are failed.")
@@ -373,8 +391,10 @@ class D1PCFG(TDStyleBase):
     def sample(
         terms: np.ndarray,  # seqlen x pt, in normal space
         rules_head: np.ndarray,  # nt x r, in normal space
-        rules_left: np.ndarray,  # (nt+pt) x r, in normal space
-        rules_right: np.ndarray,  # (nt+pt) x r, in normal space
+        rules_left_nt: np.ndarray,  # nt x r, in normal space
+        rules_left_pt: np.ndarray,  # pt x r, in normal space
+        rules_right_nt: np.ndarray,  # nt x r, in normal space
+        rules_right_pt: np.ndarray,  # pt x r, in normal space
         rules_src: np.ndarray,  # r x src x src x src, in normal space
         roots: np.ndarray,  # nt, in normal space
         nt_num_nodes: int,
@@ -392,7 +412,7 @@ class D1PCFG(TDStyleBase):
         COPY_PT = pt_states - 1
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
-        is_safe = [True for _ in range(num_samples)]
+        status = [_OK for _ in range(num_samples)]
 
         for i in range(num_samples):
             try:
@@ -416,10 +436,16 @@ class D1PCFG(TDStyleBase):
                             continue
                         actions += 1
                         r = weighted_random_v2(rules_head[s])
-                        left = weighted_random_v2(rules_left[r])
-                        right = weighted_random_v2(rules_right[r])
                         jk = weighted_random_v2(rules_src[r, nt_node])
                         j, k = divmod(jk, nt_num_nodes)
+                        if rules_src[0, j, -1] < 1e-6:
+                            left = weighted_random_v2(rules_left_pt[r]) + nt_states
+                        else:
+                            left = weighted_random_v2(rules_left_nt[r])
+                        if rules_src[0, k, -1] < 1e-6:
+                            right = weighted_random_v2(rules_right_pt[r]) + pt_states
+                        else:
+                            right = weighted_random_v2(rules_right_nt[r])
                         nonterminals.extend(
                             [right * nt_num_nodes + k, left * nt_num_nodes + j]
                         )
@@ -428,34 +454,42 @@ class D1PCFG(TDStyleBase):
                         is_copy_nt.append(False)
 
             except Exception:
-                is_safe[i] = False
+                status[i] = _SONMASK
 
-            terminals: List[int] = []
-            terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
-            for s, flag in zip(preterminals, is_copy_nt):
-                if flag:
-                    terminals.append(s)
-                    terminal_type.append(_COPY_NT)
-                else:
-                    src_pt_state = s // pt_num_nodes
-                    if use_copy and src_pt_state == COPY_PT:
-                        src_node = s % pt_num_nodes
-                        terminals.append(src_node)
-                        terminal_type.append(_COPY_PT)
+            if actions == max_actions or (
+                len(preterminals) == max_length and len(nonterminals) > 0
+            ):
+                status[i] = _REACHLIMIT
+
+            try:
+                terminals: List[int] = []
+                terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
+                for s, flag in zip(preterminals, is_copy_nt):
+                    if flag:
+                        terminals.append(s)
+                        terminal_type.append(_COPY_NT)
                     else:
-                        sample = weighted_random(terms[s])
-                        if use_copy and sample == UNK:
-                            # force <unk> tokens to copy
+                        src_pt_state = s // pt_num_nodes
+                        if use_copy and src_pt_state == COPY_PT:
                             src_node = s % pt_num_nodes
                             terminals.append(src_node)
                             terminal_type.append(_COPY_PT)
                         else:
-                            terminals.append(sample)
-                            terminal_type.append(_VOCAB)
+                            sample = weighted_random_v2(terms[s])
+                            if use_copy and sample == UNK:
+                                # force <unk> tokens to copy
+                                src_node = s % pt_num_nodes
+                                terminals.append(src_node)
+                                terminal_type.append(_COPY_PT)
+                            else:
+                                terminals.append(sample)
+                                terminal_type.append(_VOCAB)
+            except Exception:
+                status[i] = _SONMASK
 
             samples[i] = terminals
             types[i] = terminal_type
-        return samples, types
+        return samples, types, status
 
     @staticmethod
     def get_pcfg_rules(params, nt_states):
@@ -470,10 +504,41 @@ class D1PCFG(TDStyleBase):
             params["slr"],
         )
         shape = rule.shape
-        rule = rule.reshape(
-            shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+        rule = (
+            rule.reshape(
+                shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
+            )
+            + 1e-9
         ).log()
         return {"term": params["term"], "rule": rule, "root": params["root"]}
+
+    @torch.enable_grad()
+    def ce(self, q, p, lens):
+        # ce(q, p)
+        # TODO consider yzhang's impl
+        ql = [q["term"], q["root"], q["head"], q["left"], q["right"], q["slr"]]
+        ql = [item.requires_grad_() for item in ql]
+        pl = [
+            p["term"],
+            p["root"],
+            (p["head"] + 1e-12).log(),
+            (p["left"] + 1e-12).log(),
+            (p["right"] + 1e-12).log(),
+            (p["slr"] + 1e-12).log(),
+        ]
+        logZ = -self(q, lens)
+        q_margin = grad(logZ.sum(), ql)
+
+        ce = (
+            -self(p, lens)
+            - (q_margin[0].detach() * pl[0]).sum((1, 2))
+            - (q_margin[1].detach() * pl[1]).sum(1)
+            - ((q_margin[2].detach() * ql[2].detach()) * pl[2]).sum((1, 2))
+            - ((q_margin[3].detach() * ql[3].detach()) * pl[3]).sum((1, 2))
+            - ((q_margin[4].detach() * ql[4].detach()) * pl[4]).sum((1, 2))
+            - ((q_margin[5].detach() * ql[5].detach()) * pl[5]).sum((1, 2, 3, 4))
+        )
+        return ce
 
 
 @torch.jit.script
@@ -505,3 +570,12 @@ def merge_h(y, z, y_normalizer, z_normalizer, slr, h):
     qnkrj = (qnkrj - normalizer[..., None, None, None]).exp()
     x = torch.einsum("qnkrj,qrijk,qair->qnai", qnkrj, slr, h)
     return x, normalizer
+
+
+@torch.jit.script
+def set_score(x, xn, mask, value):
+    x_real = (x + 1e-9).log() + xn[..., None, None]
+    x_real = torch.where(mask, value, x_real)
+    xn = x_real.flatten(2).max(-1)[0]
+    x = (x_real - xn[..., None, None]).exp()
+    return x, xn

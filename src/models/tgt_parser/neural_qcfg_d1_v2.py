@@ -211,9 +211,10 @@ class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
 
         nt_constraint = None
         if x is not None:
-            terms, nt_constraint, _, _ = self.build_terms_and_extra_rules_give_tgt(
+            terms, roots, nt_constraint, _, _ = self.build_rules_give_tgt(
                 x,
                 terms,
+                roots,
                 pt_num_nodes,
                 pt_spans,
                 nt_num_nodes,

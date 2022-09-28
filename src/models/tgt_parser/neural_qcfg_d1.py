@@ -11,6 +11,7 @@ from .struct.d1_pcfg import D1PCFG
 
 
 def get_nn(dim, cpd_rank):
+    # return MultiResidualLayer(dim, dim, cpd_rank)
     return nn.Sequential(
         nn.LeakyReLU(), nn.Linear(dim, cpd_rank)  # , nn.LayerNorm(cpd_rank)
     )
@@ -202,9 +203,10 @@ class NeuralQCFGD1TgtParser(TgtParserBase):
 
         nt_constraint = None
         if x is not None:
-            terms, nt_constraint, _, _ = self.build_terms_and_extra_rules_give_tgt(
+            terms, roots, nt_constraint, _, _ = self.build_rules_give_tgt(
                 x,
                 terms,
+                roots,
                 pt_num_nodes,
                 pt_spans,
                 nt_num_nodes,

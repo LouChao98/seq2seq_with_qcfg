@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import random
@@ -10,7 +11,6 @@ from typing import Any, List, Optional, Union
 import numpy as np
 import torch
 from nltk.tokenize import word_tokenize
-from numba import jit
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer
@@ -95,83 +95,34 @@ class SemanticParsingDataModule(_DataModule):
             self.data_test = self.apply_transformer_tokenizer(self.data_test)
 
     def read_file(self, fpath):
-        data = load_and_serialize(fpath, False)
-        reentry_pattern = re.compile(r"(.*)_(\d+)")
+        with open(fpath) as f:
+            data = [json.loads(line) for line in f]
+
         converted = []
-        for di, (graph, serial, sent) in enumerate(
-            zip(data["graphs"], data["serials"], data["sents"])
-        ):
-            processed_serial = []
-            spans = []
-            bracket_stack = []
-            variables = defaultdict(lambda: defaultdict(list))
-            tokens = serial.split()
-            for i, c in enumerate(tokens):
-                if c == "(":
-                    bracket_stack.append(len(processed_serial))
-                elif c == ")":
-                    left_bracket = bracket_stack.pop()
-                    if len(processed_serial) > left_bracket + 1:
-                        spans.append((left_bracket, len(processed_serial)))
-                    if left_bracket > 0:
-                        spans.append((left_bracket - 1, len(processed_serial)))
-                    if (
-                        len(processed_serial) > 2
-                        and tokens[i - 2][0] == ":"
-                        and tokens[i - 1] != "("
-                    ):
-                        # detect constant list such as op lists
-                        spans.append((len(processed_serial) - 2, len(processed_serial)))
-                elif c[0] == ":":  # rel
-                    if (
-                        len(processed_serial) > 2
-                        and tokens[i - 2][0] == ":"
-                        and tokens[i - 1] != "("
-                    ):
-                        # detect constant list such as op lists
-                        spans.append((len(processed_serial) - 2, len(processed_serial)))
-                    processed_serial.append(c)
-                else:  # variable or constant
-                    match = re.match(reentry_pattern, c)
-                    if match is None:
-                        variables[c][None].append(len(processed_serial))
-                        processed_serial.append(c)
-                    else:
-                        surface, id_ = match.groups()
-                        variables[surface][id_].append(len(processed_serial))
-                        processed_serial.append(surface)
-            assert len(bracket_stack) == 0
-            tgt_len = len(processed_serial)
-            src = word_tokenize(sent)
-            if tgt_len <= 1:  # TODO !!!
-                continue
-            if len(src) <= 1:
-                continue
+        for di, item in enumerate(data):
+            question = word_tokenize(item["question"])
+            program = item["program"].split()
+            assert program[0] == "answer"
+            assert program[1] == "("
+            assert program[-1] == ")"
+            program = program[2:-1]
+
+            # just drop brackets because in FunQL:
+            # 1. we can recover them according to the grammar
+            # 2. they do not tell much about spans
+            # remove ', in tokens: we can recover them
+            program = [
+                re.sub(r"[',]", "", item) for item in program if item not in ("(", ")")
+            ]
+
+            assert len(program) > 1 and len(question) > 1
             inst = {
                 "id": di,
-                "src": src,
-                "tgt": processed_serial,
-                "tgt_spans": spans,
-                "tgt_mask": self.gen_impossible_span_mask(spans, tgt_len),
-                "var": variables,
-                "raw": graph,
+                "src": question,
+                "tgt": program,
             }
             converted.append(inst)
         return converted
-
-    def gen_impossible_span_mask(self, spans, length):
-        # spans: inclusive start, exclusive end
-        # True = impossible
-        span_mask = np.zeros((length + 1, length + 1), dtype=np.bool8)
-        for left, right in spans:
-            span_mask[:left, left + 1 : right] = True
-            span_mask[left + 1 : right, right + 1 :] = True
-        masks = []
-        for w in range(1, length):
-            masks.append(
-                torch.tensor([span_mask[i, i + w + 1] for i in range(length - w)])
-            )
-        return masks
 
     def process_all_copy(self, data):
         # none = do nothing
@@ -314,8 +265,6 @@ class SemanticParsingDataModule(_DataModule):
 
         src = [inst["src"] for inst in data]
         tgt = [inst["tgt"] for inst in data]
-        raw = [inst["raw"] for inst in data]
-        tgt_spans = [inst["tgt_spans"] for inst in data]
         src_lens = [len(inst["src_ids"]) for inst in data]
         tgt_lens = [len(inst["tgt_ids"]) for inst in data]
         max_src_len = max(src_lens)
@@ -331,62 +280,10 @@ class SemanticParsingDataModule(_DataModule):
             batched_src_ids[i, : len(s)] = torch.tensor(s)
             batched_tgt_ids[i, : len(t)] = torch.tensor(t)
 
-        tgt_masks = []
-        max_tgt_len = max(tgt_lens)
-        for wi, w in enumerate(range(1, max_tgt_len)):
-            mask = torch.zeros(batch_size, max_tgt_len - w, dtype=torch.bool)
-            for bidx, inst in enumerate(data):
-                m = inst["tgt_mask"]
-                if wi >= len(m):
-                    continue
-                m = m[wi]
-                mask[bidx, : len(m)] = m
-            tgt_masks.append(mask)
-
-        # mark positions that should have different alignment.
-        # This is only for pt because we use it too group reentrancies.
-        # TODO there is a problem: {'man': {"01": [1, 2], "02": [3, 4]}}
-        #   We need to constraint (1,2) and (3,4) have different alignments
-        #   but same alignments between 1 and 2, and 3 and 4.
-        #   Current strategy is only constraining arbitrary one in each group to neq,
-        #   e.g., constraint 1 and 3, but lefting (1 to 4) (2 to 3) (2 to 4)
-        #   unconstrained.This should be ok is we also constrain (1 and 2) (3 and 4)
-        #   have the same alignment
-        pt_neq_constraints = []
-        for inst, tgt_len in zip(data, tgt_lens):
-            pt_neq_constraint = torch.zeros(tgt_len, dtype=torch.float32)
-            for groups in inst["var"].values():
-                if len(groups) == 1:
-                    continue
-                for vs in groups.values():
-                    # pt_neq_constraint[vs[0]] = 1.0
-                    pt_neq_constraint[random.choice(vs)] = 1.0
-            pt_neq_constraints.append(pt_neq_constraint)
-        pt_neq_constraints = pad_sequence(pt_neq_constraints, batch_first=True)
-
-        # Encourage vars in the same group have the same alignment
-        # NOTE only consider at most 5 groups each step
-        pt_eq_constraints = []
-        for inst, tgt_len in zip(data, tgt_lens):
-            constraints_for_groups = [
-                l for v in inst["var"].values() for l in v.values() if len(l) > 1
-            ]
-            constraints_for_groups = random.sample(
-                constraints_for_groups, min(3, len(constraints_for_groups))
-            )
-            pt_eq_constraints.append(
-                [torch.tensor(item) for item in constraints_for_groups]
-            )
-
         batched = {}
         batched["id"] = torch.tensor([inst["id"] for inst in data])
         batched["src"] = src
         batched["tgt"] = tgt
-        batched["tgt_spans"] = tgt_spans
-        batched["tgt_masks"] = tgt_masks
-        batched["tgt_pt_neq_constraint"] = pt_neq_constraints
-        batched["tgt_pt_eq_constraint"] = pt_eq_constraints
-        batched["raw"] = raw
         batched["src_ids"] = batched_src_ids
         batched["tgt_ids"] = batched_tgt_ids
         batched["src_lens"] = src_lens
@@ -441,10 +338,10 @@ class SemanticParsingDataModule(_DataModule):
 
 if __name__ == "__main__":
 
-    datamodule = PenmanDataModule(
-        "data/AMR/tdata_xfm/dev.txt.nowiki",
-        "data/AMR/tdata_xfm/dev.txt.nowiki",
-        "data/AMR/tdata_xfm/dev.txt.nowiki",
+    datamodule = SemanticParsingDataModule(
+        "data/geo/funql/dev_len.json",
+        "data/geo/funql/dev_len.json",
+        "data/geo/funql/dev_len.json",
         copy_mode="phrase",
         batch_size=2,
         enable_cache=False,

@@ -37,7 +37,7 @@ class FSimpleHierarchy:
         return node_mask.view(batch_size, nt, nt + pt, nt + pt)
 
     def get_feature(self, *args, **kwargs):
-        return 1.0 - self.get_mask(*args, **kwargs).float()
+        return (1.0 - self.get_mask(*args, **kwargs).float()).unsqueeze(1)
 
 
 # def get_rules_mask2(

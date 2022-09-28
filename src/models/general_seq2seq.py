@@ -17,6 +17,7 @@ from src.models.tree_encoder.base import TreeEncoderBase
 from src.utils.fn import (
     annotate_snt_with_brackets,
     extract_parses,
+    extract_parses_span_only,
     get_actions,
     get_tree,
     report_ids_when_err,
@@ -146,44 +147,61 @@ class GeneralSeq2SeqModule(ModelBase):
             dist = self.parser(src_ids, src_lens)
             src_nll = -dist.partition
             src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
-            src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
+            src_spans = extract_parses_span_only(src_spans[-1], src_lens, inc=1)
 
         with self.profiler.profile("src_encoding"):
             x = self.encode(batch)
             node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         with self.profiler.profile("compute_tgt_nll"):
+            tgt_params = self.decoder.get_params(
+                node_features, node_spans, batch["tgt_ids"], copy_position=copy_position
+            )
             tgt_nll = self.decoder(
                 batch["tgt_ids"],
                 batch["tgt_lens"],
                 node_features,
                 node_spans,
+                params=tgt_params[0],
                 copy_position=copy_position,
             )
 
-        with self.profiler.profile("reward"):
-            with torch.no_grad():
-                src_spans_argmax, src_logprob_argmax = self.parser.argmax(
-                    src_ids, src_lens, dist=dist
-                )
-                src_spans_argmax = extract_parses(
-                    src_spans_argmax[-1], src_lens, inc=1
-                )[0]
-                node_features_argmax, node_spans_argmax = self.tree_encoder(
-                    x, src_lens, spans=src_spans_argmax
-                )
-                tgt_nll_argmax = self.decoder(
+        if self.decoder.rule_soft_constraint_solver is not None and self.training:
+            with self.profiler.profile("compute_soft_constraint"):
+                soft_constraint_loss = self.decoder.get_soft_constraint_loss(
                     batch["tgt_ids"],
                     batch["tgt_lens"],
-                    node_features_argmax,
-                    node_spans_argmax,
+                    node_features,
+                    node_spans,
+                    params=tgt_params,
                     copy_position=copy_position,
                 )
-                neg_reward = (tgt_nll - tgt_nll_argmax).detach()
+        else:
+            soft_constraint_loss = 0
+
+        with self.profiler.profile("reward"), torch.no_grad():
+            src_spans_argmax, src_logprob_argmax = self.parser.argmax(
+                src_ids, src_lens, dist=dist
+            )
+            src_spans_argmax = extract_parses_span_only(
+                src_spans_argmax[-1], src_lens, inc=1
+            )
+            node_features_argmax, node_spans_argmax = self.tree_encoder(
+                x, src_lens, spans=src_spans_argmax
+            )
+            tgt_nll_argmax = self.decoder(
+                batch["tgt_ids"],
+                batch["tgt_lens"],
+                node_features_argmax,
+                node_spans_argmax,
+                copy_position=copy_position,
+            )
+            neg_reward = (tgt_nll - tgt_nll_argmax).detach()
+            objective = (src_logprob * neg_reward).mean()
 
         return {
-            "decoder": tgt_nll.mean(),
-            "encoder": src_nll.mean() + (src_logprob * neg_reward).mean(),
+            "decoder": tgt_nll.mean() + soft_constraint_loss,
+            "encoder": src_nll.mean() + objective,
             "tgt_nll": tgt_nll.mean(),
             "src_nll": src_nll.mean(),
             "reward": -neg_reward.mean(),
@@ -282,7 +300,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
         dist = self.parser(src_ids, src_lens)
         src_spans = self.parser.argmax(src_ids, src_lens, dist=dist)[0]
-        src_spans = extract_parses(src_spans[-1], src_lens, inc=1)[0]
+        src_spans = extract_parses_span_only(src_spans[-1], src_lens, inc=1)
 
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
@@ -407,7 +425,8 @@ class GeneralSeq2SeqModule(ModelBase):
         preds = self.forward_inference(batch)["pred"]
         targets = batch["tgt"]
 
-        self.test_metric(preds, targets)
+        intermediate_metric = self.test_metric(preds, targets)
+        self.log_dict(intermediate_metric, prog_bar=True, logger=False, on_step=True)
 
         # if batch_idx == 0:
         #     single_inst = {key: value[:2] for key, value in batch.items()}

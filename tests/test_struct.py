@@ -14,7 +14,7 @@ from src.models.tgt_parser.struct.td_pcfg import FastestTDPCFG
 
 
 @given(st.data())
-@settings(max_examples=20, deadline=None)
+@settings(max_examples=100, deadline=None)
 def test_d1_pcfg_flex_dir0(data):
     B = data.draw(st.integers(min_value=1, max_value=3), label="b")
     N = data.draw(st.integers(min_value=2, max_value=4), label="n")
@@ -64,7 +64,7 @@ def test_d1_pcfg_flex_dir0(data):
 
 
 @given(st.data())
-@settings(max_examples=20, deadline=None)
+@settings(max_examples=100, deadline=None)
 def test_d1_pcfg_flex_dir1(data):
     B = data.draw(st.integers(min_value=1, max_value=3), label="b")
     N = data.draw(st.integers(min_value=2, max_value=4), label="n")
@@ -119,7 +119,7 @@ def test_d1_pcfg_flex_dir1(data):
 
 
 @given(st.data())
-@settings(max_examples=20, deadline=None)
+@settings(max_examples=100, deadline=None)
 def test_d1_pcfg(data):
     B = data.draw(st.integers(min_value=1, max_value=3), label="b")
     N = data.draw(st.integers(min_value=2, max_value=4), label="n")
@@ -204,7 +204,7 @@ def test_rdp(data):
 
 
 @given(st.data())
-@settings(max_examples=20, deadline=None)
+@settings(max_examples=100, deadline=None)
 def test_td_pcfg(data):
     B = data.draw(st.integers(min_value=1, max_value=3), label="b")
     N = data.draw(st.integers(min_value=2, max_value=4), label="n")

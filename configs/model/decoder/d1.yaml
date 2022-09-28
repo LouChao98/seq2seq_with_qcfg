@@ -14,8 +14,8 @@ rule_hard_constraint:
 rule_soft_constraint: ~
 rule_soft_constraint_solver: ~
 generation_max_length: 40
-generation_num_samples: 10
-generation_ppl_batch_size: 1
+generation_num_samples: 100
+generation_ppl_batch_size: 4
 
 # NeuralQCFGTgtParser
 dim: 512

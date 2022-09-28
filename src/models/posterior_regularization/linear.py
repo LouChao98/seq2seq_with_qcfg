@@ -14,26 +14,28 @@ log = logging.getLogger(__file__)
 class UngroundedPRLineSearchSolver:
     # solve E[phi] <= b, where b is a scalar
 
-    on: str = "rule"
+    field: str = "rule"
     b: float = 2.0
     lbound: float = 1e-4
     rbound: float = 1e3
     num_point: int = 16
     num_iter: int = 3
     pcfg: Any = None
+    log_input: bool = True  # whether input is in log-space
 
     def __call__(self, params, lens, constraint_feature):
         lambdas = self.solve(params, lens, constraint_feature)
         cparams = apply_to_nested_tensor(params, lambda x: x.detach())
-        cparams[self.on] = cparams[self.on] - constraint_feature * lambdas.view(
-            [-1] * (constraint_feature.ndim - 1)
+        cparams[self.field] = self.make_constrained_params(
+            cparams[self.field], constraint_feature, lambdas
         )
-        return self.pcfg.ce(cparams, params, lens)
+        return self.pcfg.ce(cparams, params, lens).mean()
 
     @torch.no_grad()
     def solve(self, params, lens, constraint_feature):
         batch_size = len(lens)
         n = self.num_point
+        device = params[self.field].device
         lambdas = []
         for bidx in range(batch_size):
             params_item = apply_to_nested_tensor(
@@ -45,7 +47,7 @@ class UngroundedPRLineSearchSolver:
             lambdas.append(
                 self.solve_one_instance(params_item, lens_item, constraint_feature_item)
             )
-        return torch.tensor(lambdas, device=params[self.on].device, dtype=torch.float32)
+        return torch.tensor(lambdas, device=device, dtype=torch.float32)
 
     def solve_one_instance(self, params, lens, constraint_feature):
         lb, rb = self.lbound, self.rbound
@@ -59,8 +61,8 @@ class UngroundedPRLineSearchSolver:
                 lgrid_np = np.geomspace(lb, rb, self.num_point, dtype=np.float32)
                 lgrid = torch.from_numpy(lgrid_np).to(device)
             # potential * exp(-lambda * constraint)
-            params[self.on] = params[self.on] - constraint_feature * lgrid.view(
-                -1, *[1] * (constraint_feature.ndim - 1)
+            params[self.field] = self.make_constrained_params(
+                params[self.field], constraint_feature, lgrid
             )
             target = -lgrid * self.b + self.pcfg(params, [lens] * self.num_point)
             target = target.cpu().numpy()
@@ -90,3 +92,15 @@ class UngroundedPRLineSearchSolver:
                 return lgrid_np[argmax_i]
         else:
             return lgrid_np[argmax_i]
+
+    def make_constrained_params(self, t, constraint_feature, lambdas):
+        if self.log_input:
+            return t - constraint_feature * lambdas.view(
+                [-1] + [1] * (constraint_feature.ndim - 1)
+            )
+        else:
+            return (
+                t.log()
+                - constraint_feature
+                * lambdas.view([-1] + [1] * (constraint_feature.ndim - 1))
+            ).exp()
