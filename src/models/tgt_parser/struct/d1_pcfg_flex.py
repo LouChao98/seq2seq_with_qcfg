@@ -10,11 +10,12 @@ from torch.autograd import grad
 
 from ._fn import diagonal_copy_, stripe
 from ._utils import checkpoint, process_param_for_marginal, weighted_random_v2
-from .td_style_base import TDStyleBase
+from .decomp_base import DecompBase
 
 log = logging.getLogger(__file__)
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
+_OK, _SONMASK, _REACHLIMIT = 0, 1, 2
 
 
 class TokenType(IntEnum):
@@ -23,7 +24,7 @@ class TokenType(IntEnum):
     COPY_PT = _COPY_PT
 
 
-class D1PCFGFlex(TDStyleBase):
+class D1PCFGFlex(DecompBase):
     # A[i] -> B[j], C[k]
     # ================
     # A[i] -> R
@@ -208,7 +209,7 @@ class D1PCFGFlex(TDStyleBase):
 
         return -logZ
 
-    def logZ(self, params: Dict[str, Tensor], lens):
+    def inside_with_fused_factor(self, params: Dict[str, Tensor], lens):
         if not isinstance(lens, torch.Tensor):
             lens = torch.tensor(lens)
         assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
@@ -339,6 +340,7 @@ class D1PCFGFlex(TDStyleBase):
         use_copy=True,
         num_samples=10,
         max_length=100,
+        strict=False,
     ):
         if self.direction == 0:
             sample_func = self.sampled_decoding_direction0
@@ -354,6 +356,7 @@ class D1PCFGFlex(TDStyleBase):
             use_copy=use_copy,
             num_samples=num_samples,
             max_length=max_length,
+            strict=strict,
         )
 
     @torch.no_grad()
@@ -367,6 +370,7 @@ class D1PCFGFlex(TDStyleBase):
         use_copy=True,
         num_samples=10,
         max_length=100,
+        strict=False,
     ):
         terms = params["term"].detach()
         roots = params["root"].detach()
@@ -404,7 +408,7 @@ class D1PCFGFlex(TDStyleBase):
 
         preds = []
         for b in range(len(terms)):
-            samples, types, is_safe = self.sample_jk_given_bc(
+            samples, types, status = self.sample_jk_given_bc(
                 terms[b],
                 H[b],
                 L[b],
@@ -422,13 +426,15 @@ class D1PCFGFlex(TDStyleBase):
                 num_samples=num_samples,
                 max_length=max_length,
             )
-            if not all(is_safe):
-                log.warning("Possibly sampling on masked NT")
+            if (cnt := sum(item == _REACHLIMIT for item in status)) > 0:
+                log.warning(f"{cnt} trials are terminated due to REACHLIMIT")
+            if (cnt := sum(item == _SONMASK for item in status)) > 0:
+                log.warning(f"{cnt} trials are terminated due to SONMASK")
             samples = [
                 (sample, type_)
-                for sample, type_ in zip(samples, types)
-                if len(sample) > 1
-            ]
+                for sample, type_, status_ in zip(samples, types, status)
+                if len(sample) > 1 and (not strict or status_ == _OK)
+            ]  # len=0 when max_actions is reached but no PT rules applied
             if len(samples) == 0:
                 log.warning("All trials are failed.")
                 samples = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB])]
@@ -461,7 +467,7 @@ class D1PCFGFlex(TDStyleBase):
         COPY_PT = pt_states - 1
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
-        is_safe = [True for _ in range(num_samples)]
+        status = [_OK for _ in range(num_samples)]
 
         for sidx in range(num_samples):
             try:
@@ -505,57 +511,59 @@ class D1PCFGFlex(TDStyleBase):
 
                     nonterminals.extend([(right, k), (left, j)])
 
-                # try to generate something. just use NT->PT PT
-                while len(nonterminals) > 0 and len(preterminals) < max_length:
-                    s, i = nonterminals.pop()
+                # # try to generate something. just use NT->PT PT
+                # while len(nonterminals) > 0 and len(preterminals) == 0:
+                #     s, i = nonterminals.pop()
 
-                    if s >= nt_states:
-                        preterminals.append((s - nt_states, i, False))
-                        continue
-                    if use_copy and s == COPY_NT:
-                        preterminals.append((s, i, True))
-                        continue
+                #     if s >= nt_states:
+                #         preterminals.append((s - nt_states, i, False))
+                #         continue
+                #     if use_copy and s == COPY_NT:
+                #         preterminals.append((s, i, True))
+                #         continue
 
-                    r = weighted_random_v2(rules_head[s])
-                    left = weighted_random_v2(rules_left[r, nt_states:]) + nt_states
-                    right = weighted_random_v2(rules_right[r, nt_states:]) + nt_states
+                #     r = weighted_random_v2(rules_head[s])
+                #     left = weighted_random_v2(rules_left[r, nt_states:]) + nt_states
+                #     right = weighted_random_v2(rules_right[r, nt_states:]) + nt_states
 
-                    jk = weighted_random_v2(rules_sl1r1[r, i])
-                    j, k = divmod(jk, pt_num_nodes)
-                    nonterminals.extend([(right, k), (left, j)])
+                #     jk = weighted_random_v2(rules_sl1r1[r, i])
+                #     j, k = divmod(jk, pt_num_nodes)
+                #     nonterminals.extend([(right, k), (left, j)])
 
             except Exception:
-                is_safe[sidx] = False
+                status[sidx] = _SONMASK
 
-            # except ValueError as e:
-            #     if str(e) == "Sampling on masked NT.":
-            #         log.warning("Sampling on masked NT.")
-            #     else:
-            #         raise e
+            if actions == max_actions or (
+                len(preterminals) == max_length and len(nonterminals) > 0
+            ):
+                status[sidx] = _REACHLIMIT
 
-            terminals: List[int] = []
-            terminal_type: List[int] = []
-            for s, i, flag in preterminals:
-                if flag:
-                    terminals.append(i)
-                    terminal_type.append(_COPY_NT)
-                    continue
-                if use_copy and s == COPY_PT:
-                    terminals.append(i)
-                    terminal_type.append(_COPY_PT)
-                else:
-                    sample = weighted_random_v2(terms[s * pt_num_nodes + i])
-                    if use_copy and sample == UNK:
-                        # force <unk> tokens to copy
+            try:
+                terminals: List[int] = []
+                terminal_type: List[int] = []
+                for s, i, flag in preterminals:
+                    if flag:
+                        terminals.append(i)
+                        terminal_type.append(_COPY_NT)
+                        continue
+                    if use_copy and s == COPY_PT:
                         terminals.append(i)
                         terminal_type.append(_COPY_PT)
                     else:
-                        terminals.append(sample)
-                        terminal_type.append(_VOCAB)
+                        sample = weighted_random_v2(terms[s * pt_num_nodes + i])
+                        if use_copy and sample == UNK:
+                            # force <unk> tokens to copy
+                            terminals.append(i)
+                            terminal_type.append(_COPY_PT)
+                        else:
+                            terminals.append(sample)
+                            terminal_type.append(_VOCAB)
+            except Exception:
+                status[sidx] = _SONMASK
 
             samples[sidx] = terminals
             types[sidx] = terminal_type
-        return samples, types, is_safe
+        return samples, types, status
 
     @torch.no_grad()
     def sampled_decoding_direction1(
@@ -568,6 +576,7 @@ class D1PCFGFlex(TDStyleBase):
         use_copy=True,
         num_samples=10,
         max_length=100,
+        strict=False,
     ):
         terms = params["term"].detach()
         roots = params["root"].detach()
@@ -606,7 +615,7 @@ class D1PCFGFlex(TDStyleBase):
 
         preds = []
         for b in range(len(terms)):
-            samples, types, is_safe = self.sample_bc_given_jk(
+            samples, types, status = self.sample_bc_given_jk(
                 terms[b],
                 H[b],
                 LNT[b],
@@ -623,13 +632,15 @@ class D1PCFGFlex(TDStyleBase):
                 num_samples=num_samples,
                 max_length=max_length,
             )
-            if not all(is_safe):
-                log.warning("Possibly sampling on masked NT")
+            if (cnt := sum(item == _REACHLIMIT for item in status)) > 0:
+                log.warning(f"{cnt} trials are terminated due to REACHLIMIT")
+            if (cnt := sum(item == _SONMASK for item in status)) > 0:
+                log.warning(f"{cnt} trials are terminated due to SONMASK")
             samples = [
                 (sample, type_)
-                for sample, type_ in zip(samples, types)
-                if len(sample) > 1
-            ]  # any case for len(sample) = 0 in new imp?
+                for sample, type_, status_ in zip(samples, types, status)
+                if len(sample) > 1 and (not strict or status_ == _OK)
+            ]  # len=0 when max_actions is reached but no PT rules applied
             if len(samples) == 0:
                 log.warning("All trials are failed.")
                 samples = [([0, 0], [TokenType.VOCAB, TokenType.VOCAB])]
@@ -661,7 +672,7 @@ class D1PCFGFlex(TDStyleBase):
         COPY_PT = pt_states - 1
         samples = [[0] for _ in range(num_samples)]
         types = [[0] for _ in range(num_samples)]
-        is_safe = [True for _ in range(num_samples)]
+        status = [_OK for _ in range(num_samples)]
         num_nodes = nt_num_nodes + pt_num_nodes
 
         for sidx in range(num_samples):
@@ -705,7 +716,12 @@ class D1PCFGFlex(TDStyleBase):
                     nonterminals.extend([(right, k), (left, j)])
 
             except Exception:
-                is_safe[sidx] = False
+                status[sidx] = _SONMASK
+
+            if actions == max_actions or (
+                len(preterminals) == max_length and len(nonterminals) > 0
+            ):
+                status[sidx] = _REACHLIMIT
 
             # except ValueError as e:
             #     if str(e) == "Sampling on masked NT.":
@@ -713,29 +729,32 @@ class D1PCFGFlex(TDStyleBase):
             #     else:
             #         raise e
 
-            terminals: List[int] = []
-            terminal_type: List[int] = []
-            for s, i, flag in preterminals:
-                if flag:
-                    terminals.append(i)
-                    terminal_type.append(_COPY_NT)
-                    continue
-                if use_copy and s == COPY_PT:
-                    terminals.append(i)
-                    terminal_type.append(_COPY_PT)
-                else:
-                    sample = weighted_random_v2(terms[s * pt_num_nodes + i])
-                    if use_copy and sample == UNK:
-                        # force <unk> tokens to copy
+            try:
+                terminals: List[int] = []
+                terminal_type: List[int] = []
+                for s, i, flag in preterminals:
+                    if flag:
+                        terminals.append(i)
+                        terminal_type.append(_COPY_NT)
+                        continue
+                    if use_copy and s == COPY_PT:
                         terminals.append(i)
                         terminal_type.append(_COPY_PT)
                     else:
-                        terminals.append(sample)
-                        terminal_type.append(_VOCAB)
+                        sample = weighted_random_v2(terms[s * pt_num_nodes + i])
+                        if use_copy and sample == UNK:
+                            # force <unk> tokens to copy
+                            terminals.append(i)
+                            terminal_type.append(_COPY_PT)
+                        else:
+                            terminals.append(sample)
+                            terminal_type.append(_VOCAB)
+            except Exception:
+                status[sidx] = _SONMASK
 
             samples[sidx] = terminals
             types[sidx] = terminal_type
-        return samples, types, is_safe
+        return samples, types, status
 
     @staticmethod
     def get_pcfg_rules(params, nt_states):

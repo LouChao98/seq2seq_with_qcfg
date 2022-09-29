@@ -4,7 +4,7 @@ from torch.autograd import grad
 from ._fn import diagonal, diagonal_copy_, stripe
 
 
-class TDStyleBase:
+class DecompBase:
     def mbr_decoding(self, logZ, span_indicator, lens):
         batch, seq_len = span_indicator.shape[:2]
         marginals = grad(logZ.sum(), [span_indicator])[0].detach()

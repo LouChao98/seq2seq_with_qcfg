@@ -29,7 +29,7 @@ class UngroundedPRLineSearchSolver:
         cparams[self.field] = self.make_constrained_params(
             cparams[self.field], constraint_feature, lambdas
         )
-        return self.pcfg.ce(cparams, params, lens).mean()
+        return self.pcfg.ce(cparams, params, lens)
 
     @torch.no_grad()
     def solve(self, params, lens, constraint_feature):

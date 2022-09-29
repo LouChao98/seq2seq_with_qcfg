@@ -6,10 +6,10 @@ from torch.autograd import grad
 from ._fn import diagonal, diagonal_copy_, stripe
 from ._utils import checkpoint, process_param_for_marginal
 from .pcfg import PCFG
-from .td_pcfg import FastestTDPCFG
+from .type1 import DecompType1
 
 
-class PCFGRandomizedDP(FastestTDPCFG):
+class PCFGRandomizedDP(DecompType1):
     """This only implement inside, marginal and decode.
     For sampling, use naive PCFG."""
 

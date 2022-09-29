@@ -14,3 +14,6 @@ class SrcParserBase(nn.Module):
 
     def argmax(self, x, lengths, **kwargs):
         raise NotImplementedError
+
+    def entropy(self, x, lengths, **kwargs):
+        raise NotImplementedError

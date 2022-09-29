@@ -1,5 +1,7 @@
 import logging
 import operator
+from functools import partial
+from types import MethodType
 from typing import Any, List, Optional
 
 import torch
@@ -24,123 +26,36 @@ from src.utils.fn import (
 )
 from src.utils.metric import PerplexityMetric
 
+from .general_seq2seq import GeneralSeq2SeqModule
+
 log = logging.getLogger(__file__)
 
 
-class GeneralSeq2SeqModule(ModelBase):
-    """A module for general seq2seq tasks.
-
-    * support pretrained models
-    * encoders
-    * custom test metric
-    """
-
-    def __init__(
-        self,
-        embedding=None,
-        transformer_pretrained_model=None,
-        encoder=None,
-        tree_encoder=None,
-        decoder=None,
-        parser=None,
-        optimizer=None,
-        scheduler=None,
-        test_metric=None,
-        load_from_checkpoint=None,
-        parser_entropy_reg=0.0,
-        param_initializer="xavier_uniform",
-        track_param_norm=False,
-        real_val_every_n_epochs=20,
-    ):
+class TwoDirectionalModule(ModelBase):
+    # model1 is the primary model
+    def __init__(self, model1, model2):
         super().__init__()
+        self.model1: GeneralSeq2SeqModule = instantiate(model1)
+        self.model2: GeneralSeq2SeqModule = instantiate(model2)
         self.save_hyperparameters(logger=False)
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
         super().setup(stage)
+        assert self.trainer.profiler is None, "not implemented"
+        self.model1.trainer = self.model2.trainer = self.trainer
+        self.model1.setup(stage, datamodule)
+        self.model1.log = MethodType(partial(self.sub_log, "m1"), self.model1)
+        self.model1.print = MethodType(partial(self.sub_print, "m1"), self.model1)
+        self.model2.setup(stage, datamodule)
+        self.model2.log = MethodType(partial(self.sub_log, "m2"), self.model2)
+        self.model2.print = MethodType(partial(self.sub_print, "m2"), self.model2)
 
-        self.profiler = self.trainer.profiler or PassThroughProfiler()
-        if not isinstance(self.profiler, PassThroughProfiler):
-            log.warning("Profiler is enabled.")
+    def sub_log(self, prefix, name, value, *args, **kwargs):
+        self.log(f"{prefix}/{name}", value, *args, **kwargs)
 
-        assert datamodule is not None or self.trainer.datamodule is not None
-        self.datamodule = datamodule or self.trainer.datamodule
+    def sub_print(self, prefix, *args, **kwargs):
+        self.print(prefix, *args, **kwargs)
 
-        self.embedding = instantiate(
-            self.hparams.embedding,
-            num_embeddings=len(self.datamodule.src_vocab),
-        )
-        self.pretrained = (
-            AutoModel.from_pretrained(self.hparams.transformer_pretrained_model)
-            if self.hparams.transformer_pretrained_model is not None
-            else None
-        )
-        self.encoder = instantiate(
-            self.hparams.encoder,
-            input_dim=0
-            + (0 if self.embedding is None else self.embedding.weight.shape[1])
-            + (0 if self.pretrained is None else self.pretrained.config.hidden_size),
-        )
-
-        self.parser: SrcParserBase = instantiate(
-            self.hparams.parser, vocab=len(self.datamodule.src_vocab)
-        )
-        self.tree_encoder: TreeEncoderBase = instantiate(
-            self.hparams.tree_encoder, dim=self.encoder.get_output_dim()
-        )
-        self.decoder: TgtParserBase = instantiate(
-            self.hparams.decoder,
-            vocab=len(self.datamodule.tgt_vocab),
-            vocab_pair=self.datamodule.vocab_pair,
-            src_dim=self.tree_encoder.get_output_dim(),
-        )
-
-        self.train_metric = PerplexityMetric()
-        self.val_metric = PerplexityMetric()
-        self.val_best_metric = MinMetric()
-        self.test_metric = instantiate(self.hparams.test_metric)
-
-        self.setup_patch(stage, datamodule)
-
-        if self.hparams.load_from_checkpoint is not None:
-            state_dict = torch.load(
-                self.hparams.load_from_checkpoint, map_location="cpu"
-            )
-            if "state_dict" in state_dict:
-                state_dict = state_dict["state_dict"]
-            self.load_state_dict(state_dict, strict=False)
-        else:
-            init_func = {
-                "xavier_uniform": nn.init.xavier_uniform_,
-                "xavier_normal": nn.init.xavier_normal_,
-                "kaiming_uniform": nn.init.kaiming_uniform_,
-                "kaiming_normal": nn.init.kaiming_normal_,
-            }
-            init_func = init_func[self.hparams.param_initializer]
-            for name, param in self.named_parameters():
-                if param.dim() > 1:
-                    init_func(param)
-                elif "norm" not in name:
-                    nn.init.zeros_(param)
-
-    def setup_patch(self, stage: Optional[str] = None, datamodule=None):
-        # allow submodule changing submodules before loading checkpoint
-        ...
-
-    def encode(self, batch):
-        src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        x = []
-        if self.embedding is not None:
-            h = self.embedding(src_ids)
-            x.append(h)
-        if self.pretrained is not None:
-            h = self.pretrained(**batch["transformer_inputs"])
-            h = scatter_mean(x, batch["transformer_offset"], 1)[:, 1:]
-            x.append(h)
-        x = torch.cat(x, dim=-1) if len(x) > 1 else x[0]
-        x = self.encoder(x, src_lens)
-        return x
-
-    @report_ids_when_err
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
@@ -187,9 +102,9 @@ class GeneralSeq2SeqModule(ModelBase):
                 copy_position=copy_position,
             )
             neg_reward = (tgt_nll - tgt_nll_argmax).detach()
-            logging_vals["reward"] = -neg_reward
+            logging_vals["reward"] = -neg_reward.mean()
 
-        objective = src_logprob * neg_reward
+        objective = (src_logprob * neg_reward).mean()
 
         soft_constraint_loss = 0
         entropy_reg = 0
@@ -205,15 +120,15 @@ class GeneralSeq2SeqModule(ModelBase):
                         copy_position=copy_position,
                     )
             if (e := self.hparams.parser_entropy_reg) > 0:
-                entropy = self.parser.entropy(src_ids, src_lens, dist)
+                entropy = self.parser.entropy(src_ids, src_lens, dist).mean()
                 entropy_reg = -e * entropy
                 logging_vals["ent"] = entropy
 
         return {
-            "decoder": tgt_nll + soft_constraint_loss,
-            "encoder": src_nll + objective + entropy_reg,
-            "tgt_nll": tgt_nll,
-            "src_nll": src_nll,
+            "decoder": tgt_nll.mean() + soft_constraint_loss,
+            "encoder": src_nll.mean() + objective + entropy_reg,
+            "tgt_nll": tgt_nll.mean(),
+            "src_nll": src_nll.mean(),
             "log": logging_vals,
         }
 
@@ -322,30 +237,18 @@ class GeneralSeq2SeqModule(ModelBase):
             batch["src"],
         )
 
-        # import numpy as np
-        # tgt_nll = self.decoder(
-        #     batch["tgt_ids"],
-        #     batch["tgt_lens"],
-        #     node_features,
-        #     node_spans,
-        #     copy_position=(batch.get("copy_token"), batch.get("copy_phrase")),
-        # )
-        # tgt_ppl = np.exp(tgt_nll.detach().cpu().numpy() / batch["tgt_lens"])
-
         return {"pred": [item[0] for item in y_preds]}
 
     def training_step(self, batch: Any, batch_idx: int):
         output = self(batch)
-        loss_decoder = output["decoder"].mean()
-        loss_encoder = output["encoder"].mean()
-        loss = loss_encoder + loss_decoder
+        loss = output["decoder"] + output["encoder"]
         ppl = self.train_metric(output["tgt_nll"], batch["tgt_lens"])
         self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
         self.log("train/ppl", ppl, prog_bar=True)
-        self.log("train/src", loss_encoder, prog_bar=True)
-        self.log("train/tgt", loss_decoder, prog_bar=True)
+        self.log("train/src", output["decoder"], prog_bar=True)
+        self.log("train/tgt", output["encoder"], prog_bar=True)
         if "log" in output:
-            self.log_dict({"train/" + k: v.mean() for k, v in output["log"].items()})
+            self.log_dict({"train/" + k: v for k, v in output["log"].items()})
 
         if batch_idx == 0:
             self.eval()
@@ -389,12 +292,10 @@ class GeneralSeq2SeqModule(ModelBase):
 
     def validation_step(self, batch: Any, batch_idx: int):
         output = self(batch)
-        loss_decoder = output["decoder"].mean()
-        loss_encoder = output["encoder"].mean()
-        loss = loss_encoder + loss_decoder
+        loss = output["decoder"] + output["encoder"]
         self.val_metric(output["tgt_nll"], batch["tgt_lens"])
 
-        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0:
+        if (self.current_epoch + 1) % 20 == 0:
             self.test_step(batch, batch_idx=None)
 
         # if batch_idx < 3:

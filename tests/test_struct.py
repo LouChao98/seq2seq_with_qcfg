@@ -6,7 +6,7 @@ from src.models.tgt_parser.struct.d1_pcfg import D1PCFG
 from src.models.tgt_parser.struct.d1_pcfg_flex import D1PCFGFlex
 from src.models.tgt_parser.struct.pcfg import PCFG
 from src.models.tgt_parser.struct.pcfg_rdp import PCFGRandomizedDP
-from src.models.tgt_parser.struct.td_pcfg import FastestTDPCFG
+from src.models.tgt_parser.struct.type1 import DecompType1
 
 # NOTE term rules should be gather from B x T x VOCAB
 #   but I just use a B x N x T with a normalization.
@@ -221,11 +221,11 @@ def test_td_pcfg(data):
     }
     lens = [max(2, N - i) for i in range(B)]
 
-    pcfg = FastestTDPCFG()
+    pcfg = DecompType1()
     nll = pcfg(params, lens)
 
     pcfg_ref = PCFG()
-    nll_ref = pcfg_ref(FastestTDPCFG.get_pcfg_rules(params, None), lens)
+    nll_ref = pcfg_ref(DecompType1.get_pcfg_rules(params, None), lens)
 
     assert torch.allclose(nll, nll_ref)
 
@@ -235,5 +235,5 @@ def test_td_pcfg(data):
         torch.tensor([item * 2 - 1 for item in lens], dtype=torch.float),
     )
 
-    m2 = pcfg_ref(FastestTDPCFG.get_pcfg_rules(params, None), lens, marginal=True)[-1]
+    m2 = pcfg_ref(DecompType1.get_pcfg_rules(params, None), lens, marginal=True)[-1]
     assert torch.allclose(m1.diagonal(2, dim1=1, dim2=2), m2[:, 0, :-1].sum(-1))

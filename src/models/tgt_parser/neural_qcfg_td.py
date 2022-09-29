@@ -7,7 +7,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from ..components.common import MultiResidualLayer
 from .base import TgtParserBase
-from .struct.td_pcfg import FastestTDPCFG
+from .struct.type1 import DecompType1
 
 
 class NeuralQCFGDecomp1TgtParser(TgtParserBase):
@@ -48,7 +48,7 @@ class NeuralQCFGDecomp1TgtParser(TgtParserBase):
         assert self.rule_hard_constraint is None, "Do not support any constraint."
         assert self.rule_soft_constraint is None, "Do not support any constraint."
 
-        self.pcfg = FastestTDPCFG()
+        self.pcfg = DecompType1()
         self.vocab = vocab
         self.dim = dim
         self.cpd_rank = cpd_rank

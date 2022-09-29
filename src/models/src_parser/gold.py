@@ -42,6 +42,9 @@ class GoldTreeProcessor(SrcParserBase):
     def argmax(self, x, lengths, **kwargs):
         return self.sample(x, lengths, **kwargs)
 
+    def entropy(self, x, lengths, **kwargs):
+        return x.new_zeros(len(lengths))
+
 
 @njit
 def tree2span(tree_str: str):

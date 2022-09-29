@@ -9,7 +9,7 @@ from torch.autograd import grad
 
 from ._fn import diagonal, diagonal_copy_, stripe
 from ._utils import checkpoint, process_param_for_marginal, weighted_random_v2
-from .td_style_base import TDStyleBase
+from .decomp_base import DecompBase
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
 
@@ -20,7 +20,7 @@ class TokenType(IntEnum):
     COPY_PT = _COPY_PT
 
 
-class D2PCFGFlex(TDStyleBase):
+class D2PCFGFlex(DecompBase):
     # A[i] -> B[j], C[k]
     # ================
     # A[i] -> R

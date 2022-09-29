@@ -15,7 +15,7 @@ from ._utils import (
     weighted_random,
     weighted_random_v2,
 )
-from .td_style_base import TDStyleBase
+from .decomp_base import DecompBase
 
 # import torch_semiring_einsum as tse
 
@@ -32,7 +32,7 @@ class TokenType(IntEnum):
     COPY_PT = _COPY_PT
 
 
-class D1PCFG(TDStyleBase):
+class D1PCFG(DecompBase):
     # A[i] -> B[j], C[k]
     # ================
     # A[i] -> R
@@ -331,22 +331,26 @@ class D1PCFG(TDStyleBase):
         terms = terms.exp().cumsum(2)
         roots = roots.exp().cumsum(1)
         H = H.cumsum(2)
-        LNT, LPT = L.split((self.tgt_nt_states, self.tgt_pt_states), 2)
-        LNT = LNT.cumsum(2)
-        LPT = LPT.cumsum(2)
-        RNT, RPT = R.split((self.tgt_nt_states, self.tgt_pt_states), 2)
-        RNT = RNT.cumsum(2)
-        RPT = RPT.cumsum(2)
+        L = L.cumsum(2)
+        R = R.cumsum(2)
+        # LNT, LPT = L.split((self.tgt_nt_states, self.tgt_pt_states), 2)
+        # LNT = LNT.cumsum(2)
+        # LPT = LPT.cumsum(2)
+        # RNT, RPT = R.split((self.tgt_nt_states, self.tgt_pt_states), 2)
+        # RNT = RNT.cumsum(2)
+        # RPT = RPT.cumsum(2)
         SLR = self.threshold(SLR).flatten(3).cumsum(3)
         # SLR = SLR.flatten(3).cumsum(3)
 
         terms = terms.cpu().numpy()
         roots = roots.cpu().numpy()
         H = H.cpu().numpy()
-        LNT = LNT.cpu().numpy()
-        LPT = LPT.cpu().numpy()
-        RNT = RNT.cpu().numpy()
-        RPT = RPT.cpu().numpy()
+        L = L.cpu().numpy()
+        R = R.cpu().numpy()
+        # LNT = LNT.cpu().numpy()
+        # LPT = LPT.cpu().numpy()
+        # RNT = RNT.cpu().numpy()
+        # RPT = RPT.cpu().numpy()
         SLR = SLR.cpu().numpy()
 
         max_nt_spans = max(len(item) for item in nt_spans)
@@ -357,10 +361,12 @@ class D1PCFG(TDStyleBase):
             samples, types, status = self.sample(
                 terms[b],
                 H[b],
-                LNT[b],
-                LPT[b],
-                RNT[b],
-                RPT[b],
+                L[b],
+                R[b],
+                # LNT[b],
+                # LPT[b],
+                # RNT[b],
+                # RPT[b],
                 SLR[b],
                 roots[b],
                 max_nt_spans,
@@ -391,10 +397,12 @@ class D1PCFG(TDStyleBase):
     def sample(
         terms: np.ndarray,  # seqlen x pt, in normal space
         rules_head: np.ndarray,  # nt x r, in normal space
-        rules_left_nt: np.ndarray,  # nt x r, in normal space
-        rules_left_pt: np.ndarray,  # pt x r, in normal space
-        rules_right_nt: np.ndarray,  # nt x r, in normal space
-        rules_right_pt: np.ndarray,  # pt x r, in normal space
+        rules_left: np.ndarray,
+        rules_right: np.ndarray,
+        # rules_left_nt: np.ndarray,  # nt x r, in normal space
+        # rules_left_pt: np.ndarray,  # pt x r, in normal space
+        # rules_right_nt: np.ndarray,  # nt x r, in normal space
+        # rules_right_pt: np.ndarray,  # pt x r, in normal space
         rules_src: np.ndarray,  # r x src x src x src, in normal space
         roots: np.ndarray,  # nt, in normal space
         nt_num_nodes: int,
@@ -438,14 +446,16 @@ class D1PCFG(TDStyleBase):
                         r = weighted_random_v2(rules_head[s])
                         jk = weighted_random_v2(rules_src[r, nt_node])
                         j, k = divmod(jk, nt_num_nodes)
-                        if rules_src[0, j, -1] < 1e-6:
-                            left = weighted_random_v2(rules_left_pt[r]) + nt_states
-                        else:
-                            left = weighted_random_v2(rules_left_nt[r])
-                        if rules_src[0, k, -1] < 1e-6:
-                            right = weighted_random_v2(rules_right_pt[r]) + pt_states
-                        else:
-                            right = weighted_random_v2(rules_right_nt[r])
+                        left = weighted_random_v2(rules_left[r])
+                        right = weighted_random_v2(rules_right[r])
+                        # if rules_src[0, j, -1] < 1e-6:
+                        #     left = weighted_random_v2(rules_left_pt[r]) + nt_states
+                        # else:
+                        #     left = weighted_random_v2(rules_left_nt[r])
+                        # if rules_src[0, k, -1] < 1e-6:
+                        #     right = weighted_random_v2(rules_right_pt[r]) + pt_states
+                        # else:
+                        #     right = weighted_random_v2(rules_right_nt[r])
                         nonterminals.extend(
                             [right * nt_num_nodes + k, left * nt_num_nodes + j]
                         )

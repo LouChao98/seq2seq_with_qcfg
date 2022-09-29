@@ -1,12 +1,13 @@
 import sys
 
 sys.path.insert(0, "..")
+import sys
 from collections import Counter
 
 import torch
 
-from src.models.tgt_parser.neural_qcfg_d1 import NeuralQCFGD1TgtParser
-from src.models.tgt_parser.struct.d1_pcfg import D1PCFG
+from src.models.tgt_parser.neural_qcfg_d1_flex import NeuralQCFGD1FlexTgtParser
+from src.models.tgt_parser.struct.d1_pcfg_flex import D1PCFGFlex
 from src.models.tgt_parser.struct.pcfg import PCFG
 
 VOCAB = 2
@@ -18,7 +19,7 @@ def compute_unnormalized_prob(p, seq, model):
     x = torch.tensor([seq])
     n = x.size(1)
     B = 1
-    T = 2 * 9
+    T = 2 * 5
     terms = p["term"].unsqueeze(1).expand(B, n, T, p["term"].size(2))
     x_expand = x.unsqueeze(2).expand(B, n, T).unsqueeze(3)
     terms = torch.gather(terms, 3, x_expand).squeeze(3)
@@ -28,11 +29,11 @@ def compute_unnormalized_prob(p, seq, model):
     return (-nll).exp().item()
 
 
-tgt_parser = NeuralQCFGD1TgtParser(
+tgt_parser = NeuralQCFGD1FlexTgtParser(
     pt_states=2,
     nt_states=2,
-    pt_span_range=[1, 1000],
-    nt_span_range=[1, 1000],
+    pt_span_range=[1, 1],
+    nt_span_range=[2, 1000],
     use_copy=False,
     dim=8,
     cpd_rank=3,
@@ -66,9 +67,9 @@ params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = tgt_parser.get_params(
         ],
     ],
 )
-print("D1")
+print("D1Flex")
 
-pcfg = D1PCFG(2, 2)
+pcfg = D1PCFGFlex(2, 2, direction=0)
 pred = pcfg.sampled_decoding(
     params, nt_spans, 2, pt_spans, 2, False, NUM_SAMPLE, max_length=4, strict=True
 )
@@ -125,7 +126,7 @@ print("Ref")
 
 
 pcfg_ref = PCFG()
-params2 = D1PCFG.get_pcfg_rules(params, 2)
+params2 = D1PCFGFlex.get_pcfg_rules(params, 2)
 pred_ref = pcfg_ref.sampled_decoding(
     params2, nt_spans, 2, pt_spans, 2, False, NUM_SAMPLE, max_length=4, strict=True
 )

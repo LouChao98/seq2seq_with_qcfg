@@ -10,7 +10,7 @@ from torch.autograd import grad
 
 from ._fn import diagonal, diagonal_copy_, stripe
 from ._utils import checkpoint, process_param_for_marginal, weighted_random
-from .td_style_base import TDStyleBase
+from .decomp_base import DecompBase
 
 log = logging.getLogger(__file__)
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
@@ -22,7 +22,7 @@ class TokenType(IntEnum):
     COPY_PT = _COPY_PT
 
 
-class FastestTDPCFG(TDStyleBase):
+class DecompType1(DecompBase):
     # based on Songlin Yang, Wei Liu and Kewei Tu's work
     # https://github.com/sustcsonglin/TN-PCFG/blob/main/parser/pcfgs/tdpcfg.py
     # modification:
@@ -36,7 +36,128 @@ class FastestTDPCFG(TDStyleBase):
     def __init__(self) -> None:
         super().__init__()
 
-    def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
+    def inside_with_fused_factor(
+        self, params: Dict[str, Tensor], lens, decode=False, marginal=False
+    ):
+        if decode:
+            marginal = True  # MBR decoding
+        if marginal:
+            grad_state = torch.is_grad_enabled()
+            torch.set_grad_enabled(True)
+            cm = torch.inference_mode(False)
+            cm.__enter__()
+            params = {k: process_param_for_marginal(v) for k, v in params.items()}
+        lens = torch.tensor(lens)
+        assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
+
+        terms = params["term"]
+        root = params["root"]
+
+        # 3d binary rule probabilities tensor decomposes to three 2d matrices after CP decomposition.
+        H = params["head"]  # (batch, NT, r), r:=rank, H->r
+        L = params["left"]  # (batch, NT + T, r), r->L
+        R = params["right"]  # (batch, NT + T, r), r->R
+
+        batch, N, T = terms.shape
+        S = L.shape[1]
+        NT = S - T
+        N += 1
+
+        L_term = L[:, NT:]
+        L_nonterm = L[:, :NT]
+        R_term = R[:, NT:]
+        R_nonterm = R[:, :NT]
+
+        # (m_A, r_A) + (m_B, r_B) -> (r_A, r_B)
+        H = H.transpose(-1, -2)
+        H_L = torch.matmul(H, L_nonterm)
+        H_R = torch.matmul(H, R_nonterm)
+        if marginal:
+            span_indicator = terms.new_ones(batch, N, N).requires_grad_()
+            span_indicator_running = span_indicator[:]
+
+        normalizer = terms.new_full((batch, N, N), -1e9)
+        norm = terms.max(-1)[0]
+        diagonal_copy_(normalizer, norm, w=1)
+        terms = (terms - norm.unsqueeze(-1)).exp()
+        if marginal:
+            indicator = span_indicator_running.diagonal(1, 1, 2).unsqueeze(-1)
+            terms = terms * indicator
+        left_term = torch.matmul(terms, L_term)
+        right_term = torch.matmul(terms, R_term)
+
+        # for caching V^{T}s_{i,k} and W^{T}s_{k+1,j}
+        left_s = terms.new_full((batch, N, N, L.shape[2]), 0.0)
+        right_s = terms.new_full((batch, N, N, L.shape[2]), 0.0)
+        diagonal_copy_(left_s, left_term, w=1)
+        diagonal_copy_(right_s, right_term, w=1)
+
+        # prepare length, same as the batch_size in PackedSequence
+        n_at_position = (
+            torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)
+        ).sum(1)
+
+        # w: span width
+        final_m = []
+        final_normalizer = []
+        for step, w in enumerate(range(2, N)):
+
+            # n: the number of spans of width w.
+            n = N - w
+            y = stripe(left_s, n, w - 1, (0, 1))
+            z = stripe(right_s, n, w - 1, (1, w), 0)
+            yn = stripe(normalizer, n, w - 1, (0, 1))
+            zn = stripe(normalizer, n, w - 1, (1, w), 0)
+            x, xn = merge(y, z, yn, zn)
+
+            if marginal:
+                indicator = span_indicator_running.diagonal(w, 1, 2).unsqueeze(-1)
+                x = x * indicator
+
+            unfinished = n_at_position[step + 1]
+            current_bsz = n_at_position[step]
+
+            if current_bsz - unfinished > 0:
+                final_m.insert(
+                    0,
+                    torch.matmul(
+                        x[unfinished:current_bsz, :1], H[unfinished:current_bsz]
+                    ),
+                )
+                final_normalizer.insert(0, xn[unfinished:current_bsz, :1])
+            if unfinished > 0:
+                x = x[:unfinished]
+                left_s = left_s[:unfinished]
+                right_s = right_s[:unfinished]
+                H_L = H_L[:unfinished]
+                H_R = H_R[:unfinished]
+                normalizer = normalizer[:unfinished]
+                xn = xn[:unfinished]
+                if marginal:
+                    span_indicator_running = span_indicator_running[:unfinished]
+
+                left_x = torch.matmul(x, H_L)
+                right_x = torch.matmul(x, H_R)
+                diagonal_copy_(left_s, left_x, w)
+                diagonal_copy_(right_s, right_x, w)
+                diagonal_copy_(normalizer, xn, w)
+
+        final_m = torch.cat(final_m, dim=0)
+        final_normalizer = torch.cat(final_normalizer, dim=0)
+        final = (final_m + 1e-9).squeeze(1).log() + root
+        logZ = final.logsumexp(-1) + final_normalizer.squeeze(-1)
+        if decode:
+            spans = self.mbr_decoding(logZ, span_indicator, lens)
+            return spans
+        if marginal:
+            torch.set_grad_enabled(grad_state)
+            cm.__exit__(None, None, None)
+            return grad(logZ.sum(), [span_indicator])[0]
+        return -logZ
+
+    def inside_with_fused_factor(
+        self, params: Dict[str, Tensor], lens, decode=False, marginal=False
+    ):
         if decode:
             marginal = True  # MBR decoding
         if marginal:

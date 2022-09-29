@@ -122,6 +122,19 @@ class NeuralPCFGSrcParser(SrcParserBase):
         logprobs = dist._struct().score(dist.log_potentials, spans_onehot) - log_Z
         return spans_onehot, logprobs
 
+    @torch.enable_grad()
+    def entropy(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
+        if dist is None:
+            dist = self(x, lengths, extra_scores)
+
+        margin = dist.marginals
+        return (
+            dist.partition
+            - (margin[0] * dist.log_potentials[0]).flatten(1).sum(1)
+            - (margin[1] * dist.log_potentials[1]).flatten(1).sum(1)
+            - (margin[2] * dist.log_potentials[2]).flatten(1).sum(1)
+        )
+
     def process_extra_scores(self, params, extra_scores):
         # constraint_scores, lse_scores, add_scores = None, None, None
         if extra_scores is None:
