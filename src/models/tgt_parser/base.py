@@ -470,10 +470,27 @@ class TgtParserBase(nn.Module):
     def post_process_nt_constraint(self, constraint, device):
         constraint_ = []
         for value, mask in constraint:
-            value = torch.from_numpy(value.reshape(value.shape[:2] + (-1,)))
-            mask = torch.from_numpy(mask.reshape(value.shape))
+            if isinstance(value, np.ndarray):
+                value = torch.from_numpy(value.reshape(value.shape[:2] + (-1,)))
+                mask = torch.from_numpy(mask.reshape(value.shape))
+            else:
+                value = value.flatten(2)
+                mask = mask.flatten(2)
             constraint_.append((value.to(device), mask.to(device)))
         return constraint_
+
+    def merge_nt_constraint(self, constraint1, constraint2):
+        # write constraint2 to constraint1. all should be postprocessed.
+        # mask2=False  =>  value=value1
+        # mask2=True   =>  value=value2
+        # mask = mask1 | mask2
+
+        merged = []
+        for (v1, m1), (v2, m2) in zip(constraint1, constraint2):
+            v = torch.where(m2, v2, v1)
+            m = m1 | m2
+            merged.append((v, m))
+        return merged
 
 
 class PCFGProxy:

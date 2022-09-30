@@ -60,8 +60,7 @@ class Vocabulary:
 
 
 class VocabularyPair:
-    """Store src/tgt vocabularies and their id mappings.
-    """
+    """Store src/tgt vocabularies and their id mappings."""
 
     def __init__(self, src: Vocabulary, tgt: Vocabulary):
         self.src = src
@@ -74,3 +73,6 @@ class VocabularyPair:
 
     def src2tgt(self, src_ids):
         return [self.mapping[i] for i in src_ids]
+
+    def swap(self):
+        return VocabularyPair(self.tgt, self.src)

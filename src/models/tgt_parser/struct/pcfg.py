@@ -4,7 +4,7 @@ from typing import Dict, List
 
 import numpy as np
 import torch
-from numba import jit, prange
+from numba import jit
 from torch import Tensor
 from torch_struct import SentCFG
 

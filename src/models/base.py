@@ -77,7 +77,9 @@ class ModelBase(pl.LightningModule):
             },
         }
 
-    def save_predictions(self, outputs):
+    def save_predictions(self, outputs, path=None):
+        if path is None:
+            path = "predict_on_test.txt"
         if dist.is_initialized() and (ws := dist.get_world_size()):
             if len(self.datamodule.data_test) % ws != 0:
                 # TODO should I warn when detect duplicates?
@@ -113,7 +115,7 @@ class ModelBase(pl.LightningModule):
             if not (preds[0][0] == 0 and preds[-1][0] == len(preds) - 1):
                 log.warning("There are some missing examples.")
 
-            with open(f"predict_on_test.txt", "w") as f:
+            with open(path, "w") as f:
                 for id_, inst in preds:
                     f.write(f"{id_}:\t")
                     f.write(" ".join(inst))

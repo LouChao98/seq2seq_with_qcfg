@@ -17,9 +17,6 @@ from ._utils import (
 )
 from .decomp_base import DecompBase
 
-# import torch_semiring_einsum as tse
-
-
 log = logging.getLogger(__file__)
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
@@ -49,12 +46,6 @@ class D1PCFG(DecompBase):
         self.tgt_pt_states = tgt_pt_states
         self.max_states = max(tgt_nt_states, tgt_pt_states)
         self.threshold = torch.nn.Threshold(1e-8, 0, True)
-
-        # self.eq_slr = tse.compile_equation("qrij, qrik->qrijk")
-        # self.eq_qnkrj = tse.compile_equation("qnwjr,qnwkr->qnkrj")
-        # self.eq_qnri = tse.compile_equation("qnkrj,qrijk->qnri")
-        # self.eq_qnai = tse.compile_equation("qnri,qair->qnai")
-        # self.eq_tor = tse.compile_equation("xlpi,xrp->xlir")
 
     def __call__(self, params: Dict[str, Tensor], lens, decode=False, marginal=False):
         # if not decode and not marginal and params.get("copy_nt") is None:

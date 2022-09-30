@@ -39,6 +39,9 @@ class _DataModule(pl.LightningDataModule):
             self._persistent_variables.append(key)
         self.__dict__[key] = value
 
+    def unregister_persistent_variable(self, name):
+        self._persistent_variables.remove(name)
+
     def setup_proxy(self, *args, **kwargs):
         hash_val = get_hash(iter_dir(Path(__file__).parent), **self.hparams)
         cache_file = Path(self.cache_dir, hash_val)

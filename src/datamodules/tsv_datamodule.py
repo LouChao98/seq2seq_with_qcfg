@@ -226,11 +226,12 @@ class TSVDataModule(_DataModule):
             shuffle=False,
         )
 
-    def collator(self, data):
-        tgt_lens = [len(inst["tgt_ids"]) for inst in data]
-        argsort = list(range(len(data)))
-        argsort.sort(key=lambda i: tgt_lens[i], reverse=True)
-        data = [data[i] for i in argsort]
+    def collator(self, data, sort=True):
+        if sort:
+            tgt_lens = [len(inst["tgt_ids"]) for inst in data]
+            argsort = list(range(len(data)))
+            argsort.sort(key=lambda i: tgt_lens[i], reverse=True)
+            data = [data[i] for i in argsort]
 
         src = [inst["src"] for inst in data]
         tgt = [inst["tgt"] for inst in data]

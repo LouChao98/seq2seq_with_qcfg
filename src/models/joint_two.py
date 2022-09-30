@@ -4,27 +4,18 @@ from functools import partial
 from types import MethodType
 from typing import Any, List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
 from pytorch_lightning.profilers import PassThroughProfiler
 from torch_scatter import scatter_mean
+from torch_struct.distributions import SentCFG
 from torchmetrics import MinMetric
 from transformers import AutoModel
 
 from src.models.base import ModelBase
-from src.models.src_parser.base import SrcParserBase
-from src.models.tgt_parser.base import TgtParserBase
-from src.models.tree_encoder.base import TreeEncoderBase
-from src.utils.fn import (
-    annotate_snt_with_brackets,
-    extract_parses,
-    extract_parses_span_only,
-    get_actions,
-    get_tree,
-    report_ids_when_err,
-)
-from src.utils.metric import PerplexityMetric
+from src.utils.fn import extract_parses_span_only
 
 from .general_seq2seq import GeneralSeq2SeqModule
 
@@ -33,7 +24,7 @@ log = logging.getLogger(__file__)
 
 class TwoDirectionalModule(ModelBase):
     # model1 is the primary model
-    def __init__(self, model1, model2):
+    def __init__(self, model1, model2, constraint_strength, optimizer, scheduler):
         super().__init__()
         self.model1: GeneralSeq2SeqModule = instantiate(model1)
         self.model2: GeneralSeq2SeqModule = instantiate(model2)
@@ -41,326 +32,192 @@ class TwoDirectionalModule(ModelBase):
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
         super().setup(stage)
-        assert self.trainer.profiler is None, "not implemented"
+        assert isinstance(self.trainer.profiler, PassThroughProfiler), "not implemented"
         self.model1.trainer = self.model2.trainer = self.trainer
-        self.model1.setup(stage, datamodule)
-        self.model1.log = MethodType(partial(self.sub_log, "m1"), self.model1)
-        self.model1.print = MethodType(partial(self.sub_print, "m1"), self.model1)
-        self.model2.setup(stage, datamodule)
-        self.model2.log = MethodType(partial(self.sub_log, "m2"), self.model2)
-        self.model2.print = MethodType(partial(self.sub_print, "m2"), self.model2)
+        assert datamodule is not None or self.trainer.datamodule is not None
+        self.datamodule = datamodule or self.trainer.datamodule
 
-    def sub_log(self, prefix, name, value, *args, **kwargs):
+        with self.datamodule.normal_mode():
+            self.model1.setup(stage, datamodule)
+        self.model1.log = partial(self.sub_log, prefix="m1")
+        self.model1.print = partial(self.sub_print, prefix="m1")
+        self.model1.save_predictions = partial(
+            self.model1.save_predictions, path="m1_predict_on_test.txt"
+        )
+
+        with self.datamodule.inverse_mode():
+            self.model2.setup(stage, datamodule)
+        self.model2.log = partial(self.sub_log, prefix="m2")
+        self.model2.print = partial(self.sub_print, prefix="m2")
+        self.model2.save_predictions = partial(
+            self.model2.save_predictions, path="m2_predict_on_test.txt"
+        )
+
+    def sub_log(self, name, value, *args, prefix, **kwargs):
         self.log(f"{prefix}/{name}", value, *args, **kwargs)
 
-    def sub_print(self, prefix, *args, **kwargs):
+    def sub_print(self, *args, prefix, **kwargs):
         self.print(prefix, *args, **kwargs)
 
-    def forward(self, batch):
-        src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
-        logging_vals = {}
+    def forward(self, batch, model1_pred, model2_pred):
+        # only contain the code for the agreement constraint
+        # only support PCFG
+        # reuse the sample in submodel's forward
+        device = batch["src_ids"].device
 
-        with self.profiler.profile("compute_src_nll_and_sampling"):
-            dist = self.parser(src_ids, src_lens)
-            src_nll = -dist.partition
-            src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
-            src_spans = extract_parses_span_only(src_spans[-1], src_lens, inc=1)
+        # prepare g(t_1)
+        m1t1_event: torch.Tensor = model1_pred["src_runtime"]["event"][-1].sum(-1)
+        t1_len = model1_pred["src_runtime"]["dist"].log_potentials[0].shape[1]
+        t1_constraint = []
+        for offset in range(1, t1_len):
+            mask = m1t1_event[:, offset - 1, :-offset] < 0.9
+            # mask = m1t1_event.diagonal(offset, dim1=1, dim2=2) < 0.9
+            value = torch.full_like(mask, fill_value=-1e9, dtype=torch.float32)
+            t1_constraint.append((value, mask))
 
-        with self.profiler.profile("src_encoding"):
-            x = self.encode(batch)
-            node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
-
-        with self.profiler.profile("compute_tgt_nll"):
-            tgt_params = self.decoder.get_params(
-                node_features, node_spans, batch["tgt_ids"], copy_position=copy_position
-            )
-            tgt_nll = self.decoder(
-                batch["tgt_ids"],
-                batch["tgt_lens"],
-                node_features,
-                node_spans,
-                params=tgt_params[0],
-                copy_position=copy_position,
-            )
-
-        with self.profiler.profile("reward"), torch.no_grad():
-            src_spans_argmax, src_logprob_argmax = self.parser.argmax(
-                src_ids, src_lens, dist=dist
-            )
-            src_spans_argmax = extract_parses_span_only(
-                src_spans_argmax[-1], src_lens, inc=1
-            )
-            node_features_argmax, node_spans_argmax = self.tree_encoder(
-                x, src_lens, spans=src_spans_argmax
-            )
-            tgt_nll_argmax = self.decoder(
-                batch["tgt_ids"],
-                batch["tgt_lens"],
-                node_features_argmax,
-                node_spans_argmax,
-                copy_position=copy_position,
-            )
-            neg_reward = (tgt_nll - tgt_nll_argmax).detach()
-            logging_vals["reward"] = -neg_reward.mean()
-
-        objective = (src_logprob * neg_reward).mean()
-
-        soft_constraint_loss = 0
-        entropy_reg = 0
-        if self.training:
-            if self.decoder.rule_soft_constraint_solver is not None:
-                with self.profiler.profile("compute_soft_constraint"):
-                    soft_constraint_loss = self.decoder.get_soft_constraint_loss(
-                        batch["tgt_ids"],
-                        batch["tgt_lens"],
-                        node_features,
-                        node_spans,
-                        params=tgt_params,
-                        copy_position=copy_position,
-                    )
-            if (e := self.hparams.parser_entropy_reg) > 0:
-                entropy = self.parser.entropy(src_ids, src_lens, dist).mean()
-                entropy_reg = -e * entropy
-                logging_vals["ent"] = entropy
-
-        return {
-            "decoder": tgt_nll.mean() + soft_constraint_loss,
-            "encoder": src_nll.mean() + objective + entropy_reg,
-            "tgt_nll": tgt_nll.mean(),
-            "src_nll": src_nll.mean(),
-            "log": logging_vals,
-        }
-
-    @report_ids_when_err
-    def forward_visualize(self, batch, sample=False):
-        # parse and annotate brackets on src and tgt
-        src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
-
-        parse = self.parser.sample if sample else self.parser.argmax
-        src_spans = parse(src_ids, src_lens)[0][-1]
-        src_spans, src_trees = extract_parses(src_spans, src_lens, inc=1)
-        src_actions, src_annotated = [], []
-        for snt, tree in zip(batch["src"], src_trees):
-            src_actions.append(get_actions(tree))
-            src_annotated.append(get_tree(src_actions[-1], snt))
-
-        x = self.encode(batch)
-        node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
-
-        tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(
-            batch["tgt_ids"],
-            batch["tgt_lens"],
-            node_features,
-            node_spans,
-            copy_position=copy_position,
+        # prepare g(t_2). first sample one t_2
+        m1t2_params, *_, m1t2_nt_num_nodes = model1_pred["tgt_runtime"]["param"]
+        _t, _r, _ro = m1t2_params["term"], m1t2_params["rule"], m1t2_params["root"]
+        _c, _l, _a = (
+            m1t2_params.get("constraint"),
+            m1t2_params.get("lse"),
+            m1t2_params.get("add"),
         )
-        tgt_annotated = []
-        for snt, tgt_spans_inst in zip(batch["tgt"], tgt_spans):
-            tree = annotate_snt_with_brackets(snt, tgt_spans_inst)
-            tgt_annotated.append(tree)
-
-        num_pt_spans = max(len(item) for item in pt_spans)
-        num_nt_spans = max(len(item) for item in nt_spans)
-
-        alignments = []
-        for (
-            tgt_spans_inst,
-            tgt_snt,
-            aligned_spans_inst,
-            src_snt,
-        ) in zip(tgt_spans, batch["tgt"], aligned_spans, batch["src"]):
-            alignments_inst = []
-            # large span first for handling copy.
-            idx = list(range(len(tgt_spans_inst)))
-            idx.sort(key=lambda i: (operator.sub(*tgt_spans_inst[i][:2]), -i))
-            copied = []
-            # for tgt_span, src_span in zip(tgt_spans_inst, aligned_spans_inst):
-            for i in idx:
-                tgt_span = tgt_spans_inst[i]
-                src_span = aligned_spans_inst[i]
-                is_copy = False
-                if getattr(self.decoder, "use_copy"):
-                    should_skip = False
-                    for copied_span in copied:
-                        if (
-                            copied_span[0] <= tgt_span[0]
-                            and tgt_span[1] <= copied_span[1]
-                        ):
-                            should_skip = True
-                            break
-                    if should_skip:
-                        continue
-                    if tgt_span[0] == tgt_span[1]:
-                        is_copy = (
-                            tgt_span[2] // num_pt_spans == self.decoder.pt_states - 1
-                        )
-                    else:
-                        is_copy = (
-                            tgt_span[2] // num_nt_spans == self.decoder.nt_states - 1
-                        )
-                    if is_copy:
-                        copied.append(tgt_span)
-                alignments_inst.append(
-                    (
-                        " ".join(src_snt[src_span[0] : src_span[1] + 1])
-                        + f" ({src_span[0]}, {src_span[1]+1})",
-                        " ".join(tgt_snt[tgt_span[0] : tgt_span[1] + 1])
-                        + f" ({tgt_span[0]}, {tgt_span[1]+1})",
-                        "COPY" if is_copy else "",
-                    )
-                )
-            alignments.append(alignments_inst[::-1])
-        return {
-            "src_tree": src_annotated,
-            "tgt_tree": tgt_annotated,
-            "alignment": alignments,
-        }
-
-    @report_ids_when_err
-    def forward_inference(self, batch):
-        # actually predict the target sequence
-        src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-
-        dist = self.parser(src_ids, src_lens)
-        src_spans = self.parser.argmax(src_ids, src_lens, dist=dist)[0]
-        src_spans = extract_parses_span_only(src_spans[-1], src_lens, inc=1)
-
-        x = self.encode(batch)
-        node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
-
-        y_preds = self.decoder.generate(
-            node_features,
-            node_spans,
-            batch["src_ids"],
-            batch["src"],
+        m1t2_dist = SentCFG((_t, _r, _ro, _c, _l, _a), batch["tgt_lens"])
+        m1t2_event = m1t2_dist.argmax[-1].sum(-1)  # TODO sampling
+        t2_len = _t.shape[1]
+        # scan copy
+        # TODO profile and figure out some smart way
+        t2_spans = extract_parses_span_only(
+            m1t2_dist.argmax[-1], batch["tgt_lens"], inc=1
         )
+        for bidx, (spans, l) in enumerate(zip(t2_spans, batch["tgt_lens"])):
+            flags = np.zeros((l,), dtype=np.bool8)
+            for span in spans:
+                if span[1] - span[0] > 1 and not any(flags[span[0] : span[1] + 1]):
+                    shape = m1t2_event[
+                        bidx, : span[1] - span[0], span[0] : span[1]
+                    ].shape
+                    m1t2_event[
+                        bidx, : span[1] - span[0], span[0] : span[1]
+                    ] = torch.flip(torch.triu(torch.ones(shape, device=device)), (1,))
+                flags[span[0] : span[1] + 1] = True
 
-        return {"pred": [item[0] for item in y_preds]}
+        t2_constraint = []
+        for offset in range(1, t2_len):
+            mask = m1t2_event[:, offset - 1, :-offset] < 0.9
+            # mask = m1t2_event.diagonal(offset, dim1=1, dim2=2) < 0.9
+            value = torch.full_like(mask, fill_value=-1e9, dtype=torch.float32)
+            t2_constraint.append((value, mask))
+
+        # log p(g(t_1) | s_1)
+        m1t1_dist = model1_pred["src_runtime"]["dist"]
+        potentials = list(m1t1_dist.log_potentials)
+        assert len(potentials) == 3
+        if len(potentials) < 4:
+            potentials.append(None)
+        nt = model1_pred["src_runtime"]["event"][1].shape[1]
+        m1t1_constraint = []
+        for v, m in t1_constraint:
+            v = v[..., None].expand(-1, -1, nt)
+            m = m[..., None].expand(-1, -1, nt)
+            m1t1_constraint.append((v, m))
+        potentials[3] = m1t1_constraint
+        dist = SentCFG(potentials, batch["src_lens"])
+        p_gt1_s1 = dist.partition
+
+        # log p(g(t_2) | g(t_1))
+        d1 = self.model1.decoder
+        m1t2_cparams = {**m1t2_params}
+        nt = d1.nt_states
+        m1t2_constraint = []
+        for v, m in t2_constraint:
+            v = v[..., None, None].expand(-1, -1, nt, m1t2_nt_num_nodes)
+            m = m[..., None, None].expand(-1, -1, nt, m1t2_nt_num_nodes)
+            m1t2_constraint.append((v, m))
+        m1t2_constraint = d1.post_process_nt_constraint(m1t2_constraint, device)
+        if "constraint" in m1t2_cparams:
+            c = m1t2_cparams["constraint"]
+            m1t2_cparams["constraint"] = d1.merge_nt_constraint(c, m1t2_constraint)
+        else:
+            m1t2_cparams["constraint"] = m1t2_constraint
+        p_gt2_gt1 = -d1.pcfg(m1t2_cparams, batch["tgt_lens"])
+
+        # log p(g(t_2) | s_2)
+        m2t2_dist = model2_pred["src_runtime"]["dist"]
+        potentials = list(m2t2_dist.log_potentials)
+        assert len(potentials) == 3
+        if len(potentials) < 4:
+            potentials.append(None)
+        nt = model2_pred["src_runtime"]["event"][1].shape[1]
+        m2t2_constraint = []
+        for v, m in t2_constraint:
+            v = v[..., None].expand(-1, -1, nt)
+            m = m[..., None].expand(-1, -1, nt)
+            m2t2_constraint.append((v, m))
+        potentials[3] = m2t2_constraint
+        dist = SentCFG(potentials, batch["tgt_lens"])
+        p_gt2_s2 = dist.partition
+
+        # log p(g(t_1) | g(t_2))
+        d2 = self.model2.decoder
+        m2t1_cparams, *_, m2t1_nt_num_nodes = model2_pred["tgt_runtime"]["param"]
+        m2t1_cparams = {**m2t1_cparams}
+        nt = d2.nt_states
+        m2t1_constraint = []
+        for v, m in t1_constraint:
+            v = v[..., None, None].expand(-1, -1, nt, m2t1_nt_num_nodes)
+            m = m[..., None, None].expand(-1, -1, nt, m2t1_nt_num_nodes)
+            m2t1_constraint.append((v, m))
+        m2t1_constraint = d2.post_process_nt_constraint(m2t1_constraint, device)
+        if "constraint" in m2t1_cparams:
+            c = m2t1_cparams["constraint"]
+            m2t1_cparams["constraint"] = d2.merge_nt_constraint(c, m2t1_constraint)
+        else:
+            m2t1_cparams["constraint"] = m2t1_constraint
+        p_gt1_gt2 = -d2.pcfg(m2t1_cparams, batch["src_lens"])
+
+        p1 = p_gt1_s1 + p_gt2_gt1
+        p2 = p_gt2_s2 + p_gt1_gt2
+        logr = p2 - p1
+        kl = logr.exp() - 1 - logr
+        return {"agreement": kl.mean()}
 
     def training_step(self, batch: Any, batch_idx: int):
-        output = self(batch)
-        loss = output["decoder"] + output["encoder"]
-        ppl = self.train_metric(output["tgt_nll"], batch["tgt_lens"])
-        self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
-        self.log("train/ppl", ppl, prog_bar=True)
-        self.log("train/src", output["decoder"], prog_bar=True)
-        self.log("train/tgt", output["encoder"], prog_bar=True)
-        if "log" in output:
-            self.log_dict({"train/" + k: v for k, v in output["log"].items()})
-
-        if batch_idx == 0:
-            self.eval()
-            single_inst = {key: value[:2] for key, value in batch.items()}
-            trees = self.forward_visualize(single_inst)
-            self.print("=" * 79)
-            for src, tgt, alg in zip(
-                trees["src_tree"], trees["tgt_tree"], trees["alignment"]
-            ):
-                self.print("Src:", src)
-                self.print("Tgt:", tgt)
-                self.print(
-                    "Alg:\n"
-                    + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
-                )
-            self.train()
-        return {"loss": loss}
+        out1 = self.model1(batch[0])
+        out2 = self.model2(batch[1])
+        loss1 = self.model1.training_step(batch[0], batch_idx, forward_prediction=out1)
+        loss2 = self.model2.training_step(batch[1], batch_idx, forward_prediction=out2)
+        agreement = self(batch[0], out1, out2)
+        self.log("train/agree", agreement["agreement"], prog_bar=True)
+        return {
+            "loss": loss1["loss"]
+            + loss2["loss"]
+            + self.hparams.constraint_strength * agreement["agreement"]
+        }
 
     def on_validation_epoch_start(self) -> None:
-        super().on_validation_epoch_start()
-        self.val_metric.reset()
-        self.test_metric.reset()
-        if self.hparams.track_param_norm:
-            self.log(
-                "stat/parser_norm",
-                sum(param.norm().item() ** 2 for param in self.parser.parameters())
-                ** 0.5,
-            )
-            self.log(
-                "stat/encoder_norm",
-                sum(
-                    param.norm().item() ** 2 for param in self.tree_encoder.parameters()
-                )
-                ** 0.5,
-            )
-            self.log(
-                "stat/decoder_norm",
-                sum(param.norm().item() ** 2 for param in self.decoder.parameters())
-                ** 0.5,
-            )
+        self.model1.on_validation_epoch_start()
+        self.model2.on_validation_epoch_start()
 
     def validation_step(self, batch: Any, batch_idx: int):
-        output = self(batch)
-        loss = output["decoder"] + output["encoder"]
-        self.val_metric(output["tgt_nll"], batch["tgt_lens"])
-
-        if (self.current_epoch + 1) % 20 == 0:
-            self.test_step(batch, batch_idx=None)
-
-        # if batch_idx < 3:
-        #     single_inst = {key: value[:2] for key, value in batch.items()}
-        #     trees = self.forward_visualize(single_inst)
-        #     self.print("=" * 79)
-        #     for src, tgt, alg in zip(
-        #         trees["src_tree"], trees["tgt_tree"], trees["alignment"]
-        #     ):
-        #         self.print("Src:", src)
-        #         self.print("Tgt:", tgt)
-        #         self.print(
-        #             "Alg:\n"
-        #             + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
-        #         )
-
-        return {"loss": loss}
+        loss1 = self.model1.validation_step(batch[0], batch_idx)["loss"]
+        loss2 = self.model2.validation_step(batch[1], batch_idx)["loss"]
+        return {"loss": loss1 + loss2}
 
     def validation_epoch_end(self, outputs: List[Any]):
-        ppl = self.val_metric.compute()  # get val accuracy from current epoch
-        self.val_best_metric.update(ppl)
-        best_ppl = self.val_best_metric.compute()
-        self.log("val/ppl", ppl, on_epoch=True, prog_bar=True)
-        self.log("val/ppl_best", best_ppl, on_epoch=True, prog_bar=True)
-        self.print("val/epoch", str(self.current_epoch + 1))
-        self.print("val/ppl", str(ppl.item()))
-        if (self.current_epoch + 1) % 20 == 0:
-            acc = self.test_metric.compute()
-            self.log_dict({"val/" + k: v for k, v in acc.items()})
-            self.print(acc)
+        self.model1.validation_epoch_end(None)
+        self.model2.validation_epoch_end(None)
 
     def on_test_epoch_start(self) -> None:
-        self.test_metric.reset()
-        return super().on_test_epoch_start()
+        self.model1.on_test_epoch_start()
+        self.model2.on_test_epoch_start()
 
-    @torch.inference_mode(False)
     def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = None):
-        # patch for inference_mode
-        batch["src_ids"] = batch["src_ids"].clone()
-        batch["tgt_ids"] = batch["tgt_ids"].clone()
-
-        preds = self.forward_inference(batch)["pred"]
-        targets = batch["tgt"]
-
-        intermediate_metric = self.test_metric(preds, targets)
-        # self.log_dict(intermediate_metric, prog_bar=True, logger=False, on_step=True)
-
-        # if batch_idx == 0:
-        #     single_inst = {key: value[:2] for key, value in batch.items()}
-        #     trees = self.forward_visualize(single_inst)
-        #     self.print("=" * 79)
-        #     for src, tgt, alg in zip(
-        #         trees["src_tree"], trees["tgt_tree"], trees["alignment"]
-        #     ):
-        #         self.print("Src:", src)
-        #         self.print("Tgt:", tgt)
-        #         self.print(
-        #             "Alg:\n"
-        #             + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
-        #         )
-
-        return {"preds": preds, "targets": targets, "id": batch["id"]}
+        output1 = self.model1.test_step(batch[0], batch_idx)
+        output2 = self.model2.test_step(batch[1], batch_idx)
+        return output1, output2
 
     def test_epoch_end(self, outputs) -> None:
-        acc = self.test_metric.compute()
-        self.log_dict({"test/" + k: v for k, v in acc.items()})
-        self.print(acc)
-        self.save_predictions(outputs)
+        self.model1.test_epoch_end([item[0] for item in outputs])
+        self.model2.test_epoch_end([item[1] for item in outputs])

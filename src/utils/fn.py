@@ -86,7 +86,7 @@ def get_tree(actions, sent=None, SHIFT=0, REDUCE=1):
         sent = list(map(str, range((len(actions) + 1) // 2)))
     #  assert(len(actions) == 2*len(sent) - 1)
     if len(sent) == 1:
-        return "(" + sent[0] + ")"
+        return "[" + sent[0] + "]"
     for action in actions:
         if action == SHIFT:
             word = sent[pointer]
@@ -95,7 +95,7 @@ def get_tree(actions, sent=None, SHIFT=0, REDUCE=1):
         elif action == REDUCE:
             right = stack.pop()
             left = stack.pop()
-            stack.append("(" + left + " " + right + ")")
+            stack.append("[" + left + " " + right + "]")
     assert len(stack) == 1
     return stack[-1]
 
@@ -113,10 +113,10 @@ def annotate_snt_with_brackets(tokens: List[str], span: List[Tuple[int, int]]):
     for pre, token, post in zip(pre_tokens, tokens, post_tokens):
         output_token = []
         if pre > 0:
-            output_token.append("(" * pre)
+            output_token.append("[" * pre)
         output_token.append(token)
         if post > 0:
-            output_token.append(")" * post)
+            output_token.append("]" * post)
         output.append("".join(output_token))
     return " ".join(output)
 

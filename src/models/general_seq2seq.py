@@ -149,8 +149,8 @@ class GeneralSeq2SeqModule(ModelBase):
         with self.profiler.profile("compute_src_nll_and_sampling"):
             dist = self.parser(src_ids, src_lens)
             src_nll = -dist.partition
-            src_spans, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
-            src_spans = extract_parses_span_only(src_spans[-1], src_lens, inc=1)
+            src_event, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
+            src_spans = extract_parses_span_only(src_event[-1], src_lens, inc=1)
 
         with self.profiler.profile("src_encoding"):
             x = self.encode(batch)
@@ -170,11 +170,11 @@ class GeneralSeq2SeqModule(ModelBase):
             )
 
         with self.profiler.profile("reward"), torch.no_grad():
-            src_spans_argmax, src_logprob_argmax = self.parser.argmax(
+            src_event_argmax, src_logprob_argmax = self.parser.argmax(
                 src_ids, src_lens, dist=dist
             )
             src_spans_argmax = extract_parses_span_only(
-                src_spans_argmax[-1], src_lens, inc=1
+                src_event_argmax[-1], src_lens, inc=1
             )
             node_features_argmax, node_spans_argmax = self.tree_encoder(
                 x, src_lens, spans=src_spans_argmax
@@ -214,6 +214,8 @@ class GeneralSeq2SeqModule(ModelBase):
             "encoder": src_nll + objective + entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
+            "src_runtime": {"dist": dist, "event": src_event},
+            "tgt_runtime": {"param": tgt_params},
             "log": logging_vals,
         }
 
@@ -334,8 +336,8 @@ class GeneralSeq2SeqModule(ModelBase):
 
         return {"pred": [item[0] for item in y_preds]}
 
-    def training_step(self, batch: Any, batch_idx: int):
-        output = self(batch)
+    def training_step(self, batch: Any, batch_idx: int, *, forward_prediction=None):
+        output = forward_prediction if forward_prediction is not None else self(batch)
         loss_decoder = output["decoder"].mean()
         loss_encoder = output["encoder"].mean()
         loss = loss_encoder + loss_decoder

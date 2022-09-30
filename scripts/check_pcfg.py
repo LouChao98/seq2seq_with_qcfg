@@ -1,3 +1,6 @@
+import sys
+
+sys.path.insert(0, "..")
 import math
 from collections import defaultdict
 from itertools import product
@@ -163,7 +166,7 @@ def convert(params):
 
 
 B = 1
-N = 2
+N = 3
 VOCAB = 3
 TGT_PT = 2
 SRC_PT = 4
