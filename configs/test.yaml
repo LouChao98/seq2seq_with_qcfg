@@ -3,26 +3,13 @@
 # specify here default evaluation configuration
 defaults:
   - _self_
-  - datamodule: ace05.yaml # choose the datamodule for evaluation
-  - model: nested_ner_v2.yaml
-  - callbacks: null
-  - logger: null
-  - trainer: default.yaml
-  - log_dir: evaluation.yaml
-
+  - datamodule: scan
+  - model: scan
+  - callbacks: nocheckpoint
+  - logger: tensorboard # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
+  - trainer: default
+  - hydra: default
   - experiment: null
-
-  # enable color logging
-  - override hydra/hydra_logging: colorlog
-  - override hydra/job_logging: colorlog
-
-hydra:
-  job:
-    chdir: true
-  job_logging:
-    handlers:
-      console:
-        class: src.utils.log_utils.TqdmLoggingHandler
 
 original_work_dir: ${hydra:runtime.cwd}
 

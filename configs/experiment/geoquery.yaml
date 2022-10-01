@@ -4,7 +4,7 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: geoquery_iid
+  - override /datamodule: geoquery_len
   - override /model: geoquery
   - override /callbacks: default
   - override /logger: wandb
@@ -21,8 +21,8 @@ datamodule:
 
 model:
   decoder:
-    pt_states: 12
-    nt_states: 12
+    pt_states: 8
+    nt_states: 8
     generation_num_samples: 5
     generation_ppl_batch_size: 5
     rule_hard_constraint: ~

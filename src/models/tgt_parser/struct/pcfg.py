@@ -415,6 +415,17 @@ class PCFG:
             types[i] = terminal_type
         return samples, types, status
 
+    def entropy(self, q, lens):
+        q_margin = self(q, lens, marginal=True)
+        ql = (q["term"], q["rule"], q["root"])
+        entropy = (
+            -self(q, lens)
+            - (q_margin[0] * ql[0]).sum((1, 2))
+            - (q_margin[1] * ql[1]).sum((1, 2, 3))
+            - (q_margin[2] * ql[2]).sum(1)
+        )
+        return entropy
+
     def ce(self, q, p, lens):
         # ce(q, p) = part(p) - <marginal, param(p)>
         q_margin = self(q, lens, marginal=True)

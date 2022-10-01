@@ -48,6 +48,7 @@ class GeneralSeq2SeqModule(ModelBase):
         test_metric=None,
         load_from_checkpoint=None,
         parser_entropy_reg=0.0,
+        decoder_entropy_reg=0.0,
         param_initializer="xavier_uniform",
         track_param_norm=False,
         real_val_every_n_epochs=20,
@@ -192,7 +193,8 @@ class GeneralSeq2SeqModule(ModelBase):
         objective = src_logprob * neg_reward
 
         soft_constraint_loss = 0
-        entropy_reg = 0
+        src_entropy_reg = 0
+        tgt_entropy_reg = 0
         if self.training:
             if self.decoder.rule_soft_constraint_solver is not None:
                 with self.profiler.profile("compute_soft_constraint"):
@@ -206,12 +208,16 @@ class GeneralSeq2SeqModule(ModelBase):
                     )
             if (e := self.hparams.parser_entropy_reg) > 0:
                 entropy = self.parser.entropy(src_ids, src_lens, dist)
-                entropy_reg = -e * entropy
-                logging_vals["ent"] = entropy
+                src_entropy_reg = -e * entropy
+                logging_vals["src_entropy"] = entropy
+            if (e := self.hparams.decoder_entropy_reg) > 0:
+                entropy = self.decoder.pcfg.entropy(tgt_params[0], batch["tgt_lens"])
+                tgt_entropy_reg = -e * entropy
+                logging_vals["tgt_entropy"] = entropy
 
         return {
-            "decoder": tgt_nll + soft_constraint_loss,
-            "encoder": src_nll + objective + entropy_reg,
+            "decoder": tgt_nll + soft_constraint_loss + tgt_entropy_reg,
+            "encoder": src_nll + objective + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
             "src_runtime": {

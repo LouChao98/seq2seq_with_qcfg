@@ -3,12 +3,12 @@
 # specify here default training configuration
 defaults:
   - _self_
-  - datamodule: scan.yaml
-  - model: scan.yaml
-  - callbacks: nocheckpoint.yaml
+  - datamodule: scan
+  - model: scan
+  - callbacks: nocheckpoint
   - logger: tensorboard # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
-  - trainer: default.yaml
-  - log_dir: default.yaml
+  - trainer: default
+  - hydra: default
 
   # experiment configs allow for version control of specific configurations
   # e.g. best hyperparameters for each combination of model and datamodule
@@ -22,19 +22,7 @@ defaults:
 
   # optional local config for machine/user specific settings
   # it's optional since it doesn't need to exist and is excluded from version control
-  - optional local: default.yaml
-
-  # enable color logging
-  - override hydra/hydra_logging: colorlog
-  - override hydra/job_logging: colorlog
-
-hydra:
-  job:
-    chdir: true
-  job_logging:
-    handlers:
-      console:
-        class: src.utils.log_utils.TqdmLoggingHandler
+  - optional local: default
 
 # path to original working directory
 # hydra hijacks working directory by changing it to the new log directory
