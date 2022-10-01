@@ -21,11 +21,14 @@ trainer:
   accumulate_grad_batches: 1
   gradient_clip_val: 3
 
+callbacks:
+  model_checkpoint:
+    monitor: m1/val/ppl
+  early_stopping:
+    monitor: m1/val/ppl
+
 logger:
   wandb:
     project: "styleptb"
-    tags:
-      - "${hydra:runtime.choices.model/parser}"
-      - "${hydra:runtime.choices.model/tree_encoder}"
-      - "${hydra:runtime.choices.model/decoder}"
-    offline: true # ${in_cluster:}
+    tags: []
+    offline: ${in_cluster:}

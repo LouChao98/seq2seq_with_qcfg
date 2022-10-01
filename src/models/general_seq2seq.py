@@ -214,7 +214,11 @@ class GeneralSeq2SeqModule(ModelBase):
             "encoder": src_nll + objective + entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
-            "src_runtime": {"dist": dist, "event": src_event},
+            "src_runtime": {
+                "dist": dist,
+                "event": src_event,
+                "argmax_event": src_event_argmax,
+            },
             "tgt_runtime": {"param": tgt_params},
             "log": logging_vals,
         }

@@ -1,7 +1,11 @@
 _target_: src.models.joint_two.TwoDirectionalModule
 _recursive_: false
 
-constraint_strength: 1.
+constraint_strength:
+  - 0@0
+  - 0@9
+  - 0.5@10
+constraint_estimation_strategy: sample
 
 model1:
   encoder:

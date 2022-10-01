@@ -1,22 +1,18 @@
 import logging
-import operator
 from functools import partial
-from types import MethodType
 from typing import Any, List, Optional
 
 import numpy as np
 import torch
-import torch.nn as nn
+import torch_struct
 from hydra.utils import instantiate
 from pytorch_lightning.profilers import PassThroughProfiler
-from torch_scatter import scatter_mean
 from torch_struct.distributions import SentCFG
-from torchmetrics import MinMetric
-from transformers import AutoModel
 
 from src.models.base import ModelBase
 from src.utils.fn import extract_parses_span_only
 
+from .components.dynamic_hp import DynamicHyperParameter
 from .general_seq2seq import GeneralSeq2SeqModule
 
 log = logging.getLogger(__file__)
@@ -24,11 +20,22 @@ log = logging.getLogger(__file__)
 
 class TwoDirectionalModule(ModelBase):
     # model1 is the primary model
-    def __init__(self, model1, model2, constraint_strength, optimizer, scheduler):
+    def __init__(
+        self,
+        model1,
+        model2,
+        constraint_strength,
+        constraint_estimation_strategy,
+        optimizer,
+        scheduler,
+    ):
+        assert constraint_estimation_strategy in ("sample", "argmax")
         super().__init__()
         self.model1: GeneralSeq2SeqModule = instantiate(model1)
         self.model2: GeneralSeq2SeqModule = instantiate(model2)
         self.save_hyperparameters(logger=False)
+
+        self.constraint_strength = DynamicHyperParameter(constraint_strength)
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
         super().setup(stage)
@@ -64,9 +71,14 @@ class TwoDirectionalModule(ModelBase):
         # only support PCFG
         # reuse the sample in submodel's forward
         device = batch["src_ids"].device
+        event_key = (
+            "event"
+            if self.hparams.constraint_estimation_strategy == "sample"
+            else "argmax_event"
+        )
 
         # prepare g(t_1)
-        m1t1_event: torch.Tensor = model1_pred["src_runtime"]["event"][-1].sum(-1)
+        m1t1_event: torch.Tensor = model1_pred["src_runtime"][event_key][-1].sum(-1)
         t1_len = model1_pred["src_runtime"]["dist"].log_potentials[0].shape[1]
         t1_constraint = []
         for offset in range(1, t1_len):
@@ -84,10 +96,17 @@ class TwoDirectionalModule(ModelBase):
             m1t2_params.get("add"),
         )
         m1t2_dist = SentCFG((_t, _r, _ro, _c, _l, _a), batch["tgt_lens"])
-        m1t2_event = m1t2_dist.argmax[-1].sum(-1)  # TODO sampling
+        if self.hparams.constraint_estimation_strategy == "sample":
+            m1t2_event = (
+                m1t2_dist._struct(torch_struct.SampledSemiring)
+                .marginals(m1t2_dist.log_potentials, lengths=m1t2_dist.lengths)[-1]
+                .sum(-1)
+            )
+        else:
+            m1t2_event = m1t2_dist.argmax[-1].sum(-1)
         t2_len = _t.shape[1]
         # scan copy
-        # TODO profile and figure out some smart way
+        # TODO profile and figure out some smart way if worth it
         t2_spans = extract_parses_span_only(
             m1t2_dist.argmax[-1], batch["tgt_lens"], inc=1
         )
@@ -116,7 +135,7 @@ class TwoDirectionalModule(ModelBase):
         assert len(potentials) == 3
         if len(potentials) < 4:
             potentials.append(None)
-        nt = model1_pred["src_runtime"]["event"][1].shape[1]
+        nt = model1_pred["src_runtime"][event_key][1].shape[1]
         m1t1_constraint = []
         for v, m in t1_constraint:
             v = v[..., None].expand(-1, -1, nt)
@@ -149,7 +168,7 @@ class TwoDirectionalModule(ModelBase):
         assert len(potentials) == 3
         if len(potentials) < 4:
             potentials.append(None)
-        nt = model2_pred["src_runtime"]["event"][1].shape[1]
+        nt = model2_pred["src_runtime"][event_key][1].shape[1]
         m2t2_constraint = []
         for v, m in t2_constraint:
             v = v[..., None].expand(-1, -1, nt)
@@ -181,6 +200,7 @@ class TwoDirectionalModule(ModelBase):
         p2 = p_gt2_s2 + p_gt1_gt2
         logr = p2 - p1
         kl = logr.exp() - 1 - logr
+        kl = kl.clamp(max=100)
         return {"agreement": kl.mean()}
 
     def training_step(self, batch: Any, batch_idx: int):
@@ -190,10 +210,9 @@ class TwoDirectionalModule(ModelBase):
         loss2 = self.model2.training_step(batch[1], batch_idx, forward_prediction=out2)
         agreement = self(batch[0], out1, out2)
         self.log("train/agree", agreement["agreement"], prog_bar=True)
+        cstrength = self.constraint_strength.get(self.current_epoch)
         return {
-            "loss": loss1["loss"]
-            + loss2["loss"]
-            + self.hparams.constraint_strength * agreement["agreement"]
+            "loss": loss1["loss"] + loss2["loss"] + cstrength * agreement["agreement"]
         }
 
     def on_validation_epoch_start(self) -> None:

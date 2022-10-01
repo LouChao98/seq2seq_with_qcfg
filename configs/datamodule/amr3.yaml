@@ -1,8 +1,8 @@
 _target_: src.datamodules.penman_datamodule.PenmanDataModule
 
-train_file: ${data_dir}/AMR/tdata_xfm/debug.txt
-dev_file: ${data_dir}/AMR/tdata_xfm/debug.txt
-test_file: ${data_dir}/AMR/tdata_xfm/debug.txt
+train_file: ${data_dir}/AMR/tdata_xfm/train.txt
+dev_file: ${data_dir}/AMR/tdata_xfm/dev.txt
+test_file: ${data_dir}/AMR/tdata_xfm/test.txt
 # train_file: ${data_dir}/AMR/tdata_xfm/dev.toy.txt
 # dev_file: ${data_dir}/AMR/tdata_xfm/dev.toy.txt
 # test_file: ${data_dir}/AMR/tdata_xfm/dev.toy.txt
