@@ -9,12 +9,7 @@ from torch import Tensor
 from torch.autograd import grad
 
 from ._fn import diagonal_copy_, stripe
-from ._utils import (
-    checkpoint,
-    process_param_for_marginal,
-    weighted_random,
-    weighted_random_v2,
-)
+from ._utils import checkpoint, process_param_for_trace, weighted_random, weighted_random_v2
 from .decomp_base import DecompBase
 
 log = logging.getLogger(__file__)
@@ -57,7 +52,7 @@ class D1PCFG(DecompBase):
             torch.set_grad_enabled(True)
             cm = torch.inference_mode(False)
             cm.__enter__()
-            params = {k: process_param_for_marginal(v) for k, v in params.items()}
+            params = {k: process_param_for_trace(v) for k, v in params.items()}
         if not isinstance(lens, torch.Tensor):
             lens = torch.tensor(lens)
         assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
@@ -96,9 +91,7 @@ class D1PCFG(DecompBase):
         TRNT, TRPT = torch.split(params["right"], size, -1)
 
         if marginal:
-            span_indicator = term.new_ones(
-                batch, N, N, self.max_states, nt_spans, requires_grad=True
-            )
+            span_indicator = term.new_ones(batch, N, N, self.max_states, nt_spans, requires_grad=True)
             span_indicator_running = span_indicator[:, :, :, : self.tgt_nt_states]
         else:
             span_indicator = None
@@ -108,14 +101,10 @@ class D1PCFG(DecompBase):
         diagonal_copy_(normalizer, norm, w=1)
         term = (term - norm[..., None, None]).exp()
 
-        left_s = term.new_full((batch, N, N, max_spans, R), -1e9)
-        right_s = term.new_full((batch, N, N, max_spans, R), -1e9)
+        left_s = term.new_full((batch, N, N, max_spans, R), 0.0)
+        right_s = term.new_full((batch, N, N, max_spans, R), 0.0)
         if marginal:
-            indicator = (
-                span_indicator[:, :, :, : self.tgt_pt_states]
-                .diagonal(1, 1, 2)
-                .movedim(-1, 1)
-            )
+            indicator = span_indicator[:, :, :, : self.tgt_pt_states].diagonal(1, 1, 2).movedim(-1, 1)
             term = term * indicator
         left_term = torch.einsum("xlpi,xrp->xlir", term, TLPT)
         right_term = torch.einsum("xlpi,xrp->xlir", term, TRPT)
@@ -123,9 +112,7 @@ class D1PCFG(DecompBase):
         diagonal_copy_(right_s, right_term, w=1)
 
         # prepare length, same as the batch_size in PackedSequence
-        n_at_position = (
-            torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)
-        ).sum(1)
+        n_at_position = (torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)).sum(1)
 
         # w: span width
         final = []
@@ -245,9 +232,7 @@ class D1PCFG(DecompBase):
         diagonal_copy_(right_s, right_term, w=1)
 
         # prepare length, same as the batch_size in PackedSequence
-        n_at_position = (
-            torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)
-        ).sum(1)
+        n_at_position = (torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)).sum(1)
 
         # w: span width
         final = []
@@ -404,7 +389,7 @@ class D1PCFG(DecompBase):
         num_samples=1,
         max_length=100,
         max_actions=100,
-        UNK=1,
+        unk=1,
     ):
         NT = rules_head.shape[0]
         COPY_NT = nt_states - 1
@@ -421,11 +406,7 @@ class D1PCFG(DecompBase):
                 is_copy_nt: List[bool] = []
                 actions = 0
 
-                while (
-                    len(nonterminals) > 0
-                    and len(preterminals) < max_length
-                    and actions < max_actions
-                ):
+                while len(nonterminals) > 0 and len(preterminals) < max_length and actions < max_actions:
                     s = nonterminals.pop()
                     if s < NT:
                         nt_state, nt_node = divmod(s, nt_num_nodes)
@@ -447,9 +428,7 @@ class D1PCFG(DecompBase):
                         #     right = weighted_random_v2(rules_right_pt[r]) + pt_states
                         # else:
                         #     right = weighted_random_v2(rules_right_nt[r])
-                        nonterminals.extend(
-                            [right * nt_num_nodes + k, left * nt_num_nodes + j]
-                        )
+                        nonterminals.extend([right * nt_num_nodes + k, left * nt_num_nodes + j])
                     else:
                         preterminals.append(s - NT)
                         is_copy_nt.append(False)
@@ -457,9 +436,7 @@ class D1PCFG(DecompBase):
             except Exception:
                 status[i] = _SONMASK
 
-            if actions == max_actions or (
-                len(preterminals) == max_length and len(nonterminals) > 0
-            ):
+            if actions == max_actions or (len(preterminals) == max_length and len(nonterminals) > 0):
                 status[i] = _REACHLIMIT
 
             try:
@@ -477,7 +454,7 @@ class D1PCFG(DecompBase):
                             terminal_type.append(_COPY_PT)
                         else:
                             sample = weighted_random_v2(terms[s])
-                            if use_copy and sample == UNK:
+                            if use_copy and sample == unk:
                                 # force <unk> tokens to copy
                                 src_node = s % pt_num_nodes
                                 terminals.append(src_node)
@@ -505,12 +482,7 @@ class D1PCFG(DecompBase):
             params["slr"],
         )
         shape = rule.shape
-        rule = (
-            rule.reshape(
-                shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
-            )
-            + 1e-9
-        ).log()
+        rule = (rule.reshape(shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]) + 1e-9).log()
         return {"term": params["term"], "rule": rule, "root": params["root"]}
 
     @torch.enable_grad()

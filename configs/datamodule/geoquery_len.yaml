@@ -5,10 +5,10 @@ dev_file: ${data_dir}/geo/funql/dev_len.json
 test_file: ${data_dir}/geo/funql/test_len.json
 
 copy_mode: "phrase"
-max_src_len: 32
+max_src_len: 16
 
 batch_size: 4
-token_size: 100
+token_size: 0
 eval_batch_size: 1
 num_workers: ${in_debugger:0,4}
 pin_memory: true

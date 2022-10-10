@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # wandb login 7cd7ade39e2d850ec1cf4e914d9a148586a20900
-from torch_struct import TreeCRF, SelfCritical
-import torchtext.data as data
-from torch_struct.data import ListOpsDataset, TokenBucket
-from torch_struct.networks import TreeLSTM, SpanLSTM
 import torch
 import torch.nn as nn
-import wandb
+import torchtext.data as data
+from torch_struct import SelfCritical, TreeCRF
+from torch_struct.data import ListOpsDataset, TokenBucket
+from torch_struct.networks import SpanLSTM, TreeLSTM
 
+import wandb
 
 config = {
     "method": "reinforce",
@@ -81,9 +81,7 @@ def valid_sup(valid_iter, model, tree_lstm, V):
 
 def run_train(train_iter, valid_iter, model, tree_lstm, V):
     opt_struct = torch.optim.Adadelta(list(model.parameters()), lr=config["lr_struct"])
-    opt_params = torch.optim.Adadelta(
-        list(tree_lstm.parameters()), lr=config["lr_params"]
-    )
+    opt_params = torch.optim.Adadelta(list(tree_lstm.parameters()), lr=config["lr_params"])
 
     model.train()
     tree_lstm.train()
@@ -105,16 +103,16 @@ def run_train(train_iter, valid_iter, model, tree_lstm, V):
             def tree_reward(spans, K):
                 new_spans = expand_spans(spans, words, K, V)
                 g, labels, indices, topo = TreeLSTM.spans_to_dgl(new_spans)
-                ret = tree_lstm(
-                    g, labels, indices, topo, torch.cat([lengths for _ in range(K)])
-                )
+                ret = tree_lstm(g, labels, indices, topo, torch.cat([lengths for _ in range(K)]))
                 ret = ret.view(K, batch, -1)
                 return -ret[:, torch.arange(batch), label].view(K, batch)
 
             sc = SelfCritical(tree_reward)
             phi = model(words, lengths)
             dist = Dist(phi)
-            structs, rewards, score, max_score = sc.forward(dist, K=config["RL_K"])
+            structs, rewards, score, max_score = sc.forward(
+                dist,
+            )
 
             if config["train_model"]:
                 opt_params.zero_grad()
@@ -128,9 +126,7 @@ def run_train(train_iter, valid_iter, model, tree_lstm, V):
                 entropy = dist.entropy
                 r = dist.log_prob(structs)
                 obj = rewards.mul(r).mean(-1).mean(-1)
-                policy = (
-                    obj - config["entropy"] * entropy.div(lengths.float().cuda()).mean()
-                )
+                policy = obj - config["entropy"] * entropy.div(lengths.float().cuda()).mean()
                 policy.backward()
                 clip(model.parameters())
                 opt_struct.step()
@@ -217,9 +213,7 @@ WORD = None
 
 def main():
     global WORD
-    WORD = data.Field(
-        include_lengths=True, batch_first=True, eos_token=None, init_token=None
-    )
+    WORD = data.Field(include_lengths=True, batch_first=True, eos_token=None, init_token=None)
     LABEL = data.Field(sequential=False, batch_first=True)
     TREE = data.RawField(postprocessing=ListOpsDataset.tree_field(WORD))
     TREE.is_target = False
@@ -236,22 +230,16 @@ def main():
         filter_pred=lambda x: 5 < len(x.word) < 150,
     )
 
-    train_iter = TokenBucket(
-        train, batch_size=1500, device="cuda:0", key=lambda x: len(x.word)
-    )
+    train_iter = TokenBucket(train, batch_size=1500, device="cuda:0", key=lambda x: len(x.word))
     train_iter.repeat = False
-    valid_iter = data.BucketIterator(
-        train, batch_size=50, train=False, sort=False, device="cuda:0"
-    )
+    valid_iter = data.BucketIterator(train, batch_size=50, train=False, sort=False, device="cuda:0")
 
     NT = 1
     T = len(WORD.vocab)
     V = T
 
     if True:
-        tree_lstm = TreeLSTM(
-            config["H"], len(WORD.vocab) + 100, len(LABEL.vocab)
-        ).cuda()
+        tree_lstm = TreeLSTM(config["H"], len(WORD.vocab) + 100, len(LABEL.vocab)).cuda()
         for p in tree_lstm.parameters():
             if p.dim() > 1:
                 torch.nn.init.xavier_uniform_(p)

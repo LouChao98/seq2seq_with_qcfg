@@ -1,5 +1,6 @@
 defaults:
   - model_checkpoint
+  - periodic_model_checkpoint
   - early_stopping
   - model_summary
   - progress_bar

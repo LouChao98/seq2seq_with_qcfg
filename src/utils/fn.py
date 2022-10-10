@@ -13,9 +13,7 @@ def extract_parses(matrix, lengths, kbest=False, inc=0):
     trees = []
     for b in range(batch):
         if kbest:
-            span, tree = extract_parses(
-                matrix[:, b], [lengths[b]] * matrix.shape[0], kbest=False, inc=inc
-            )
+            span, tree = extract_parses(matrix[:, b], [lengths[b]] * matrix.shape[0], kbest=False, inc=inc)
         else:
             span, tree = extract_parse(matrix[b], lengths[b], inc=inc)
         trees.append(tree)
@@ -188,9 +186,7 @@ def convert_annotated_str_to_nltk_str(annotated, prefix="x"):
         elif c == ")":
             start = left_brace_position.pop()
             children = buffer[start:]
-            tree = Tree(
-                (children[0].label()[0], children[-1].label()[1]), buffer[start:]
-            )
+            tree = Tree((children[0].label()[0], children[-1].label()[1]), buffer[start:])
             buffer[start:] = [tree]
         else:
             j = i + 1
@@ -220,7 +216,7 @@ def report_ids_when_err(func):
         try:
             return func(self, batch)
         except Exception as e:
-            log.error(f"Error at {batch['id']}")
+            log.exception(f"Error at {batch['id']}")
             raise e
 
     return wrapper
@@ -230,9 +226,7 @@ def apply_to_nested_tensor(nested, func):
     if isinstance(nested, (list, tuple)):
         return [apply_to_nested_tensor(item, func) for item in nested]
     if isinstance(nested, dict):
-        return {
-            key: apply_to_nested_tensor(value, func) for key, value in nested.items()
-        }
+        return {key: apply_to_nested_tensor(value, func) for key, value in nested.items()}
     if isinstance(nested, torch.Tensor):
         return func(nested)
     return nested

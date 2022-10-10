@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader, Dataset
+
 from src.datamodules.components.vocab import Vocabulary, VocabularyPair
 from src.datamodules.datamodule import _DataModule
 
@@ -38,14 +39,25 @@ class SCANDataModule(_DataModule):
 
     def setup(self, stage: Optional[str] = None):
         data_train = self.read_file(self.hparams.train_file)
+        data_val = self.read_file(self.hparams.dev_file)
+        data_test = self.read_file(self.hparams.test_file)
+
+        _num_orig_train = len(data_train)
         data_train = [
             inst
             for inst in data_train
-            if len(inst["src"]) <= self.hparams.max_src_len
-            and len(inst["tgt"]) <= self.hparams.max_tgt_len
+            if len(inst["src"]) <= self.hparams.max_src_len and len(inst["tgt"]) <= self.hparams.max_tgt_len
         ]
-        data_val = self.read_file(self.hparams.dev_file)
-        data_test = self.read_file(self.hparams.test_file)
+        if (d := _num_orig_train - len(data_train)) > 0:
+            logger.warning(f"Dropping {d} samples in TrainingSet.")
+        _num_orig_Val = len(data_val)
+        data_val = [
+            inst
+            for inst in data_val
+            if len(inst["src"]) <= self.hparams.max_src_len and len(inst["tgt"]) <= self.hparams.max_tgt_len
+        ]
+        if (d := _num_orig_Val - len(data_val)) > 0:
+            logger.warning(f"Dropping {d} samples in ValSet.")
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
         self.vocab_pair = VocabularyPair(self.src_vocab, self.tgt_vocab)
@@ -164,4 +176,3 @@ if __name__ == "__main__":
     for batch in datamodule.train_dataloader():
         print(batch)
         break
-

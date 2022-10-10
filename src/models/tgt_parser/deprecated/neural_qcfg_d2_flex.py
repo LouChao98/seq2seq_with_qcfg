@@ -14,9 +14,7 @@ from .struct.pcfg import PCFG
 
 
 def get_nn(dim, cpd_rank):
-    return nn.Sequential(
-        nn.LeakyReLU(), nn.Linear(dim, cpd_rank)  # , nn.LayerNorm(cpd_rank)
-    )
+    return nn.Sequential(nn.LeakyReLU(), nn.Linear(dim, cpd_rank))  # , nn.LayerNorm(cpd_rank)
 
 
 @torch.jit.script
@@ -67,11 +65,7 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
         # S->A
         roots = self.root_mlp_child(nt_emb)
         roots = roots.view(batch_size, self.nt_states, nt_num_nodes)
-        mask = (
-            torch.arange(nt_num_nodes, device=device)
-            .view(1, 1, -1)
-            .expand(batch_size, 1, -1)
-        )
+        mask = torch.arange(nt_num_nodes, device=device).view(1, 1, -1).expand(batch_size, 1, -1)
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
         roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
         roots = roots.view(batch_size, -1)
@@ -80,17 +74,11 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
         # A->BC
         state_emb = torch.cat([nt_state_emb, pt_state_emb], 1)
         node_emb = torch.cat([nt_node_emb, pt_node_emb], 1)
-        rule_head = self.ai_r_nn(
-            self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))
-        ).softmax(-1)
+        rule_head = self.ai_r_nn(self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))).softmax(-1)
 
         combined_emb = nt_node_emb[:, :, None] + state_emb[:, None, :]
-        rule_left = (
-            self.r_b_nn(self.rule_mlp_left(combined_emb)).movedim(3, 1).softmax(-1)
-        )
-        rule_right = (
-            self.r_c_nn(self.rule_mlp_right(combined_emb)).movedim(3, 1).softmax(-1)
-        )
+        rule_left = self.r_b_nn(self.rule_mlp_left(combined_emb)).movedim(3, 1).softmax(-1)
+        rule_right = self.r_c_nn(self.rule_mlp_right(combined_emb)).movedim(3, 1).softmax(-1)
 
         i = self.root_mlp_i(nt_node_emb)
         j = self.root_mlp_j(node_emb)
@@ -133,17 +121,11 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
 
         if self.rule_constraint_type > 0:
             if self.rule_constraint_type == 1:
-                mask = self.get_rules_mask1(
-                    batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
-                )
+                mask = self.get_rules_mask1(batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device)
             elif self.rule_constraint_type == 2:
-                mask = self.get_rules_mask2(
-                    batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
-                )
+                mask = self.get_rules_mask2(batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device)
             elif self.rule_constraint_type == 3:
-                mask = self.get_rules_mask3(
-                    batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
-                )
+                mask = self.get_rules_mask3(batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device)
             else:
                 raise ValueError("Bad constraint_type")
             mask = mask.unsqueeze(1).expand(-1, self.cpd_rank, -1, -1, -1)
@@ -175,9 +157,7 @@ class NeuralQCFGD2FlexTgtParser(NeuralQCFGD1FlexTgtParser):
                     )
                     for w in range(1, n)
                 ]
-                for batch_idx, (nt_spans_inst, possible_copy) in enumerate(
-                    zip(nt_spans, copy_position[1])
-                ):
+                for batch_idx, (nt_spans_inst, possible_copy) in enumerate(zip(nt_spans, copy_position[1])):
                     for i, (l, r, _) in enumerate(nt_spans_inst):
                         w = r - l - 1
                         t = None

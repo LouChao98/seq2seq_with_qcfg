@@ -1,23 +1,28 @@
-from typing import Optional
+from collections import defaultdict
+from typing import List, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...utils.fn import spans2tree
 from ..components.common import MultiResidualLayer
 from .base import TgtParserBase
-from .struct.d1_pcfg import D1PCFG
+from .neural_qcfg import NeuralQCFGTgtParser
+from .struct.d1_pcfg_flex import D1PCFGFlex
 
 
 def get_nn(dim, cpd_rank):
-    # return MultiResidualLayer(dim, dim, cpd_rank)
-    return nn.Sequential(
-        nn.LeakyReLU(), nn.Linear(dim, cpd_rank)  # , nn.LayerNorm(cpd_rank)
-    )
+    return nn.Sequential(nn.LeakyReLU(), nn.Linear(dim, cpd_rank))  # , nn.LayerNorm(cpd_rank)
 
 
-class NeuralQCFGD1TgtParser(TgtParserBase):
+def normalize(t: torch.Tensor):
+    shape = t.shape
+    return t.flatten(-2).softmax(-1).view(shape)
+
+
+class NeuralQCFGD1FlexTgtParser(TgtParserBase):
     def __init__(
         self,
         pt_states=1,
@@ -34,6 +39,7 @@ class NeuralQCFGD1TgtParser(TgtParserBase):
         generation_ppl_batch_size=None,
         vocab=100,
         dim=256,
+        direction=0,
         cpd_rank=128,
         num_layers=3,
         src_dim=256,
@@ -53,11 +59,10 @@ class NeuralQCFGD1TgtParser(TgtParserBase):
             generation_ppl_batch_size,
         )
 
-        assert self.nt_states == self.pt_states
-
-        self.pcfg = D1PCFG(self.nt_states, self.pt_states)
+        self.pcfg = D1PCFGFlex(self.nt_states, self.pt_states, direction)
         self.vocab = vocab
         self.dim = dim
+        self.direction = direction
         self.cpd_rank = cpd_rank
         self.num_layers = num_layers
         self.src_dim = src_dim
@@ -70,13 +75,8 @@ class NeuralQCFGD1TgtParser(TgtParserBase):
         self.rule_mlp_left = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.rule_mlp_right = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_child = nn.Linear(dim, 1, bias=False)
-        self.vocab_out = MultiResidualLayer(
-            dim, dim, out_dim=vocab, num_layers=num_layers
-        )
+        self.vocab_out = MultiResidualLayer(dim, dim, out_dim=vocab, num_layers=num_layers)
 
-        # self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
-        # self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
-        # self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_i = get_nn(dim, dim)
         self.root_mlp_j = get_nn(dim, dim)
         self.root_mlp_k = get_nn(dim, dim)
@@ -118,14 +118,6 @@ class NeuralQCFGD1TgtParser(TgtParserBase):
         ) = self.build_src_features(spans, node_features)
         device = nt_node_features.device
 
-        # PT can only align to leavs
-        is_multi = np.ones((batch_size, pt_num_nodes), dtype=np.bool8)
-        for b, pt_spans_inst in enumerate(pt_spans):
-            for span in pt_spans_inst:
-                if span[0] == span[1]:
-                    is_multi[b, span[0]] = False
-        is_multi = torch.from_numpy(is_multi).to(device)
-
         # e = u + h
         nt_node_emb = self.src_nt_node_mlp(nt_node_features)
         nt_state_emb = self.src_nt_emb.expand(batch_size, self.nt_states, self.dim)
@@ -140,11 +132,7 @@ class NeuralQCFGD1TgtParser(TgtParserBase):
         # S->A
         roots = self.root_mlp_child(nt_emb)
         roots = roots.view(batch_size, self.nt_states, nt_num_nodes)
-        mask = (
-            torch.arange(nt_num_nodes, device=device)
-            .view(1, 1, -1)
-            .expand(batch_size, 1, -1)
-        )
+        mask = torch.arange(nt_num_nodes, device=device).view(1, 1, -1).expand(batch_size, 1, -1)
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
         roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
         roots = roots.view(batch_size, -1)
@@ -152,18 +140,12 @@ class NeuralQCFGD1TgtParser(TgtParserBase):
 
         # A->BC
         state_emb = torch.cat([nt_state_emb, pt_state_emb], 1)
-        node_emb = nt_node_emb  # torch.cat([nt_node_emb, pt_node_emb], 1)
-        rule_head = self.ai_r_nn(
-            self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))
-        ).softmax(-1)
-        rule_left = (
-            self.r_b_nn(self.rule_mlp_left(state_emb)).transpose(1, 2).softmax(-1)
-        )
-        rule_right = (
-            self.r_c_nn(self.rule_mlp_right(state_emb)).transpose(1, 2).softmax(-1)
-        )
+        node_emb = torch.cat([nt_node_emb, pt_node_emb], 1)
+        rule_head = self.ai_r_nn(self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))).softmax(-1)
+        rule_left = self.r_b_nn(self.rule_mlp_left(state_emb)).transpose(1, 2)
+        rule_right = self.r_c_nn(self.rule_mlp_right(state_emb)).transpose(1, 2)
 
-        i = self.root_mlp_i(node_emb)
+        i = self.root_mlp_i(nt_node_emb)
         j = self.root_mlp_j(node_emb)
         k = self.root_mlp_k(node_emb)
         rule_slr = torch.einsum(
@@ -171,13 +153,16 @@ class NeuralQCFGD1TgtParser(TgtParserBase):
             self.rijk_weight,
             F.leaky_relu(i),
             F.leaky_relu(j[:, :, None] + k[:, None, :]),
-        ).clone()
+        )
 
         # fmt: off
-        lhs_mask = torch.arange(nt_num_nodes, device=i.device).unsqueeze(0) \
+        nt_mask = torch.arange(nt_num_nodes, device=i.device).unsqueeze(0) \
             < torch.tensor(nt_num_nodes_list, device=i.device).unsqueeze(1)
+        pt_mask = torch.arange(pt_num_nodes, device=i.device).unsqueeze(0) \
+            < torch.tensor(pt_num_nodes_list, device=i.device).unsqueeze(1)
         # fmt: on
-        valid_mask = torch.einsum("bx,by,bz->bxyz", lhs_mask, lhs_mask, lhs_mask)
+        valid_mask = torch.cat([nt_mask, pt_mask], dim=1)
+        valid_mask = torch.einsum("bx,by,bz->bxyz", nt_mask, valid_mask, valid_mask)
         valid_mask = valid_mask.unsqueeze(1).expand(-1, self.cpd_rank, -1, -1, -1)
         rule_slr[~valid_mask] = self.neg_huge
 
@@ -188,17 +173,36 @@ class NeuralQCFGD1TgtParser(TgtParserBase):
             mask = mask.unsqueeze(1).expand(-1, self.cpd_rank, -1, -1, -1)
             rule_slr[~mask] = self.neg_huge
 
-        rule_slr = rule_slr.flatten(3).softmax(-1).view(rule_slr.shape).clone()
+        if self.direction == 0:
+            rule_left = rule_left.softmax(-1)
+            rule_right = rule_right.softmax(-1)
+            new_slr = torch.empty_like(rule_slr)
+            nnn = nt_num_nodes
+            new_slr[..., :nnn, :nnn] = normalize(rule_slr[..., :nnn, :nnn])
+            new_slr[..., :nnn, nnn:] = normalize(rule_slr[..., :nnn, nnn:])
+            new_slr[..., nnn:, :nnn] = normalize(rule_slr[..., nnn:, :nnn])
+            new_slr[..., nnn:, nnn:] = normalize(rule_slr[..., nnn:, nnn:])
+            rule_slr = new_slr
+        else:
+            new_left = torch.empty_like(rule_left)
+            new_left[..., : self.nt_states] = rule_left[..., : self.nt_states].softmax(-1)
+            new_left[..., self.nt_states :] = rule_left[..., self.nt_states :].softmax(-1)
+            rule_left = new_left
 
-        mask = (is_multi & lhs_mask).unsqueeze(1)
+            new_right = torch.empty_like(rule_right)
+            new_right[..., : self.nt_states] = rule_right[..., : self.nt_states].softmax(-1)
+            new_right[..., self.nt_states :] = rule_right[..., self.nt_states :].softmax(-1)
+            rule_right = new_right
+
+            shape = rule_slr.shape
+            rule_slr = rule_slr.flatten(3).softmax(-1).view(shape).clone()
+
+        mask = nt_mask.unsqueeze(1)
         mask = mask.expand(-1, rule_slr.shape[1], -1)
-        rule_slr[~mask] = 0
+        rule_slr[~valid_mask] = 0
 
         # A->a
-        terms = self.vocab_out(pt_emb).log_softmax(-1).clone()
-        mask = is_multi[:, None, :, None]
-        mask = mask.expand(-1, terms.shape[1], -1, terms.shape[3])
-        terms[mask] = self.neg_huge
+        terms = self.vocab_out(pt_emb).log_softmax(-1)
         terms = terms.view(batch_size, -1, terms.shape[-1])
 
         nt_constraint = None

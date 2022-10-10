@@ -3,13 +3,7 @@ from typing import List, Optional
 
 import hydra
 from omegaconf import DictConfig
-from pytorch_lightning import (
-    Callback,
-    LightningDataModule,
-    LightningModule,
-    Trainer,
-    seed_everything,
-)
+from pytorch_lightning import Callback, LightningDataModule, LightningModule, Trainer, seed_everything
 from pytorch_lightning.loggers import LightningLoggerBase
 
 from src import utils
@@ -35,9 +29,7 @@ def train(config: DictConfig) -> Optional[float]:
     # Convert relative ckpt path to absolute path if necessary
     ckpt_path = config.trainer.get("resume_from_checkpoint")
     if ckpt_path and not os.path.isabs(ckpt_path):
-        config.trainer.resume_from_checkpoint = os.path.join(
-            hydra.utils.get_original_cwd(), ckpt_path
-        )
+        config.trainer.resume_from_checkpoint = os.path.join(hydra.utils.get_original_cwd(), ckpt_path)
 
     # Init lightning datamodule
     log.info(f"Instantiating datamodule <{config.datamodule._target_}>")
@@ -96,17 +88,12 @@ def train(config: DictConfig) -> Optional[float]:
 
     # Test the model
     if config.get("test"):
-        if (
-            config.get("train")
-            and not config.trainer.get("fast_dev_run")
-            and trainer.checkpoint_callback is not None
-            and getattr(trainer.checkpoint_callback, "best_model_path") is not None
-        ):
-            log.info("Starting testing using the best model!")
-            trainer.test(model=model, datamodule=datamodule, ckpt_path="best")
-        else:
-            log.info("Starting testing using the last model!")
-            trainer.test(model=model, datamodule=datamodule, ckpt_path=None)
+        if config.get("train") and not config.trainer.get("fast_dev_run") and trainer.checkpoint_callback is not None:
+            for cb in trainer.checkpoint_callbacks:
+                if p := cb.best_model_path:
+                    log.info(f"Starting testing using the best model by {cb.monitor}")
+                    trainer.test(model=model, datamodule=datamodule, ckpt_path=p)
+
     # Make sure everything closed properly
     log.info("Finalizing!")
     utils.finish(

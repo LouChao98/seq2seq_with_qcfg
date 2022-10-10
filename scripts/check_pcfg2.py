@@ -3,6 +3,8 @@ import torch
 
 from src.models.tgt_parser.struct.pcfg import PCFG
 
+# check ordering
+
 pl.seed_everything(1)
 
 B = 2
@@ -26,9 +28,7 @@ lens = torch.tensor([max(N - i, 2) for i in range(B)])
 params = {
     "term": torch.randn(B, PT, VOCAB).log_softmax(-1),
     "root": torch.randn(B, NT).log_softmax(-1),
-    "rule": torch.randn(B, NT, (NT + PT) ** 2)
-    .log_softmax(-1)
-    .view(B, NT, NT + PT, NT + PT),
+    "rule": torch.randn(B, NT, (NT + PT) ** 2).log_softmax(-1).view(B, NT, NT + PT, NT + PT),
 }
 terms = params["term"].unsqueeze(1).expand(B, n, PT, params["term"].size(2))
 terms = torch.gather(terms, 3, x_expand).squeeze(3)

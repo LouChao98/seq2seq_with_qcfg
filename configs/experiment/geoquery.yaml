@@ -4,7 +4,7 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: geoquery_len
+  - override /datamodule: geoquery_template
   - override /model: geoquery
   - override /callbacks: default
   - override /logger: wandb
@@ -18,14 +18,16 @@ name: "geoquery"
 
 datamodule:
   copy_mode: "phrase"
+  transformer_tokenizer_name: bert-base-cased
 
 model:
+  transformer_pretrained_model: bert-base-cased
   decoder:
-    pt_states: 8
-    nt_states: 8
+    pt_states: 6
+    nt_states: 6
     generation_num_samples: 5
     generation_ppl_batch_size: 5
-    rule_hard_constraint: ~
+    # rule_hard_constraint: ~
 
 trainer:
   max_epochs: 100

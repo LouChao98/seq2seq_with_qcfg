@@ -43,8 +43,8 @@ class TSVDataModule(_DataModule):
             self.vocab_pair: Optional[VocabularyPair] = None
             self.use_transformer_tokenizer = transformer_tokenizer_name is not None
             if transformer_tokenizer_name is not None:
-                self.transformer_tokenizer: PreTrainedTokenizer = (
-                    AutoTokenizer.from_pretrained(transformer_tokenizer_name)
+                self.transformer_tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+                    transformer_tokenizer_name
                 )
 
             self.data_train: Optional[Dataset] = None
@@ -60,12 +60,22 @@ class TSVDataModule(_DataModule):
             data_val = self.load_gold_tree(data_val, self.hparams.dev_file)
             data_test = self.load_gold_tree(data_test, self.hparams.test_file)
 
+        _num_orig_train = len(data_train)
         data_train = [
             inst
             for inst in data_train
-            if len(inst["src"]) <= self.hparams.max_src_len
-            and len(inst["tgt"]) <= self.hparams.max_tgt_len
+            if len(inst["src"]) <= self.hparams.max_src_len and len(inst["tgt"]) <= self.hparams.max_tgt_len
         ]
+        if (d := _num_orig_train - len(data_train)) > 0:
+            logger.warning(f"Dropping {d} samples in TrainingSet.")
+        _num_orig_Val = len(data_val)
+        data_val = [
+            inst
+            for inst in data_val
+            if len(inst["src"]) <= self.hparams.max_src_len and len(inst["tgt"]) <= self.hparams.max_tgt_len
+        ]
+        if (d := _num_orig_Val - len(data_val)) > 0:
+            logger.warning(f"Dropping {d} samples in ValSet.")
 
         data_train = self.process_all_copy(data_train)
         data_val = self.process_all_copy(data_val)
@@ -77,11 +87,6 @@ class TSVDataModule(_DataModule):
         self.data_train = self.apply_vocab(data_train)
         self.data_val = self.apply_vocab(data_val)
         self.data_test = self.apply_vocab(data_test)
-
-        if self.use_transformer_tokenizer:
-            self.data_train = self.apply_transformer_tokenizer(self.data_train)
-            self.data_val = self.apply_transformer_tokenizer(self.data_val)
-            self.data_test = self.apply_transformer_tokenizer(self.data_test)
 
     def read_file(self, fpath):
         data = []
@@ -156,9 +161,7 @@ class TSVDataModule(_DataModule):
         from nltk.corpus.reader.bracket_parse import BracketParseCorpusReader
 
         path = Path(path)
-        reader = BracketParseCorpusReader(
-            str(path.parents[0]), [path.with_suffix(".tb").name]
-        )
+        reader = BracketParseCorpusReader(str(path.parents[0]), [path.with_suffix(".tb").name])
         trees = list(reader.parsed_sents())
         assert len(trees) == len(data)
         for item, tree in zip(data, trees):
@@ -239,12 +242,8 @@ class TSVDataModule(_DataModule):
         tgt_lens = [len(inst["tgt_ids"]) for inst in data]
         max_src_len = max(src_lens)
         max_tgt_len = max(tgt_lens)
-        batched_src_ids = torch.full(
-            (len(tgt_lens), max_src_len), self.src_vocab.pad_token_id
-        )
-        batched_tgt_ids = torch.full(
-            (len(tgt_lens), max_tgt_len), self.tgt_vocab.pad_token_id
-        )
+        batched_src_ids = torch.full((len(tgt_lens), max_src_len), self.src_vocab.pad_token_id)
+        batched_tgt_ids = torch.full((len(tgt_lens), max_tgt_len), self.tgt_vocab.pad_token_id)
         for i, inst in enumerate(data):
             s, t = inst["src_ids"], inst["tgt_ids"]
             batched_src_ids[i, : len(s)] = torch.tensor(s)
@@ -261,9 +260,7 @@ class TSVDataModule(_DataModule):
 
         copy_token = None
         if "copy_token" in data[0]:
-            copy_token = torch.zeros(
-                len(src), max_src_len, max_tgt_len, dtype=torch.bool
-            )
+            copy_token = torch.zeros(len(src), max_src_len, max_tgt_len, dtype=torch.bool)
             for i, inst in enumerate(data):
                 inst = torch.from_numpy(inst["copy_token"])
                 copy_token[i, : inst.shape[0], : inst.shape[1]] = inst
@@ -283,9 +280,7 @@ class TSVDataModule(_DataModule):
                 return_tensors="pt",
             )
             offset_mapping_raw = transformer_inp.pop("offset_mapping")
-            offset_mapping = torch.zeros(
-                transformer_inp["input_ids"].shape, dtype=np.int64
-            )
+            offset_mapping = torch.zeros(transformer_inp["input_ids"].shape, dtype=torch.long)
             for i, mapping in enumerate(offset_mapping_raw):
                 cursor = 0
                 for j, item in enumerate(mapping):
@@ -305,9 +300,7 @@ class TSVDataModule(_DataModule):
 
         return batched
 
-    def transfer_batch_to_device(
-        self, batch: Any, device: torch.device, dataloader_idx: int
-    ) -> Any:
+    def transfer_batch_to_device(self, batch: Any, device: torch.device, dataloader_idx: int) -> Any:
         excluded = []
         if "src_tree" in batch:
             trees = batch.pop("src_tree")

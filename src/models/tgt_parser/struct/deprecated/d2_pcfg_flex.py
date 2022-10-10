@@ -8,7 +8,7 @@ from torch import Tensor
 from torch.autograd import grad
 
 from ._fn import diagonal, diagonal_copy_, stripe
-from ._utils import checkpoint, process_param_for_marginal, weighted_random_v2
+from ._utils import checkpoint, process_param_for_trace, weighted_random_v2
 from .decomp_base import DecompBase
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
@@ -46,7 +46,7 @@ class D2PCFGFlex(DecompBase):
             torch.set_grad_enabled(True)
             cm = torch.inference_mode(False)
             cm.__enter__()
-            params = {k: process_param_for_marginal(v) for k, v in params.items()}
+            params = {k: process_param_for_trace(v) for k, v in params.items()}
         if not isinstance(lens, torch.Tensor):
             lens = torch.tensor(lens)
         assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
@@ -91,12 +91,8 @@ class D2PCFGFlex(DecompBase):
         # ===== End =====
 
         if marginal:
-            span_indicator = term.new_ones(
-                batch, N, N, self.max_states, max_spans, requires_grad=True
-            )
-            span_indicator_running = span_indicator[
-                :, :, :, : self.tgt_nt_states, :nt_spans
-            ]
+            span_indicator = term.new_ones(batch, N, N, self.max_states, max_spans, requires_grad=True)
+            span_indicator_running = span_indicator[:, :, :, : self.tgt_nt_states, :nt_spans]
         else:
             span_indicator = None
 
@@ -116,9 +112,7 @@ class D2PCFGFlex(DecompBase):
         diagonal_copy_(right_s, right_term, w=1, s3=pt_spans)
 
         # prepare length, same as the batch_size in PackedSequence
-        n_at_position = (
-            torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)
-        ).sum(1)
+        n_at_position = (torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)).sum(1)
 
         # w: span width
         final = []
@@ -256,9 +250,7 @@ class D2PCFGFlex(DecompBase):
         max_pt_spans = max(len(item) for item in src_pt_spans)
         assert n == max_nt_spans
 
-        sample_func = (
-            self.sample_jk_given_bc if self.direction == 0 else self.sample_bc_given_jk
-        )
+        sample_func = self.sample_jk_given_bc if self.direction == 0 else self.sample_bc_given_jk
 
         preds = []
         for b in range(len(terms)):
@@ -309,7 +301,7 @@ class D2PCFGFlex(DecompBase):
         num_samples=1,
         max_length=100,
         max_actions=100,
-        UNK=1,
+        unk=1,
     ):
         COPY_NT = nt_states - 1
         COPY_PT = pt_states - 1
@@ -324,11 +316,7 @@ class D2PCFGFlex(DecompBase):
                 preterminals: List[int] = []
                 actions = 0
 
-                while (
-                    len(nonterminals) > 0
-                    and len(preterminals) < max_length
-                    and actions < max_actions
-                ):
+                while len(nonterminals) > 0 and len(preterminals) < max_length and actions < max_actions:
                     actions += 1
                     s, i = nonterminals.pop()
 
@@ -389,7 +377,7 @@ class D2PCFGFlex(DecompBase):
                         terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random_v2(terms[s * pt_num_nodes + i])
-                        if use_copy and sample == UNK:
+                        if use_copy and sample == unk:
                             # force <unk> tokens to copy
                             terminals.append(i)
                             terminal_type.append(_COPY_PT)
@@ -450,31 +438,19 @@ class D2PCFGFlex(DecompBase):
         )
         shape = rule11.shape
         rule[:, :, : TGT_NT * SRC_NT, : TGT_NT * SRC_NT] = (
-            rule11.reshape(
-                shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
-            )
-            + 1e-9
+            rule11.reshape(shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]) + 1e-9
         ).log()
         shape = rule12.shape
         rule[:, :, : TGT_NT * SRC_NT, TGT_NT * SRC_NT :] = (
-            rule12.reshape(
-                shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
-            )
-            + 1e-9
+            rule12.reshape(shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]) + 1e-9
         ).log()
         shape = rule21.shape
         rule[:, :, TGT_NT * SRC_NT :, : TGT_NT * SRC_NT] = (
-            rule21.reshape(
-                shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
-            )
-            + 1e-9
+            rule21.reshape(shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]) + 1e-9
         ).log()
         shape = rule22.shape
         rule[:, :, TGT_NT * SRC_NT :, TGT_NT * SRC_NT :] = (
-            rule22.reshape(
-                shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
-            )
-            + 1e-9
+            rule22.reshape(shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]) + 1e-9
         ).log()
         return {"term": params["term"], "rule": rule, "root": params["root"]}
 
@@ -507,13 +483,9 @@ def merge_h2(y, z, y_normalizer, z_normalizer, sl1r, slr1, h):
     z = (z + 1e-9).log() + z_normalizer[..., None, None]
     qnkrj1 = eq_qnkrj(y[:, :, :1, :num_pt], z[:, :, :1, :num_nt])
     qnkrj3 = eq_qnkrj(y[:, :, -1:, :num_nt], z[:, :, -1:, :num_pt])
-    normalizer = torch.stack(
-        [
-            qnkrj1.flatten(2).max(-1)[0],
-            qnkrj3.flatten(2).max(-1)[0],
-        ],
-        dim=-1,
-    ).max(-1)[0]
+    normalizer = torch.stack([qnkrj1.flatten(2).max(-1)[0], qnkrj3.flatten(2).max(-1)[0],], dim=-1,).max(
+        -1
+    )[0]
     qnkrj1 = (qnkrj1 - normalizer[..., None, None, None]).exp()
     qnkrj3 = (qnkrj3 - normalizer[..., None, None, None]).exp()
     x1 = torch.einsum("qnkrj,qrijk,qair->qnai", qnkrj1, sl1r, h)
@@ -569,12 +541,8 @@ if __name__ == "__main__":
         "term": torch.randn(B, N, T).log_softmax(-1).requires_grad_(True),
         "root": torch.randn(B, NT).log_softmax(-1).requires_grad_(True),
         "head": torch.randn(B, NT, r).softmax(-1).requires_grad_(True),
-        "left": torch.randn(B, r, SRC_NT, TGT_NT + TGT_PT)
-        .softmax(-1)
-        .requires_grad_(True),
-        "right": torch.randn(B, r, SRC_NT, TGT_NT + TGT_PT)
-        .softmax(-1)
-        .requires_grad_(True),
+        "left": torch.randn(B, r, SRC_NT, TGT_NT + TGT_PT).softmax(-1).requires_grad_(True),
+        "right": torch.randn(B, r, SRC_NT, TGT_NT + TGT_PT).softmax(-1).requires_grad_(True),
         "slr": slr,
     }
     lens = torch.tensor([N, N - 2], dtype=torch.long)

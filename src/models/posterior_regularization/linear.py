@@ -1,11 +1,18 @@
+from __future__ import annotations
+
 import logging
+from copy import copy
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
 from src.utils.fn import apply_to_nested_tensor
+
+if TYPE_CHECKING:
+    from src.models.tgt_parser.base import TgtParserPrediction
+
 
 log = logging.getLogger(__file__)
 
@@ -20,51 +27,54 @@ class UngroundedPRLineSearchSolver:
     rbound: float = 1e3
     num_point: int = 16
     num_iter: int = 3
-    pcfg: Any = None
-    log_input: bool = True  # whether input is in log-space
 
-    def __call__(self, params, lens, constraint_feature):
-        lambdas = self.solve(params, lens, constraint_feature)
-        cparams = apply_to_nested_tensor(params, lambda x: x.detach())
-        cparams[self.field] = self.make_constrained_params(
-            cparams[self.field], constraint_feature, lambdas
-        )
-        return self.pcfg.ce(cparams, params, lens)
+    def __call__(self, pred: TgtParserPrediction, constraint_feature):
+        lambdas = self.solve(pred, constraint_feature)
+        cparams = apply_to_nested_tensor(pred.posterior_params, lambda x: x.detach())
+        if cparams[self.field].ndim != constraint_feature.ndim:
+            # TODO: REMOVE DANGEROUS ASSUMPTION
+            assert cparams[self.field].shape[2:] == constraint_feature.shape[1:]
+            constraint_feature = constraint_feature.unsqueeze(1)
+
+        if self.b > 0:
+            cparams[self.field] = self.make_constrained_params(
+                cparams[self.field], constraint_feature, lambdas, pred.dist.is_log_param(self.field)
+            )
+            dist = pred.dist.spawn(params=cparams)
+            ce = dist.cross_entropy(pred.dist, fix_left=True)
+        else:
+            cparams[self.field][constraint_feature > 0.1] = -1e9
+            dist = pred.dist.spawn(params=cparams)
+            ce = dist.cross_entropy(pred.dist, fix_left=True)
+        return ce
 
     @torch.no_grad()
-    def solve(self, params, lens, constraint_feature):
-        batch_size = len(lens)
-        n = self.num_point
-        device = params[self.field].device
+    def solve(self, pred: TgtParserPrediction, constraint_feature):
         lambdas = []
-        for bidx in range(batch_size):
-            params_item = apply_to_nested_tensor(
-                params,
-                lambda x: x[bidx, None].detach().expand([n] + [-1] * (x.ndim - 1)),
-            )
+        for bidx in range(pred.batch_size):
+            sub_pred = pred.get_and_expand(bidx, self.num_point)
             constraint_feature_item = constraint_feature[bidx, None]
-            lens_item = lens[bidx]
-            lambdas.append(
-                self.solve_one_instance(params_item, lens_item, constraint_feature_item)
-            )
-        return torch.tensor(lambdas, device=device, dtype=torch.float32)
+            lambdas.append(self.solve_one_instance(sub_pred, constraint_feature_item))
+        return torch.tensor(lambdas, device=pred.device, dtype=torch.float32)
 
-    def solve_one_instance(self, params, lens, constraint_feature):
+    def solve_one_instance(self, pred: TgtParserPrediction, constraint_feature):
         lb, rb = self.lbound, self.rbound
         lt, rt, max_t, max_l = None, None, None, None
-        device = constraint_feature.device
+        input_params = pred.posterior_params
         for itidx in range(self.num_iter):
             if itidx > 0:  # skip lb rb
                 lgrid_np = np.geomspace(lb, rb, self.num_point + 2, dtype=np.float32)
-                lgrid = torch.from_numpy(lgrid_np[1:-1]).to(device)
+                lgrid = torch.from_numpy(lgrid_np[1:-1]).to(pred.device)
             else:
                 lgrid_np = np.geomspace(lb, rb, self.num_point, dtype=np.float32)
-                lgrid = torch.from_numpy(lgrid_np).to(device)
+                lgrid = torch.from_numpy(lgrid_np).to(pred.device)
             # potential * exp(-lambda * constraint)
+            params = {**input_params}
             params[self.field] = self.make_constrained_params(
-                params[self.field], constraint_feature, lgrid
+                params[self.field], constraint_feature, lgrid, pred.dist.is_log_param(self.field)
             )
-            target = -lgrid * self.b + self.pcfg(params, [lens] * self.num_point)
+            dist = pred.dist.spawn(params=params)
+            target = -lgrid * self.b + dist.nll
             target = target.cpu().numpy()
             if itidx > 0:  # take back lb, rb and argmax
                 target = [lt, *target.tolist(), rt]
@@ -88,19 +98,13 @@ class UngroundedPRLineSearchSolver:
             lb, rb = lgrid_np[argmax_i - 1], lgrid_np[argmax_i + 1]
             max_t = target[argmax_i]
             max_l = lgrid_np[argmax_i]
-            if rb - lb < 1e-3:
+            if rb - lb < 1e-2 or abs(lt - rt) < 1e-2:
                 return lgrid_np[argmax_i]
         else:
             return lgrid_np[argmax_i]
 
-    def make_constrained_params(self, t, constraint_feature, lambdas):
-        if self.log_input:
-            return t - constraint_feature * lambdas.view(
-                [-1] + [1] * (constraint_feature.ndim - 1)
-            )
+    def make_constrained_params(self, t, constraint_feature, lambdas, log_input):
+        if log_input:
+            return t - constraint_feature * lambdas.view([-1] + [1] * (constraint_feature.ndim - 1))
         else:
-            return (
-                t.log()
-                - constraint_feature
-                * lambdas.view([-1] + [1] * (constraint_feature.ndim - 1))
-            ).exp()
+            return (t.log() - constraint_feature * lambdas.view([-1] + [1] * (constraint_feature.ndim - 1))).exp()

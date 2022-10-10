@@ -1,5 +1,4 @@
 import logging
-from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -7,13 +6,13 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
 from ..components.common import MultiResidualLayer
-from .base import TgtParserBase
-from .struct.pcfg import PCFG
+from .base import TgtParserBase, TgtParserPrediction
+from .struct.no_decomp import NoDecomp, NoDecompSampler
 
 log = logging.getLogger(__file__)
 
 
-class NeuralQCFGTgtParser(TgtParserBase):
+class NeuralNoDecompTgtParser(TgtParserBase):
     def __init__(
         self,
         pt_states=1,
@@ -26,8 +25,10 @@ class NeuralQCFGTgtParser(TgtParserBase):
         rule_soft_constraint=None,
         rule_soft_constraint_solver=None,
         generation_max_length=40,
+        generation_max_actions=80,
         generation_num_samples=10,
         generation_ppl_batch_size=None,
+        generation_strict=False,
         vocab=100,
         dim=256,
         num_layers=3,
@@ -44,11 +45,12 @@ class NeuralQCFGTgtParser(TgtParserBase):
             rule_soft_constraint,
             rule_soft_constraint_solver,
             generation_max_length,
+            generation_max_actions,
             generation_num_samples,
             generation_ppl_batch_size,
+            generation_strict,
         )
 
-        self.pcfg = PCFG()
         self.vocab = vocab
         self.dim = dim
         self.src_dim = src_dim
@@ -58,13 +60,12 @@ class NeuralQCFGTgtParser(TgtParserBase):
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
         self.src_pt_emb = nn.Parameter(torch.randn(pt_states, dim))
         self.src_pt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
+        self.vocab_out = MultiResidualLayer(dim, dim, out_dim=vocab, num_layers=num_layers)
+
         self.rule_mlp_parent = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.rule_mlp_left = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.rule_mlp_right = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_child = nn.Linear(dim, 1, bias=False)
-        self.vocab_out = MultiResidualLayer(
-            dim, dim, out_dim=vocab, num_layers=num_layers
-        )
 
         self.reset_parameters()
 
@@ -72,19 +73,14 @@ class NeuralQCFGTgtParser(TgtParserBase):
         nn.init.xavier_uniform_(self.src_nt_emb.data)
         nn.init.xavier_uniform_(self.src_pt_emb.data)
 
-    def get_params(
+    def forward(
         self,
         node_features,
         spans,
-        x: Optional[torch.Tensor] = None,
-        copy_position=None,  # (pt, nt)
-        impossible_span_mask=None,
         filtered_spans=None,  # list of spans
     ):
-        if copy_position is None or not self.use_copy:
-            copy_position = (None, None)
-
         batch_size = len(spans)
+        device = node_features[0].device
 
         (
             nt_spans,
@@ -96,29 +92,25 @@ class NeuralQCFGTgtParser(TgtParserBase):
             pt_num_nodes,
             pt_node_features,
         ) = self.build_src_features(spans, node_features)
-        device = nt_node_features.device
+
+        nt = self.nt_states * nt_num_nodes
+        pt = self.pt_states * pt_num_nodes
 
         # e = u + h
-        src_nt_node_emb = self.src_nt_node_mlp(nt_node_features)
-        src_nt_emb = self.src_nt_emb.expand(batch_size, self.nt_states, self.dim)
-        nt_emb = src_nt_emb.unsqueeze(2) + src_nt_node_emb.unsqueeze(1)
-        nt_emb = nt_emb.view(batch_size, self.nt_states * nt_num_nodes, -1)
-        nt = self.nt_states * nt_num_nodes
+        nt_node_emb = self.src_nt_node_mlp(nt_node_features)
+        nt_state_emb = self.src_nt_emb.expand(batch_size, self.nt_states, self.dim)
+        nt_emb = nt_state_emb.unsqueeze(2) + nt_node_emb.unsqueeze(1)
+        nt_emb = nt_emb.view(batch_size, nt, -1)
 
-        src_pt_node_emb = self.src_pt_node_mlp(pt_node_features)
-        src_pt_emb = self.src_pt_emb.expand(batch_size, self.pt_states, self.dim)
-        pt_emb = src_pt_emb.unsqueeze(2) + src_pt_node_emb.unsqueeze(1)
-        pt_emb = pt_emb.view(batch_size, self.pt_states * pt_num_nodes, -1)
-        pt = self.pt_states * pt_num_nodes
+        pt_node_emb = self.src_pt_node_mlp(pt_node_features)
+        pt_state_emb = self.src_pt_emb.expand(batch_size, self.pt_states, self.dim)
+        pt_emb = pt_state_emb.unsqueeze(2) + pt_node_emb.unsqueeze(1)
+        pt_emb = pt_emb.view(batch_size, pt, -1)
 
         # S->A
         roots = self.root_mlp_child(nt_emb)
         roots = roots.view(batch_size, self.nt_states, nt_num_nodes)
-        mask = (
-            torch.arange(nt_num_nodes, device=device)
-            .view(1, 1, -1)
-            .expand(batch_size, 1, -1)
-        )
+        mask = torch.arange(nt_num_nodes, device=device).view(1, 1, -1).expand(batch_size, 1, -1)
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
         roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
         roots = roots.view(batch_size, -1)
@@ -139,9 +131,9 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         # fmt: off
         nt_mask = torch.arange(nt_num_nodes, device=rules.device).unsqueeze(0) \
-            < torch.tensor(nt_num_nodes_list, device=rules.device).unsqueeze(1)
+                  < torch.tensor(nt_num_nodes_list, device=rules.device).unsqueeze(1)
         pt_mask = torch.arange(pt_num_nodes, device=rules.device).unsqueeze(0) \
-            < torch.tensor(pt_num_nodes_list, device=rules.device).unsqueeze(1)
+                  < torch.tensor(pt_num_nodes_list, device=rules.device).unsqueeze(1)
         lhs_mask = nt_mask.unsqueeze(1).expand(-1, self.nt_states, -1).reshape(batch_size, -1)
         _pt_rhs_mask = pt_mask.unsqueeze(1).expand(-1, self.pt_states, -1).reshape(batch_size, -1)
         # fmt: on
@@ -151,7 +143,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
 
         if self.rule_hard_constraint is not None:
             mask = self.rule_hard_constraint.get_mask(
-                batch_size, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device
+                batch_size, self.pt_states, self.nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device
             )
             rules[~mask] = self.neg_huge
 
@@ -167,30 +159,35 @@ class NeuralQCFGTgtParser(TgtParserBase):
                 nt_spans, nt, pt, filtered_spans, roots, rules
             )
 
-        nt_constraint = None
-        if x is not None:
-            terms, roots, nt_constraint, _, _ = self.build_rules_give_tgt(
-                x,
-                terms,
-                roots,
-                pt_num_nodes,
-                pt_spans,
-                nt_num_nodes,
-                nt_spans,
-                pt,
-                nt,
-                pt_copy=copy_position[0],
-                nt_copy=copy_position[1],
-                observed_mask=impossible_span_mask,
-            )
-
         params = {
             "term": terms,
             "root": roots,
             "rule": rules,
-            "constraint": nt_constraint,
         }
-        return params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes
+        pred = TgtParserPrediction(
+            batch_size=batch_size,
+            nt=nt,
+            nt_states=self.nt_states,
+            nt_nodes=nt_spans,
+            nt_num_nodes=nt_num_nodes,
+            pt=pt,
+            pt_states=self.pt_states,
+            pt_nodes=pt_spans,
+            pt_num_nodes=pt_num_nodes,
+            params=params,
+            device=device,
+        )
+        return pred
+
+    def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:
+        pred = super().observe_x(pred, x, lengths, inplace, **kwargs)
+        pred.dist = NoDecomp(pred.posterior_params, pred.lengths, **pred.common())
+        return pred
+
+    def prepare_sampler(self, pred: TgtParserPrediction, src, src_ids, inplace=True) -> TgtParserPrediction:
+        pred = super().prepare_sampler(pred, src, src_ids, inplace)
+        pred.sampler = NoDecompSampler(pred.params, **pred.common(), **self.sampler_common())
+        return pred
 
     def filter_rules(self, nt_spans, nt, pt, filtered_spans, roots, rules):
         batch_size = len(nt_spans)
@@ -219,10 +216,7 @@ class NeuralQCFGTgtParser(TgtParserBase):
         rules[masks] = self.neg_huge
         inds_ = pad_sequence(inds, batch_first=True).to(roots.device)
         inds_ = inds_.unsqueeze(1)
-        _state_offset = (
-            torch.arange(self.nt_states, device=roots.device)[None, :, None]
-            * nt_num_nodes
-        )
+        _state_offset = torch.arange(self.nt_states, device=roots.device)[None, :, None] * nt_num_nodes
         inds = (_state_offset + inds_).view(batch_size, -1)
         roots = roots.gather(1, inds)
         rules = rules.gather(1, inds[..., None, None].expand(-1, -1, nt + pt, nt + pt))
@@ -231,9 +225,9 @@ class NeuralQCFGTgtParser(TgtParserBase):
         rules21 = rules[:, :, nt:, :nt]
         rules22 = rules[:, :, nt:, nt:]
         n = inds.shape[1]
-        rules11 = rules11.gather(
-            2, inds[:, None, :, None].expand(-1, n, -1, nt)
-        ).gather(3, inds[:, None, None, :].expand(-1, n, n, -1))
+        rules11 = rules11.gather(2, inds[:, None, :, None].expand(-1, n, -1, nt)).gather(
+            3, inds[:, None, None, :].expand(-1, n, n, -1)
+        )
         rules12 = rules12.gather(2, inds[:, None, :, None].expand(-1, n, -1, pt))
         rules21 = rules21.gather(3, inds[:, None, None, :].expand(-1, n, pt, -1))
         rules = torch.empty((batch_size, n, n + pt, n + pt), device=rules11.device)

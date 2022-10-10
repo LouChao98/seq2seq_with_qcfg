@@ -1,27 +1,21 @@
-from collections import defaultdict
-
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from src.utils.fn import spans2tree
 
+from .base import RuleConstraintBase
 
-class FSimpleHierarchy:
-    def __init__(self, pt_states, nt_states):
-        self.pt_states = pt_states
-        self.nt_states = nt_states
 
-    def get_mask(
-        self, batch_size, max_pt_spans, max_nt_spans, pt_spans, nt_spans, device
-    ):
-        pt_spans[0] += [(0, 0, 0)] * (max_pt_spans - len(pt_spans[0]))
-        nt_spans[0] += [(0, 0, 0)] * (max_nt_spans - len(nt_spans[0]))
-        pt_spans = pad_sequence(
-            [torch.tensor([(l, r) for l, r, t in item]) for item in pt_spans],
-            batch_first=True,
-        ).to(device)
+class FSimpleHierarchy(RuleConstraintBase):
+    def get_mask(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+        nt_spans[0] += [(0, 0, -999)] * (nt_num_nodes - len(nt_spans[0]))
+        pt_spans[0] += [(0, 0, -999)] * (pt_num_nodes - len(pt_spans[0]))
         nt_spans = pad_sequence(
             [torch.tensor([(l, r) for l, r, t in item]) for item in nt_spans],
+            batch_first=True,
+        ).to(device)
+        pt_spans = pad_sequence(
+            [torch.tensor([(l, r) for l, r, t in item]) for item in pt_spans],
             batch_first=True,
         ).to(device)
 
@@ -30,14 +24,11 @@ class FSimpleHierarchy:
         pt_node_mask = nt_spans[..., 0].unsqueeze(2) <= pt_spans[..., 0].unsqueeze(1)
         pt_node_mask &= nt_spans[..., 1].unsqueeze(2) >= pt_spans[..., 1].unsqueeze(1)
 
-        nt = max_nt_spans
-        pt = max_pt_spans
+        nt = nt_num_nodes
+        pt = pt_num_nodes
         node_mask = torch.cat([nt_node_mask, pt_node_mask], 2).to(device)
         node_mask = node_mask.unsqueeze(3) * node_mask.unsqueeze(2)
         return node_mask.view(batch_size, nt, nt + pt, nt + pt)
-
-    def get_feature(self, *args, **kwargs):
-        return (1.0 - self.get_mask(*args, **kwargs).float()).unsqueeze(1)
 
 
 # def get_rules_mask2(

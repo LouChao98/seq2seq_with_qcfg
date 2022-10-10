@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from hydra.utils import instantiate
 from pytorch_lightning.profilers import PassThroughProfiler
+from pytorch_memlab import profile_every
 from torch_scatter import scatter_mean
 from torchmetrics import MinMetric
 from transformers import AutoModel
@@ -51,7 +52,7 @@ class GeneralSeq2SeqModule(ModelBase):
         decoder_entropy_reg=0.0,
         param_initializer="xavier_uniform",
         track_param_norm=False,
-        real_val_every_n_epochs=20,
+        real_val_every_n_epochs=5,
     ):
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -82,18 +83,15 @@ class GeneralSeq2SeqModule(ModelBase):
             + (0 if self.pretrained is None else self.pretrained.config.hidden_size),
         )
 
-        self.parser: SrcParserBase = instantiate(
-            self.hparams.parser, vocab=len(self.datamodule.src_vocab)
-        )
-        self.tree_encoder: TreeEncoderBase = instantiate(
-            self.hparams.tree_encoder, dim=self.encoder.get_output_dim()
-        )
+        self.parser: SrcParserBase = instantiate(self.hparams.parser, vocab=len(self.datamodule.src_vocab))
+        self.tree_encoder: TreeEncoderBase = instantiate(self.hparams.tree_encoder, dim=self.encoder.get_output_dim())
         self.decoder: TgtParserBase = instantiate(
             self.hparams.decoder,
             vocab=len(self.datamodule.tgt_vocab),
             vocab_pair=self.datamodule.vocab_pair,
             src_dim=self.tree_encoder.get_output_dim(),
         )
+        self.threshold = torch.nn.Threshold(0.1, 0)
 
         self.train_metric = PerplexityMetric()
         self.val_metric = PerplexityMetric()
@@ -103,9 +101,7 @@ class GeneralSeq2SeqModule(ModelBase):
         self.setup_patch(stage, datamodule)
 
         if self.hparams.load_from_checkpoint is not None:
-            state_dict = torch.load(
-                self.hparams.load_from_checkpoint, map_location="cpu"
-            )
+            state_dict = torch.load(self.hparams.load_from_checkpoint, map_location="cpu")
             if "state_dict" in state_dict:
                 state_dict = state_dict["state_dict"]
             self.load_state_dict(state_dict, strict=False)
@@ -134,17 +130,32 @@ class GeneralSeq2SeqModule(ModelBase):
             h = self.embedding(src_ids)
             x.append(h)
         if self.pretrained is not None:
-            h = self.pretrained(**batch["transformer_inputs"])
-            h = scatter_mean(x, batch["transformer_offset"], 1)[:, 1:]
-            x.append(h)
+            h = self.pretrained(**batch["transformer_inputs"])[0]
+            if len(h) > len(src_ids):
+                h = h[: len(src_ids)]
+            out = torch.zeros(
+                src_ids.shape[0],
+                src_ids.shape[1] + 1,
+                h.shape[-1],
+                device=src_ids.device,
+            )
+            scatter_mean(h, batch["transformer_offset"], 1, out=out)
+            out = out[:, 1:]
+            x.append(out)
         x = torch.cat(x, dim=-1) if len(x) > 1 else x[0]
         x = self.encoder(x, src_lens)
         return x
 
     @report_ids_when_err
+    @profile_every(5, enable=False)
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
+        observed = {
+            "x": batch["tgt_ids"],
+            "lengths": batch["tgt_lens"],
+            "pt_copy": batch.get("copy_token"),
+            "nt_copy": batch.get("copy_phrase"),
+        }
         logging_vals = {}
 
         with self.profiler.profile("compute_src_nll_and_sampling"):
@@ -158,35 +169,17 @@ class GeneralSeq2SeqModule(ModelBase):
             node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         with self.profiler.profile("compute_tgt_nll"):
-            tgt_params = self.decoder.get_params(
-                node_features, node_spans, batch["tgt_ids"], copy_position=copy_position
-            )
-            tgt_nll = self.decoder(
-                batch["tgt_ids"],
-                batch["tgt_lens"],
-                node_features,
-                node_spans,
-                params=tgt_params[0],
-                copy_position=copy_position,
-            )
+            tgt_pred = self.decoder(node_features, node_spans)
+            tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
+            tgt_nll = tgt_pred.dist.nll
 
         with self.profiler.profile("reward"), torch.no_grad():
-            src_event_argmax, src_logprob_argmax = self.parser.argmax(
-                src_ids, src_lens, dist=dist
-            )
-            src_spans_argmax = extract_parses_span_only(
-                src_event_argmax[-1], src_lens, inc=1
-            )
-            node_features_argmax, node_spans_argmax = self.tree_encoder(
-                x, src_lens, spans=src_spans_argmax
-            )
-            tgt_nll_argmax = self.decoder(
-                batch["tgt_ids"],
-                batch["tgt_lens"],
-                node_features_argmax,
-                node_spans_argmax,
-                copy_position=copy_position,
-            )
+            src_event_argmax, src_logprob_argmax = self.parser.argmax(src_ids, src_lens, dist=dist)
+            src_spans_argmax = extract_parses_span_only(src_event_argmax[-1], src_lens, inc=1)
+            node_features_argmax, node_spans_argmax = self.tree_encoder(x, src_lens, spans=src_spans_argmax)
+            tgt_argmax_pred = self.decoder(node_features_argmax, node_spans_argmax)
+            tgt_argmax_pred = self.decoder.observe_x(tgt_argmax_pred, **observed)
+            tgt_nll_argmax = tgt_argmax_pred.dist.nll
             neg_reward = (tgt_nll - tgt_nll_argmax).detach()
             logging_vals["reward"] = -neg_reward
 
@@ -198,34 +191,28 @@ class GeneralSeq2SeqModule(ModelBase):
         if self.training:
             if self.decoder.rule_soft_constraint_solver is not None:
                 with self.profiler.profile("compute_soft_constraint"):
-                    soft_constraint_loss = self.decoder.get_soft_constraint_loss(
-                        batch["tgt_ids"],
-                        batch["tgt_lens"],
-                        node_features,
-                        node_spans,
-                        params=tgt_params,
-                        copy_position=copy_position,
-                    )
+                    soft_constraint_loss = self.decoder.get_soft_constraint_loss(tgt_pred)
             if (e := self.hparams.parser_entropy_reg) > 0:
                 entropy = self.parser.entropy(src_ids, src_lens, dist)
                 src_entropy_reg = -e * entropy
                 logging_vals["src_entropy"] = entropy
             if (e := self.hparams.decoder_entropy_reg) > 0:
-                entropy = self.decoder.pcfg.entropy(tgt_params[0], batch["tgt_lens"])
+                entropy = tgt_pred.dist.entropy
                 tgt_entropy_reg = -e * entropy
                 logging_vals["tgt_entropy"] = entropy
 
         return {
-            "decoder": tgt_nll + soft_constraint_loss + tgt_entropy_reg,
-            "encoder": src_nll + objective + src_entropy_reg,
+            "decoder": self.threshold(tgt_nll) + soft_constraint_loss + tgt_entropy_reg,
+            "encoder": self.threshold(src_nll) + objective + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
+            "runtime": {"seq_encoded": x},
             "src_runtime": {
                 "dist": dist,
                 "event": src_event,
                 "argmax_event": src_event_argmax,
             },
-            "tgt_runtime": {"param": tgt_params},
+            "tgt_runtime": {"pred": tgt_pred},
             "log": logging_vals,
         }
 
@@ -233,7 +220,12 @@ class GeneralSeq2SeqModule(ModelBase):
     def forward_visualize(self, batch, sample=False):
         # parse and annotate brackets on src and tgt
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        copy_position = (batch.get("copy_token"), batch.get("copy_phrase"))
+        observed = {
+            "x": batch["tgt_ids"],
+            "lengths": batch["tgt_lens"],
+            "pt_copy": batch.get("copy_token"),
+            "nt_copy": batch.get("copy_phrase"),
+        }
 
         parse = self.parser.sample if sample else self.parser.argmax
         src_spans = parse(src_ids, src_lens)[0][-1]
@@ -246,13 +238,10 @@ class GeneralSeq2SeqModule(ModelBase):
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
-        tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(
-            batch["tgt_ids"],
-            batch["tgt_lens"],
-            node_features,
-            node_spans,
-            copy_position=copy_position,
-        )
+        tgt_pred = self.decoder(node_features, node_spans)
+        tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
+        tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(tgt_pred)
+
         tgt_annotated = []
         for snt, tgt_spans_inst in zip(batch["tgt"], tgt_spans):
             tree = annotate_snt_with_brackets(snt, tgt_spans_inst)
@@ -281,30 +270,21 @@ class GeneralSeq2SeqModule(ModelBase):
                 if getattr(self.decoder, "use_copy"):
                     should_skip = False
                     for copied_span in copied:
-                        if (
-                            copied_span[0] <= tgt_span[0]
-                            and tgt_span[1] <= copied_span[1]
-                        ):
+                        if copied_span[0] <= tgt_span[0] and tgt_span[1] <= copied_span[1]:
                             should_skip = True
                             break
                     if should_skip:
                         continue
                     if tgt_span[0] == tgt_span[1]:
-                        is_copy = (
-                            tgt_span[2] // num_pt_spans == self.decoder.pt_states - 1
-                        )
-                    else:
-                        is_copy = (
-                            tgt_span[2] // num_nt_spans == self.decoder.nt_states - 1
-                        )
+                        is_copy = tgt_span[2] // num_pt_spans == self.decoder.pt_states - 1
+                    elif batch.get("copy_nt") is not None:
+                        is_copy = tgt_span[2] // num_nt_spans == self.decoder.nt_states - 1
                     if is_copy:
                         copied.append(tgt_span)
                 alignments_inst.append(
                     (
-                        " ".join(src_snt[src_span[0] : src_span[1] + 1])
-                        + f" ({src_span[0]}, {src_span[1]+1})",
-                        " ".join(tgt_snt[tgt_span[0] : tgt_span[1] + 1])
-                        + f" ({tgt_span[0]}, {tgt_span[1]+1})",
+                        " ".join(src_snt[src_span[0] : src_span[1] + 1]) + f" ({src_span[0]}, {src_span[1] + 1})",
+                        " ".join(tgt_snt[tgt_span[0] : tgt_span[1] + 1]) + f" ({tgt_span[0]}, {tgt_span[1] + 1})",
                         "COPY" if is_copy else "",
                     )
                 )
@@ -316,7 +296,7 @@ class GeneralSeq2SeqModule(ModelBase):
         }
 
     @report_ids_when_err
-    def forward_inference(self, batch):
+    def forward_generate(self, batch):
         # actually predict the target sequence
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
 
@@ -327,22 +307,13 @@ class GeneralSeq2SeqModule(ModelBase):
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
-        y_preds = self.decoder.generate(
-            node_features,
-            node_spans,
-            batch["src_ids"],
-            batch["src"],
-        )
+        tgt_pred = self.decoder(node_features, node_spans)
+        tgt_pred = self.decoder.prepare_sampler(tgt_pred, batch["src"], src_ids)
+        y_preds = self.decoder.generate(tgt_pred)
 
         # import numpy as np
-        # tgt_nll = self.decoder(
-        #     batch["tgt_ids"],
-        #     batch["tgt_lens"],
-        #     node_features,
-        #     node_spans,
-        #     copy_position=(batch.get("copy_token"), batch.get("copy_phrase")),
-        # )
-        # tgt_ppl = np.exp(tgt_nll.detach().cpu().numpy() / batch["tgt_lens"])
+        # tgt_pred = self.decoder.observe_x(batch["tgt_ids"], batch["tgt_lens"], inplace=False)
+        # tgt_ppl = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"]))
 
         return {"pred": [item[0] for item in y_preds]}
 
@@ -358,22 +329,16 @@ class GeneralSeq2SeqModule(ModelBase):
         self.log("train/tgt", loss_decoder, prog_bar=True)
         if "log" in output:
             self.log_dict({"train/" + k: v.mean() for k, v in output["log"].items()})
-
-        if batch_idx == 0:
-            self.eval()
-            single_inst = {key: value[:2] for key, value in batch.items()}
-            trees = self.forward_visualize(single_inst)
-            self.print("=" * 79)
-            for src, tgt, alg in zip(
-                trees["src_tree"], trees["tgt_tree"], trees["alignment"]
-            ):
-                self.print("Src:", src)
-                self.print("Tgt:", tgt)
-                self.print(
-                    "Alg:\n"
-                    + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
-                )
-            self.train()
+        # if batch_idx == 0:
+        #     self.eval()
+        #     single_inst = {key: (value[:2] if key != "transformer_inputs" else value) for key, value in batch.items()}
+        #     trees = self.forward_visualize(single_inst)
+        #     self.print("=" * 79)
+        #     for src, tgt, alg in zip(trees["src_tree"], trees["tgt_tree"], trees["alignment"]):
+        #         self.print("Src:", src)
+        #         self.print("Tgt:", tgt)
+        #         self.print("Alg:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
+        #     self.train()
         return {"loss": loss}
 
     def on_validation_epoch_start(self) -> None:
@@ -383,20 +348,15 @@ class GeneralSeq2SeqModule(ModelBase):
         if self.hparams.track_param_norm:
             self.log(
                 "stat/parser_norm",
-                sum(param.norm().item() ** 2 for param in self.parser.parameters())
-                ** 0.5,
+                sum(param.norm().item() ** 2 for param in self.parser.parameters()) ** 0.5,
             )
             self.log(
                 "stat/encoder_norm",
-                sum(
-                    param.norm().item() ** 2 for param in self.tree_encoder.parameters()
-                )
-                ** 0.5,
+                sum(param.norm().item() ** 2 for param in self.tree_encoder.parameters()) ** 0.5,
             )
             self.log(
                 "stat/decoder_norm",
-                sum(param.norm().item() ** 2 for param in self.decoder.parameters())
-                ** 0.5,
+                sum(param.norm().item() ** 2 for param in self.decoder.parameters()) ** 0.5,
             )
 
     def validation_step(self, batch: Any, batch_idx: int):
@@ -409,19 +369,14 @@ class GeneralSeq2SeqModule(ModelBase):
         if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0:
             self.test_step(batch, batch_idx=None)
 
-        # if batch_idx < 3:
-        #     single_inst = {key: value[:2] for key, value in batch.items()}
-        #     trees = self.forward_visualize(single_inst)
-        #     self.print("=" * 79)
-        #     for src, tgt, alg in zip(
-        #         trees["src_tree"], trees["tgt_tree"], trees["alignment"]
-        #     ):
-        #         self.print("Src:", src)
-        #         self.print("Tgt:", tgt)
-        #         self.print(
-        #             "Alg:\n"
-        #             + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
-        #         )
+        if batch_idx == 0:
+            single_inst = {key: (value[:2] if key != "transformer_inputs" else value) for key, value in batch.items()}
+            trees = self.forward_visualize(single_inst)
+            self.print("=" * 79)
+            for src, tgt, alg in zip(trees["src_tree"], trees["tgt_tree"], trees["alignment"]):
+                self.print("Src:", src)
+                self.print("Tgt:", tgt)
+                self.print("Alg:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
 
         return {"loss": loss}
 
@@ -433,7 +388,7 @@ class GeneralSeq2SeqModule(ModelBase):
         self.log("val/ppl_best", best_ppl, on_epoch=True, prog_bar=True)
         self.print("val/epoch", str(self.current_epoch + 1))
         self.print("val/ppl", str(ppl.item()))
-        if (self.current_epoch + 1) % 20 == 0:
+        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0:
             acc = self.test_metric.compute()
             self.log_dict({"val/" + k: v for k, v in acc.items()})
             self.print(acc)
@@ -443,16 +398,16 @@ class GeneralSeq2SeqModule(ModelBase):
         return super().on_test_epoch_start()
 
     @torch.inference_mode(False)
+    @torch.no_grad()
     def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = None):
         # patch for inference_mode
         batch["src_ids"] = batch["src_ids"].clone()
         batch["tgt_ids"] = batch["tgt_ids"].clone()
 
-        preds = self.forward_inference(batch)["pred"]
+        preds = self.forward_generate(batch)["pred"]
         targets = batch["tgt"]
 
-        intermediate_metric = self.test_metric(preds, targets)
-        # self.log_dict(intermediate_metric, prog_bar=True, logger=False, on_step=True)
+        self.test_metric(preds, targets)
 
         # if batch_idx == 0:
         #     single_inst = {key: value[:2] for key, value in batch.items()}
@@ -472,6 +427,8 @@ class GeneralSeq2SeqModule(ModelBase):
 
     def test_epoch_end(self, outputs) -> None:
         acc = self.test_metric.compute()
-        self.log_dict({"test/" + k: v for k, v in acc.items()})
+        d = {"test/" + k: v for k, v in acc.items()}
+        d["step"] = self.global_step
+        self.log_dict(d)
         self.print(acc)
         self.save_predictions(outputs)

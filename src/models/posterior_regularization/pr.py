@@ -1,73 +1,69 @@
+from __future__ import annotations
+
+from copy import copy
+from typing import TYPE_CHECKING
+
 import torch
+
+from src.utils.fn import apply_to_nested_tensor
+
+if TYPE_CHECKING:
+    from src.models.tgt_parser.base import TgtParserPrediction
 
 
 class PrTask:
-    def get_b(self, batch_size):
+    def get_b(self, pred, batch_size):
         ...
 
-    def get_init_lambdas(self, batch_size):
+    def get_init_lambdas(self, pred, batch_size):
         ...
 
-    def process_constraint(self, constraints):
+    def process_constraint(self, pred, constraints):
         ...
 
-    def build_constrained_params(self, params, lambdas, constraints, entropy_reg=None):
+    def build_constrained_dist(self, pred, lambdas, constraints, entropy_reg=None):
         ...
 
-    def nll(self, params, lens):
-        ...
-
-    def calc_e(self, params, lens, constraints):
-        ...
-
-    def ce(self, q_params, p_params, lens):
-        ...
-
-    def get_dist(self, *args, **kwargs):
+    def calc_e(self, pred, constraints):
         ...
 
 
-def compute_pr(params, lens, constraints, task: PrTask, get_param=False, **kwargs):
-    constraints = task.process_constraint(constraints)
+@torch.enable_grad()
+def compute_pr(pred: TgtParserPrediction, constraints, task: PrTask, get_dist=False, **kwargs):
+    constraints = task.process_constraint(pred, constraints)
     entropy_reg = kwargs.get("entropy_reg", 0.0)
 
-    batch_size = len(lens)
-    e = task.calc_e(params, lens, constraints)
-    if (e < task.get_b(batch_size)).all():
-        if get_param:  # do nothing
-            return params
-        return torch.zeros(batch_size, device=constraints.device)
+    e = task.calc_e(pred, constraints)
+    if (e < task.get_b(pred)).all():
+        if get_dist:  # do nothing
+            return copy(pred)
+        return torch.zeros(pred, device=pred.device)
 
-    lambdas = pgd_solver(params, lens, constraints, task, **kwargs).detach()
-    # print('Lambda', lambdas)
-    cparams = task.build_constrained_params(params, lambdas, constraints, entropy_reg)
-    if get_param:
-        return cparams
-    return task.ce(cparams, params, lens)
+    lambdas = pgd_solver(pred, constraints, task, **kwargs)
+    cdist = task.build_constrained_dist(pred, lambdas, constraints, entropy_reg)
+    if get_dist:
+        return cdist
+    ce = cdist.cross_entropy(pred.dist, fix_left=True)
+    return ce
 
 
-def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
+def pgd_solver(pred: TgtParserPrediction, constraints, task: PrTask, **kwargs):
     num_iter = kwargs.get("num_iter", 10)
     entropy_reg = kwargs.get("entropy_reg", 0.0)
 
-    batch_size = len(lens)
-    lambdas = task.get_init_lambdas(batch_size)
-    b = task.get_b(batch_size)
-    params = {
-        k: v.detach() if isinstance(v, torch.Tensor) else v for k, v in params.items()
-    }
+    lambdas = task.get_init_lambdas(pred)
+    b = task.get_b(pred)
+    pred = copy(pred)
+    pred.posterior_params = apply_to_nested_tensor(pred.posterior_params, lambda x: x.detach())
+    pred.dist = pred.dist.spawn(params=pred.posterior_params)
     for itidx in range(num_iter):
         # constrained_params = {**params}
         # constrained_params["add_scores"] = [
         #     -(lambdas[:, None, None, None] * item).sum(-1)
         #     for item in factorized_constraint
         # ]
-        cparams = task.build_constrained_params(
-            params, lambdas, constraints, entropy_reg
-        )
-        target = (
-            -(lambdas * b).sum(-1) + (1 - entropy_reg) * task.nll(cparams, lens)
-        ).sum()
+        cdist = task.build_constrained_dist(pred, lambdas, constraints, entropy_reg)
+        target = (-(lambdas * b).sum(-1) + (1 - entropy_reg) * cdist.nll).sum()
         target.backward()
         if (lambdas.grad.abs() < 1e-4).all():
             break
@@ -79,7 +75,7 @@ def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
 
             # step_size = torch.ones(batch_size, device=target.device)
             # _l = lambdas + lambdas.grad
-            # cparams = pr_task.build_constrained_params(params, lambdas, constraints)
+            # cparams = pr_task.build_constrained_dist(params, lambdas, constraints)
             # factor = (lambdas.grad ** 2).sum(-1)
             # condition = (-(-(_l * b).sum(-1) + self.pcfg(cparams, lens)).sum() + target) * 2 / factor
             # while (condition > - step_size).any():
@@ -90,4 +86,4 @@ def pgd_solver(params, lens, constraints, task: PrTask, **kwargs):
             lambdas.clamp_(0)
             lambdas.grad.zero_()
     # print(itidx)
-    return lambdas
+    return lambdas.detach()

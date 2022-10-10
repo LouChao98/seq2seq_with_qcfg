@@ -1,17 +1,13 @@
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
+from .base import RuleConstraintBase
 
-class FPSimpleHierarchy:
-    def __init__(self, pt_states, nt_states):
-        self.pt_states = pt_states
-        self.nt_states = nt_states
 
-    def get_mask(
-        self, batch_size, max_pt_spans, max_nt_spans, pt_spans, nt_spans, device
-    ):
-        pt_spans[0] += [(0, 0, 0)] * (max_pt_spans - len(pt_spans[0]))
-        nt_spans[0] += [(0, 0, 0)] * (max_nt_spans - len(nt_spans[0]))
+class FPSimpleHierarchy(RuleConstraintBase):
+    def get_mask(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+        pt_spans[0] += [(0, 0, -999)] * (pt_num_nodes - len(pt_spans[0]))
+        nt_spans[0] += [(0, 0, -999)] * (nt_num_nodes - len(nt_spans[0]))
         pt_spans = pad_sequence(
             [torch.tensor([(l, r) for l, r, t in item]) for item in pt_spans],
             batch_first=True,
@@ -26,128 +22,96 @@ class FPSimpleHierarchy:
         pt_node_mask = nt_spans[..., 0].unsqueeze(2) <= pt_spans[..., 0].unsqueeze(1)
         pt_node_mask &= nt_spans[..., 1].unsqueeze(2) >= pt_spans[..., 1].unsqueeze(1)
 
-        nt = max_nt_spans * self.nt_states
-        pt = max_pt_spans * self.pt_states
-        nt_node_mask = (
-            nt_node_mask[:, None, :, None, :]
-            .repeat(1, self.nt_states, 1, self.nt_states, 1)
-            .view(batch_size, nt, nt)
-        )
-        pt_node_mask = (
-            pt_node_mask[:, None, :, None, :]
-            .repeat(1, self.nt_states, 1, self.pt_states, 1)
-            .view(batch_size, nt, pt)
-        )
-        node_mask = torch.cat([nt_node_mask, pt_node_mask], 2).to(device)
-        node_mask = node_mask.unsqueeze(3) * node_mask.unsqueeze(2)
-        return node_mask.view(batch_size, nt, nt + pt, nt + pt)
-
-    def get_feature(self, *args, **kwargs):
-        return 1.0 - self.get_mask(*args, **kwargs).float()
-
-    def get_mask_impl2(
-        self, batch_size, max_pt_spans, max_nt_spans, pt_spans, nt_spans, device
-    ):
-        # A[a i]->B[a j] C[a k], a i must be the parent of a j and a k.
-        # return True for not masked
-        nt = max_nt_spans * self.nt_states
-        pt = max_pt_spans * self.pt_states
-        nt_node_mask = torch.ones(
-            batch_size, max_nt_spans, max_nt_spans, dtype=torch.bool
-        )
-        pt_node_mask = torch.ones(
-            batch_size, max_nt_spans, max_pt_spans, dtype=torch.bool
-        )
-
-        def is_parent(parent, child):
-            return child[0] >= parent[0] and child[1] <= parent[1]
-
-        for b, (pt_span, nt_span) in enumerate(zip(pt_spans, nt_spans)):
-            for i, parent_span in enumerate(nt_span):
-                for j, child_span in enumerate(nt_span):
-                    if not (is_parent(parent_span, child_span)):
-                        nt_node_mask[b, i, j] = False
-                for j, child_span in enumerate(pt_span):
-                    if not (is_parent(parent_span, child_span)):
-                        pt_node_mask[b, i, j] = False
-
-        nt_node_mask = (
-            nt_node_mask[:, None, :, None, :]
-            .expand(
-                batch_size,
-                self.nt_states,
-                max_nt_spans,
-                self.nt_states,
-                max_nt_spans,
-            )
-            .contiguous()
-        )
-        pt_node_mask = (
-            pt_node_mask[:, None, :, None, :]
-            .expand(
-                batch_size,
-                self.nt_states,
-                max_nt_spans,
-                self.pt_states,
-                max_pt_spans,
-            )
-            .contiguous()
-        )
-
+        nt = nt_states * nt_num_nodes
+        pt = pt_states * pt_num_nodes
+        nt_node_mask = nt_node_mask[:, None, :, None, :].repeat(1, nt_states, 1, nt_states, 1)
         nt_node_mask = nt_node_mask.view(batch_size, nt, nt)
+
+        pt_node_mask = pt_node_mask[:, None, :, None, :].repeat(1, nt_states, 1, pt_states, 1)
         pt_node_mask = pt_node_mask.view(batch_size, nt, pt)
+
         node_mask = torch.cat([nt_node_mask, pt_node_mask], 2).to(device)
         node_mask = node_mask.unsqueeze(3) * node_mask.unsqueeze(2)
         return node_mask.view(batch_size, nt, nt + pt, nt + pt)
 
+    # def get_mask_impl2(self, batch_size, max_pt_spans, max_nt_spans, pt_spans, nt_spans, device):
+    #     # A[a i]->B[a j] C[a k], a i must be the parent of a j and a k.
+    #     # return True for not masked
+    #     nt = max_nt_spans * self.nt_states
+    #     pt = max_pt_spans * self.pt_states
+    #     nt_node_mask = torch.ones(batch_size, max_nt_spans, max_nt_spans, dtype=torch.bool)
+    #     pt_node_mask = torch.ones(batch_size, max_nt_spans, max_pt_spans, dtype=torch.bool)
 
-class FPFewerSame:
-    def __init__(self, pt_states, nt_states):
-        self.pt_states = pt_states
-        self.nt_states = nt_states
+    #     def is_parent(parent, child):
+    #         return child[0] >= parent[0] and child[1] <= parent[1]
 
-    def get_mask(
-        self, batch_size, max_pt_spans, max_nt_spans, pt_spans, nt_spans, device
-    ):
-        nt_node_mask = ~torch.eye(max_nt_spans, device=device, dtype=torch.bool)
-        pt_node_mask = torch.ones(
-            max_nt_spans, max_pt_spans, device=device, dtype=torch.bool
-        )
-        nt = max_nt_spans * self.nt_states
-        pt = max_pt_spans * self.pt_states
-        nt_node_mask = (
-            nt_node_mask[None, None, :, None, :]
-            .repeat(1, self.nt_states, 1, self.nt_states, 1)
-            .view(1, nt, nt)
-        )
-        pt_node_mask = (
-            pt_node_mask[None, None, :, None, :]
-            .repeat(1, self.nt_states, 1, self.pt_states, 1)
-            .view(1, nt, pt)
-        )
+    #     for b, (pt_span, nt_span) in enumerate(zip(pt_spans, nt_spans)):
+    #         for i, parent_span in enumerate(nt_span):
+    #             for j, child_span in enumerate(nt_span):
+    #                 if not (is_parent(parent_span, child_span)):
+    #                     nt_node_mask[b, i, j] = False
+    #             for j, child_span in enumerate(pt_span):
+    #                 if not (is_parent(parent_span, child_span)):
+    #                     pt_node_mask[b, i, j] = False
+
+    #     nt_node_mask = (
+    #         nt_node_mask[:, None, :, None, :]
+    #         .expand(
+    #             batch_size,
+    #             self.nt_states,
+    #             max_nt_spans,
+    #             self.nt_states,
+    #             max_nt_spans,
+    #         )
+    #         .contiguous()
+    #     )
+    #     pt_node_mask = (
+    #         pt_node_mask[:, None, :, None, :]
+    #         .expand(
+    #             batch_size,
+    #             self.nt_states,
+    #             max_nt_spans,
+    #             self.pt_states,
+    #             max_pt_spans,
+    #         )
+    #         .contiguous()
+    #     )
+
+    #     nt_node_mask = nt_node_mask.view(batch_size, nt, nt)
+    #     pt_node_mask = pt_node_mask.view(batch_size, nt, pt)
+    #     node_mask = torch.cat([nt_node_mask, pt_node_mask], 2).to(device)
+    #     node_mask = node_mask.unsqueeze(3) * node_mask.unsqueeze(2)
+    #     return node_mask.view(batch_size, nt, nt + pt, nt + pt)
+
+
+class FPNoSame(RuleConstraintBase):
+    # forbid A[i]->B[i]C[.] or A[i]->B[.]C[i]
+    def get_mask(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+        nt_node_mask = ~torch.eye(nt_num_nodes, device=device, dtype=torch.bool)
+        pt_node_mask = torch.ones(nt_num_nodes, pt_num_nodes, device=device, dtype=torch.bool)
+        nt = nt_states * nt_num_nodes
+        pt = pt_states * pt_num_nodes
+
+        nt_node_mask = nt_node_mask[None, None, :, None, :].repeat(1, nt_states, 1, nt_states, 1)
+        nt_node_mask = nt_node_mask.view(1, nt, nt)
+        pt_node_mask = pt_node_mask[None, None, :, None, :].repeat(1, nt_states, 1, pt_states, 1)
+        pt_node_mask = pt_node_mask.view(1, nt, pt)
+
         node_mask = torch.cat([nt_node_mask, pt_node_mask], 2).to(device)
         node_mask = node_mask.unsqueeze(3) * node_mask.unsqueeze(2)
         return node_mask.view(1, nt, nt + pt, nt + pt).expand(batch_size, -1, -1, -1)
 
-    def get_feature(
-        self, batch_size, max_pt_spans, max_nt_spans, pt_spans, nt_spans, device
-    ):
-        nt_node_mask = torch.eye(max_nt_spans, device=device, dtype=torch.bool)
-        pt_node_mask = torch.zeros(
-            max_nt_spans, max_pt_spans, device=device, dtype=torch.bool
-        )
-        nt = max_nt_spans * self.nt_states
-        pt = max_pt_spans * self.pt_states
-        nt_node_mask = (
-            nt_node_mask[None, None, :, None, :]
-            .repeat(1, self.nt_states, 1, self.nt_states, 1)
-            .view(1, nt, nt)
-        )
-        pt_node_mask = (
-            pt_node_mask[None, None, :, None, :]
-            .repeat(1, self.nt_states, 1, self.pt_states, 1)
-            .view(1, nt, pt)
-        )
+    def get_mask(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+        nt_node_mask = ~torch.eye(nt_num_nodes, device=device, dtype=torch.float32)
+        pt_node_mask = torch.ones(nt_num_nodes, pt_num_nodes, device=device, dtype=torch.float32)
+        nt = nt_states * nt_num_nodes
+        pt = pt_states * pt_num_nodes
+
+        nt_node_mask = nt_node_mask[None, None, :, None, :].repeat(1, nt_states, 1, nt_states, 1)
+        nt_node_mask = nt_node_mask.view(1, nt, nt)
+        pt_node_mask = pt_node_mask[None, None, :, None, :].repeat(1, nt_states, 1, pt_states, 1)
+        pt_node_mask = pt_node_mask.view(1, nt, pt)
+
         node_mask = torch.cat([nt_node_mask, pt_node_mask], 2).to(device)
         node_mask = node_mask.unsqueeze(3) + node_mask.unsqueeze(2)
         return node_mask.view(1, nt, nt + pt, nt + pt).expand(batch_size, -1, -1, -1)
@@ -246,6 +210,4 @@ if __name__ == "__main__":
     pt_spans = [[(0, 0, -1), (1, 1, -1), (2, 2, -1)], [(1, 1, -1), (2, 2, -1)]]
     nt_spans = [[(0, 3, -1), (1, 2, -1), (1, 3, -1)], [(0, 4, -1), (3, 4, -1)]]
     m1 = c.get_mask(batch_size, max_pt_spans, max_nt_spans, pt_spans, nt_spans, "cpu")
-    m2 = c.get_mask_impl2(
-        batch_size, max_pt_spans, max_nt_spans, pt_spans, nt_spans, "cpu"
-    )
+    m2 = c.get_mask_impl2(batch_size, max_pt_spans, max_nt_spans, pt_spans, nt_spans, "cpu")

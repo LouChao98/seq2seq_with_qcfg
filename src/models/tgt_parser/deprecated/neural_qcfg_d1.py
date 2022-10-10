@@ -1,24 +1,91 @@
-import random
-from collections import defaultdict
 from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
-from .neural_qcfg_d1 import NeuralQCFGD1TgtParser
-from .struct.d1_pcfg_tse import D1PCFGTSE
+from ..components.common import MultiResidualLayer
+from .base import TgtParserBase
+from .struct.d1_pcfg import D1PCFG
 
 
-class NeuralQCFGD1LogParamTgtParser(NeuralQCFGD1TgtParser):
+def get_nn(dim, cpd_rank):
+    # return MultiResidualLayer(dim, dim, cpd_rank)
+    return nn.Sequential(nn.LeakyReLU(), nn.Linear(dim, cpd_rank))  # , nn.LayerNorm(cpd_rank)
 
-    # This produce log-space params.
-    # The impl of struct is much slower than counterparts.
-    # Just for debug.
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.pcfg = D1PCFGTSE(self.nt_states, self.pt_states)
+class NeuralQCFGD1TgtParser(TgtParserBase):
+    def __init__(
+        self,
+        pt_states=1,
+        nt_states=10,
+        pt_span_range=(1, 1),
+        nt_span_range=(2, 1000),
+        use_copy=False,
+        vocab_pair=None,
+        rule_hard_constraint=None,
+        rule_soft_constraint=None,
+        rule_soft_constraint_solver=None,
+        generation_max_length=40,
+        generation_num_samples=10,
+        generation_ppl_batch_size=None,
+        vocab=100,
+        dim=256,
+        cpd_rank=128,
+        num_layers=3,
+        src_dim=256,
+    ):
+        super().__init__(
+            pt_states,
+            nt_states,
+            pt_span_range,
+            nt_span_range,
+            use_copy,
+            vocab_pair,
+            rule_hard_constraint,
+            rule_soft_constraint,
+            rule_soft_constraint_solver,
+            generation_max_length,
+            generation_num_samples,
+            generation_ppl_batch_size,
+        )
+
+        self.pcfg = D1PCFG(self.nt_states, self.pt_states)
+        self.vocab = vocab
+        self.dim = dim
+        self.cpd_rank = cpd_rank
+        self.num_layers = num_layers
+        self.src_dim = src_dim
+
+        self.src_nt_emb = nn.Parameter(torch.randn(nt_states, dim))
+        self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
+        self.src_pt_emb = nn.Parameter(torch.randn(pt_states, dim))
+        self.src_pt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
+        self.rule_mlp_parent = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        self.rule_mlp_left = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        self.rule_mlp_right = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        self.root_mlp_child = nn.Linear(dim, 1, bias=False)
+        self.vocab_out = MultiResidualLayer(dim, dim, out_dim=vocab, num_layers=num_layers)
+
+        # self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        # self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        # self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)
+        self.root_mlp_i = get_nn(dim, dim)
+        self.root_mlp_j = get_nn(dim, dim)
+        self.root_mlp_k = get_nn(dim, dim)
+        self.rijk_weight = nn.Parameter(torch.empty(cpd_rank, dim, dim))
+        self.ai_r_nn = get_nn(dim, cpd_rank)
+        self.r_b_nn = get_nn(dim, cpd_rank)
+        self.r_c_nn = get_nn(dim, cpd_rank)
+        self.r_jk_nn = get_nn(dim, cpd_rank)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.src_nt_emb)
+        nn.init.xavier_uniform_(self.src_pt_emb)
+        nn.init.xavier_uniform_(self.rijk_weight)
 
     def get_params(
         self,
@@ -67,11 +134,7 @@ class NeuralQCFGD1LogParamTgtParser(NeuralQCFGD1TgtParser):
         # S->A
         roots = self.root_mlp_child(nt_emb)
         roots = roots.view(batch_size, self.nt_states, nt_num_nodes)
-        mask = (
-            torch.arange(nt_num_nodes, device=device)
-            .view(1, 1, -1)
-            .expand(batch_size, 1, -1)
-        )
+        mask = torch.arange(nt_num_nodes, device=device).view(1, 1, -1).expand(batch_size, 1, -1)
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
         roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
         roots = roots.view(batch_size, -1)
@@ -80,15 +143,9 @@ class NeuralQCFGD1LogParamTgtParser(NeuralQCFGD1TgtParser):
         # A->BC
         state_emb = torch.cat([nt_state_emb, pt_state_emb], 1)
         node_emb = nt_node_emb  # torch.cat([nt_node_emb, pt_node_emb], 1)
-        rule_head = self.ai_r_nn(
-            self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))
-        ).log_softmax(-1)
-        rule_left = (
-            self.r_b_nn(self.rule_mlp_left(state_emb)).transpose(1, 2).log_softmax(-1)
-        )
-        rule_right = (
-            self.r_c_nn(self.rule_mlp_right(state_emb)).transpose(1, 2).log_softmax(-1)
-        )
+        rule_head = self.ai_r_nn(self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))).softmax(-1)
+        rule_left = self.r_b_nn(self.rule_mlp_left(state_emb)).transpose(1, 2).softmax(-1)
+        rule_right = self.r_c_nn(self.rule_mlp_right(state_emb)).transpose(1, 2).softmax(-1)
 
         i = self.root_mlp_i(node_emb)
         j = self.root_mlp_j(node_emb)
@@ -115,11 +172,11 @@ class NeuralQCFGD1LogParamTgtParser(NeuralQCFGD1TgtParser):
             mask = mask.unsqueeze(1).expand(-1, self.cpd_rank, -1, -1, -1)
             rule_slr[~mask] = self.neg_huge
 
-        rule_slr = rule_slr.flatten(3).log_softmax(-1).view(rule_slr.shape).clone()
+        rule_slr = rule_slr.flatten(3).softmax(-1).view(rule_slr.shape).clone()
 
         mask = (is_multi & lhs_mask).unsqueeze(1)
         mask = mask.expand(-1, rule_slr.shape[1], -1)
-        rule_slr[~mask] = self.neg_huge
+        rule_slr[~mask] = 0
 
         # A->a
         terms = self.vocab_out(pt_emb).log_softmax(-1).clone()

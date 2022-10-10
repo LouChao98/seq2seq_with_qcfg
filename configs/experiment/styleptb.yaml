@@ -7,7 +7,7 @@ defaults:
   - override /datamodule: styleptb
   - override /model: styleptb
   - override /model/tree_encoder: treelstm
-  - override /model/decoder: qcfg
+  - override /model/decoder: nodecomp
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default

@@ -81,7 +81,7 @@ def reorder(func):
     return wrapper
 
 
-def process_param_for_marginal(item):
+def process_param_for_trace(item):
     if item is None:
         return item
     elif isinstance(item, torch.Tensor):
@@ -94,5 +94,5 @@ def process_param_for_marginal(item):
         else:
             return item
     elif isinstance(item, (list, tuple)):
-        return [process_param_for_marginal(i) for i in item]
+        return [process_param_for_trace(i) for i in item]
     raise NotImplementedError

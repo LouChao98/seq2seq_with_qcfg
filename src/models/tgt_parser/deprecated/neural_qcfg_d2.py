@@ -13,9 +13,7 @@ from .struct.pcfg import PCFG
 
 
 def get_nn(dim, cpd_rank):
-    return nn.Sequential(
-        nn.LeakyReLU(), nn.Linear(dim, cpd_rank)  # , nn.LayerNorm(cpd_rank)
-    )
+    return nn.Sequential(nn.LeakyReLU(), nn.Linear(dim, cpd_rank))  # , nn.LayerNorm(cpd_rank)
 
 
 class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
@@ -105,11 +103,7 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
         # S->A
         roots = self.root_mlp_child(nt_emb)
         roots = roots.view(batch_size, self.nt_states, nt_num_nodes)
-        mask = (
-            torch.arange(nt_num_nodes, device=device)
-            .view(1, 1, -1)
-            .expand(batch_size, 1, -1)
-        )
+        mask = torch.arange(nt_num_nodes, device=device).view(1, 1, -1).expand(batch_size, 1, -1)
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
         roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
         roots = roots.view(batch_size, -1)
@@ -118,17 +112,11 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
         # A->BC
         state_emb = torch.cat([nt_state_emb, pt_state_emb], 1)
         node_emb = nt_node_emb  # torch.cat([nt_node_emb, pt_node_emb], 1)
-        rule_head = self.ai_r_nn(
-            self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))
-        ).log_softmax(-1)
+        rule_head = self.ai_r_nn(self.rule_mlp_parent(nt_emb.view(batch_size, -1, self.dim))).log_softmax(-1)
 
         combined_emb = node_emb[:, :, None] + state_emb[:, None, :]
-        rule_left = (
-            self.r_b_nn(self.rule_mlp_left(combined_emb)).movedim(3, 1).log_softmax(-1)
-        )
-        rule_right = (
-            self.r_c_nn(self.rule_mlp_right(combined_emb)).movedim(3, 1).log_softmax(-1)
-        )
+        rule_left = self.r_b_nn(self.rule_mlp_left(combined_emb)).movedim(3, 1).log_softmax(-1)
+        rule_right = self.r_c_nn(self.rule_mlp_right(combined_emb)).movedim(3, 1).log_softmax(-1)
 
         i = self.root_mlp_i(node_emb)
         j = self.root_mlp_j(node_emb)
@@ -157,14 +145,10 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
 
         if self.rule_constraint_type > 0:
             if self.rule_constraint_type == 1:
-                mask = self.get_rules_mask1(
-                    batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
-                )
+                mask = self.get_rules_mask1(batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device)
             elif self.rule_constraint_type == 2:
                 raise NotImplementedError
-                mask = self.get_rules_mask2(
-                    batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
-                )
+                mask = self.get_rules_mask2(batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device)
             mask = mask.unsqueeze(1).expand(-1, self.cpd_rank, -1, -1, -1)
             rule_slr[~mask] = self.neg_huge
 
@@ -207,9 +191,7 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
                     )
                     for w in range(1, n)
                 ]
-                for batch_idx, (nt_spans_inst, possible_copy) in enumerate(
-                    zip(nt_spans, copy_position[1])
-                ):
+                for batch_idx, (nt_spans_inst, possible_copy) in enumerate(zip(nt_spans, copy_position[1])):
                     for i, (l, r, _) in enumerate(nt_spans_inst):
                         w = r - l - 1
                         t = None
@@ -241,15 +223,11 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
         }
         return params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes
 
-    def get_rules_mask1(
-        self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
-    ):
+    def get_rules_mask1(self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device):
         # A[a i]->B[a j] C[a k], a i must be the parent of a j and a k.
         # return 1 for not masked
         nt = nt_num_nodes
-        nt_node_mask = torch.ones(
-            batch_size, nt_num_nodes, nt_num_nodes, dtype=torch.bool
-        )
+        nt_node_mask = torch.ones(batch_size, nt_num_nodes, nt_num_nodes, dtype=torch.bool)
 
         def is_parent(parent, child):
             return child[0] >= parent[0] and child[1] <= parent[1]
@@ -263,9 +241,7 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
         node_mask = nt_node_mask.unsqueeze(3) * nt_node_mask.unsqueeze(2)
         return node_mask.view(batch_size, nt, nt, nt)
 
-    def get_rules_mask2(
-        self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device
-    ):
+    def get_rules_mask2(self, batch_size, nt_num_nodes, pt_num_nodes, nt_spans, pt_spans, device):
         # A[a i]->B[a j] C[a k], a i must be the DIRECT parent of a j and a k, j!=k.
         #   if a i has no child, a j/k = a i.
         nt = nt_num_nodes * self.nt_states
@@ -285,18 +261,10 @@ class NeuralQCFGD2TgtParser(NeuralQCFGTgtParser):
         nt_idx = slice(0, src_nt * node_nt)
         pt_idx = slice(src_nt * node_nt, src_nt * node_nt + src_pt * node_pt)
 
-        nt_ntnt = node_mask[:, nt_idx, nt_idx, nt_idx].view(
-            bsz, src_nt, node_nt, src_nt, node_nt, src_nt, node_nt
-        )
-        nt_ntpt = node_mask[:, nt_idx, nt_idx, pt_idx].view(
-            bsz, src_nt, node_nt, src_nt, node_nt, src_pt, node_pt
-        )
-        nt_ptnt = node_mask[:, nt_idx, pt_idx, nt_idx].view(
-            bsz, src_nt, node_nt, src_pt, node_pt, src_nt, node_nt
-        )
-        nt_ptpt = node_mask[:, nt_idx, pt_idx, pt_idx].view(
-            bsz, src_nt, node_nt, src_pt, node_pt, src_pt, node_pt
-        )
+        nt_ntnt = node_mask[:, nt_idx, nt_idx, nt_idx].view(bsz, src_nt, node_nt, src_nt, node_nt, src_nt, node_nt)
+        nt_ntpt = node_mask[:, nt_idx, nt_idx, pt_idx].view(bsz, src_nt, node_nt, src_nt, node_nt, src_pt, node_pt)
+        nt_ptnt = node_mask[:, nt_idx, pt_idx, nt_idx].view(bsz, src_nt, node_nt, src_pt, node_pt, src_nt, node_nt)
+        nt_ptpt = node_mask[:, nt_idx, pt_idx, pt_idx].view(bsz, src_nt, node_nt, src_pt, node_pt, src_pt, node_pt)
 
         def is_parent(parent, child):
             if child[0] >= parent[0] and child[1] <= parent[1]:

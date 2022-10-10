@@ -9,7 +9,7 @@ from torch import Tensor
 from torch.autograd import grad
 
 from ._fn import diagonal, diagonal_copy_, stripe
-from ._utils import checkpoint, process_param_for_marginal, reorder, weighted_random
+from ._utils import checkpoint, process_param_for_trace, reorder, weighted_random
 from .decomp_base import DecompBase
 
 _VOCAB, _COPY_NT, _COPY_PT = 0, 1, 2
@@ -54,7 +54,7 @@ class D2PCFG(DecompBase):
             torch.set_grad_enabled(True)
             cm = torch.inference_mode(False)
             cm.__enter__()
-            params = {k: process_param_for_marginal(v) for k, v in params.items()}
+            params = {k: process_param_for_trace(v) for k, v in params.items()}
         if not isinstance(lens, torch.Tensor):
             lens = torch.tensor(lens)
         assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
@@ -76,14 +76,10 @@ class D2PCFG(DecompBase):
         H = params["head"]  # (batch, NT, r), A[i] -> R
         # (batch, r, SRC, TGT_NT), R, j -> B
         # (batch, r, SRC, TGT_PT), R, j -> B
-        TLNT, TLPT = torch.split(
-            params["left"], (self.tgt_nt_states, self.tgt_pt_states), -1
-        )
+        TLNT, TLPT = torch.split(params["left"], (self.tgt_nt_states, self.tgt_pt_states), -1)
         # (batch, r, SRC, TGT_NT), R, k -> C
         # (batch, r, SRC, TGT_PT), R, k -> C
-        TRNT, TRPT = torch.split(
-            params["right"], (self.tgt_nt_states, self.tgt_pt_states), -1
-        )
+        TRNT, TRPT = torch.split(params["right"], (self.tgt_nt_states, self.tgt_pt_states), -1)
         R = H.shape[-1]
         H = H.view(batch, self.tgt_nt_states, nt_spans, R)
 
@@ -99,9 +95,7 @@ class D2PCFG(DecompBase):
         # ===== End =====
 
         if marginal:
-            span_indicator = terms.new_zeros(
-                batch, N, N, self.tgt_nt_states, nt_spans
-            ).requires_grad_()
+            span_indicator = terms.new_zeros(batch, N, N, self.tgt_nt_states, nt_spans).requires_grad_()
             span_indicator_running = span_indicator[:]
         else:
             span_indicator = None
@@ -112,16 +106,12 @@ class D2PCFG(DecompBase):
             indicator = span_indicator_running.diagonal(1, 1, 2).movedim(-1, 1)
             terms = terms + indicator
         left_term = tse.log_einsum(self.eq_tor, terms, TLPT, block_size=self.block_size)
-        right_term = tse.log_einsum(
-            self.eq_tor, terms, TRPT, block_size=self.block_size
-        )
+        right_term = tse.log_einsum(self.eq_tor, terms, TRPT, block_size=self.block_size)
         diagonal_copy_(left_s, left_term, w=1)
         diagonal_copy_(right_s, right_term, w=1)
 
         # prepare length, same as the batch_size in PackedSequence
-        n_at_position = (
-            torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)
-        ).sum(1)
+        n_at_position = (torch.arange(2, N + 1).unsqueeze(1) <= lens.cpu().unsqueeze(0)).sum(1)
 
         # w: span width
         final = []
@@ -162,19 +152,14 @@ class D2PCFG(DecompBase):
                 if marginal:
                     span_indicator_running = span_indicator_running[:unfinished]
 
-                left_x = tse.log_einsum(
-                    self.eq_tor, x, TLNT, block_size=self.block_size
-                )
-                right_x = tse.log_einsum(
-                    self.eq_tor, x, TRNT, block_size=self.block_size
-                )
+                left_x = tse.log_einsum(self.eq_tor, x, TLNT, block_size=self.block_size)
+                right_x = tse.log_einsum(self.eq_tor, x, TRNT, block_size=self.block_size)
                 diagonal_copy_(left_s, left_x, w)
                 diagonal_copy_(right_s, right_x, w)
             if unfinished == 0:
                 break
 
         final = torch.cat(final, dim=0)
-
         final = final.squeeze(1) + root
         logZ = final.logsumexp((-2, -1))
         if decode:
@@ -241,9 +226,7 @@ class D2PCFG(DecompBase):
                 max_length=max_length,
             )
             sample_scores = [
-                (sample, type_, score)
-                for sample, type_, score in zip(samples, types, scores)
-                if len(sample) > 0
+                (sample, type_, score) for sample, type_, score in zip(samples, types, scores) if len(sample) > 0
             ]  # len=0 when max_actions is reached but no PT rules applied
             if len(sample_scores) == 0:
                 sample_scores = ([0, 0], [TokenType.VOCAB, TokenType.VOCAB], 0)
@@ -267,7 +250,7 @@ class D2PCFG(DecompBase):
         num_samples=1,
         max_length=100,
         max_actions=100,
-        UNK=1,
+        unk=1,
     ):
         NT = rules_head.shape[0]
         COPY_NT = nt_states - 1
@@ -284,11 +267,7 @@ class D2PCFG(DecompBase):
             preterminals: List[int] = []
             is_copy_pt: List[bool] = []
 
-            while (
-                len(nonterminals) > 0
-                and len(preterminals) < max_length
-                and actions < max_actions
-            ):
+            while len(nonterminals) > 0 and len(preterminals) < max_length and actions < max_actions:
                 s = nonterminals.pop()
                 if s < NT:
                     nt_state, nt_node = divmod(s, nt_num_nodes)
@@ -309,9 +288,7 @@ class D2PCFG(DecompBase):
                     #     + rules_right[r, k, right]
                     #     + rules_src[r, nt_node, jk]
                     # )
-                    nonterminals.extend(
-                        [right * nt_num_nodes + k, left * nt_num_nodes + j]
-                    )
+                    nonterminals.extend([right * nt_num_nodes + k, left * nt_num_nodes + j])
                 else:
                     preterminals.append(s - NT)
                     is_copy_pt.append(False)
@@ -331,7 +308,7 @@ class D2PCFG(DecompBase):
                     else:
                         sample = weighted_random(terms[s])
                         # score += terms[s, sample]
-                        if use_copy and sample == UNK:
+                        if use_copy and sample == unk:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
                             terminals.append(src_node)
@@ -357,9 +334,7 @@ class D2PCFG(DecompBase):
             params["slr"].exp(),
         )
         shape = rule.shape
-        rule = rule.reshape(
-            shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]
-        ).log()
+        rule = rule.reshape(shape[0], shape[1] * shape[2], shape[3] * shape[4], shape[5] * shape[6]).log()
         return {"term": params["term"], "rule": rule, "root": params["root"]}
 
 
@@ -381,19 +356,11 @@ if __name__ == "__main__":
         .view(B, r, SRC_NT, SRC_NT, SRC_NT)
     )
     params = {
-        "term": torch.randn(B, N, T, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
+        "term": torch.randn(B, N, T, device=device).log_softmax(-1).requires_grad_(True),
         "root": torch.randn(B, NT, device=device).log_softmax(-1).requires_grad_(True),
-        "head": torch.randn(B, NT, r, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
-        "left": torch.randn(B, r, SRC_NT, TGT_NT + TGT_PT, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
-        "right": torch.randn(B, r, SRC_NT, TGT_NT + TGT_PT, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
+        "head": torch.randn(B, NT, r, device=device).log_softmax(-1).requires_grad_(True),
+        "left": torch.randn(B, r, SRC_NT, TGT_NT + TGT_PT, device=device).log_softmax(-1).requires_grad_(True),
+        "right": torch.randn(B, r, SRC_NT, TGT_NT + TGT_PT, device=device).log_softmax(-1).requires_grad_(True),
         "slr": slr,
     }
     lens = torch.tensor([N - 4, N - 2], dtype=torch.long, device=device)

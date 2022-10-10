@@ -52,8 +52,8 @@ class SemanticParsingDataModule(_DataModule):
             self.vocab_pair: Optional[VocabularyPair] = None
             self.use_transformer_tokenizer = transformer_tokenizer_name is not None
             if transformer_tokenizer_name is not None:
-                self.transformer_tokenizer: PreTrainedTokenizer = (
-                    AutoTokenizer.from_pretrained(transformer_tokenizer_name)
+                self.transformer_tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+                    transformer_tokenizer_name
                 )
 
             self.data_train: Optional[Dataset] = None
@@ -65,18 +65,22 @@ class SemanticParsingDataModule(_DataModule):
         data_val = self.read_file(self.hparams.dev_file)
         data_test = self.read_file(self.hparams.test_file)
 
+        _num_orig_train = len(data_train)
         data_train = [
             inst
             for inst in data_train
-            if len(inst["src"]) <= self.hparams.max_src_len
-            and len(inst["tgt"]) <= self.hparams.max_tgt_len
+            if len(inst["src"]) <= self.hparams.max_src_len and len(inst["tgt"]) <= self.hparams.max_tgt_len
         ]
+        if (d := _num_orig_train - len(data_train)) > 0:
+            logger.warning(f"Dropping {d} samples in TrainingSet.")
+        _num_orig_Val = len(data_val)
         data_val = [
             inst
             for inst in data_val
-            if len(inst["src"]) <= self.hparams.max_src_len
-            and len(inst["tgt"]) <= self.hparams.max_tgt_len
+            if len(inst["src"]) <= self.hparams.max_src_len and len(inst["tgt"]) <= self.hparams.max_tgt_len
         ]
+        if (d := _num_orig_Val - len(data_val)) > 0:
+            logger.warning(f"Dropping {d} samples in ValSet.")
 
         data_train = self.process_all_copy(data_train)
         data_val = self.process_all_copy(data_val)
@@ -88,11 +92,6 @@ class SemanticParsingDataModule(_DataModule):
         self.data_train = self.apply_vocab(data_train)
         self.data_val = self.apply_vocab(data_val)
         self.data_test = self.apply_vocab(data_test)
-
-        if self.use_transformer_tokenizer:
-            self.data_train = self.apply_transformer_tokenizer(self.data_train)
-            self.data_val = self.apply_transformer_tokenizer(self.data_val)
-            self.data_test = self.apply_transformer_tokenizer(self.data_test)
 
     def read_file(self, fpath):
         with open(fpath) as f:
@@ -111,9 +110,7 @@ class SemanticParsingDataModule(_DataModule):
             # 1. we can recover them according to the grammar
             # 2. they do not tell much about spans
             # remove ', in tokens: we can recover them
-            program = [
-                re.sub(r"[',]", "", item) for item in program if item not in ("(", ")")
-            ]
+            program = [re.sub(r"[',]", "", item) for item in program if item not in ("(", ")")]
 
             assert len(program) > 1 and len(question) > 1
             inst = {
@@ -269,12 +266,8 @@ class SemanticParsingDataModule(_DataModule):
         tgt_lens = [len(inst["tgt_ids"]) for inst in data]
         max_src_len = max(src_lens)
         max_tgt_len = max(tgt_lens)
-        batched_src_ids = torch.full(
-            (len(tgt_lens), max_src_len), self.src_vocab.pad_token_id
-        )
-        batched_tgt_ids = torch.full(
-            (len(tgt_lens), max_tgt_len), self.tgt_vocab.pad_token_id
-        )
+        batched_src_ids = torch.full((len(tgt_lens), max_src_len), self.src_vocab.pad_token_id)
+        batched_tgt_ids = torch.full((len(tgt_lens), max_tgt_len), self.tgt_vocab.pad_token_id)
         for i, inst in enumerate(data):
             s, t = inst["src_ids"], inst["tgt_ids"]
             batched_src_ids[i, : len(s)] = torch.tensor(s)
@@ -291,9 +284,7 @@ class SemanticParsingDataModule(_DataModule):
 
         copy_token = None
         if "copy_token" in data[0]:
-            copy_token = torch.zeros(
-                len(src), max(src_lens), max(tgt_lens), dtype=torch.bool
-            )
+            copy_token = torch.zeros(len(src), max(src_lens), max(tgt_lens), dtype=torch.bool)
             for i, inst in enumerate(data):
                 inst = torch.from_numpy(inst["copy_token"])
                 copy_token[i, : inst.shape[0], : inst.shape[1]] = inst
@@ -313,9 +304,7 @@ class SemanticParsingDataModule(_DataModule):
                 return_tensors="pt",
             )
             offset_mapping_raw = transformer_inp.pop("offset_mapping")
-            offset_mapping = torch.zeros(
-                transformer_inp["input_ids"].shape, dtype=np.int64
-            )
+            offset_mapping = torch.zeros(transformer_inp["input_ids"].shape, dtype=torch.long)
             for i, mapping in enumerate(offset_mapping_raw):
                 cursor = 0
                 for j, item in enumerate(mapping):

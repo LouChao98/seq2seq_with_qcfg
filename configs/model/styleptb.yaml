@@ -2,7 +2,7 @@ defaults:
   - encoder: yzhang_lstm
   - parser: pcfg
   - tree_encoder: treelstm
-  - decoder: qcfg
+  - decoder: nodecomp
   - test_metric: bleu1234
 
 _target_: src.models.general_seq2seq.GeneralSeq2SeqModule

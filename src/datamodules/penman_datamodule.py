@@ -53,8 +53,8 @@ class PenmanDataModule(_DataModule):
             self.vocab_pair: Optional[VocabularyPair] = None
             self.use_transformer_tokenizer = transformer_tokenizer_name is not None
             if transformer_tokenizer_name is not None:
-                self.transformer_tokenizer: PreTrainedTokenizer = (
-                    AutoTokenizer.from_pretrained(transformer_tokenizer_name)
+                self.transformer_tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+                    transformer_tokenizer_name
                 )
 
             self.data_train: Optional[Dataset] = None
@@ -66,18 +66,22 @@ class PenmanDataModule(_DataModule):
         data_val = self.read_file(self.hparams.dev_file)
         data_test = self.read_file(self.hparams.test_file)
 
+        _num_orig_train = len(data_train)
         data_train = [
             inst
             for inst in data_train
-            if len(inst["src"]) <= self.hparams.max_src_len
-            and len(inst["tgt"]) <= self.hparams.max_tgt_len
+            if len(inst["src"]) <= self.hparams.max_src_len and len(inst["tgt"]) <= self.hparams.max_tgt_len
         ]
+        if (d := _num_orig_train - len(data_train)) > 0:
+            logger.warning(f"Dropping {d} samples in TrainingSet.")
+        _num_orig_Val = len(data_val)
         data_val = [
             inst
             for inst in data_val
-            if len(inst["src"]) <= self.hparams.max_src_len
-            and len(inst["tgt"]) <= self.hparams.max_tgt_len
+            if len(inst["src"]) <= self.hparams.max_src_len and len(inst["tgt"]) <= self.hparams.max_tgt_len
         ]
+        if (d := _num_orig_Val - len(data_val)) > 0:
+            logger.warning(f"Dropping {d} samples in ValSet.")
 
         data_train = self.process_all_copy(data_train)
         data_val = self.process_all_copy(data_val)
@@ -90,18 +94,11 @@ class PenmanDataModule(_DataModule):
         self.data_val = self.apply_vocab(data_val)
         self.data_test = self.apply_vocab(data_test)
 
-        if self.use_transformer_tokenizer:
-            self.data_train = self.apply_transformer_tokenizer(self.data_train)
-            self.data_val = self.apply_transformer_tokenizer(self.data_val)
-            self.data_test = self.apply_transformer_tokenizer(self.data_test)
-
     def read_file(self, fpath):
         data = load_and_serialize(fpath, False)
         reentry_pattern = re.compile(r"(.*)_(\d+)")
         converted = []
-        for di, (graph, serial, sent) in enumerate(
-            zip(data["graphs"], data["serials"], data["sents"])
-        ):
+        for di, (graph, serial, sent) in enumerate(zip(data["graphs"], data["serials"], data["sents"])):
             processed_serial = []
             spans = []
             bracket_stack = []
@@ -116,19 +113,11 @@ class PenmanDataModule(_DataModule):
                         spans.append((left_bracket, len(processed_serial)))
                     if left_bracket > 0:
                         spans.append((left_bracket - 1, len(processed_serial)))
-                    if (
-                        len(processed_serial) > 2
-                        and tokens[i - 2][0] == ":"
-                        and tokens[i - 1] != "("
-                    ):
+                    if len(processed_serial) > 2 and tokens[i - 2][0] == ":" and tokens[i - 1] != "(":
                         # detect constant list such as op lists
                         spans.append((len(processed_serial) - 2, len(processed_serial)))
                 elif c[0] == ":":  # rel
-                    if (
-                        len(processed_serial) > 2
-                        and tokens[i - 2][0] == ":"
-                        and tokens[i - 1] != "("
-                    ):
+                    if len(processed_serial) > 2 and tokens[i - 2][0] == ":" and tokens[i - 1] != "(":
                         # detect constant list such as op lists
                         spans.append((len(processed_serial) - 2, len(processed_serial)))
                     processed_serial.append(c)
@@ -169,9 +158,7 @@ class PenmanDataModule(_DataModule):
             span_mask[left + 1 : right, right + 1 :] = True
         masks = []
         for w in range(1, length):
-            masks.append(
-                torch.tensor([span_mask[i, i + w + 1] for i in range(length - w)])
-            )
+            masks.append(torch.tensor([span_mask[i, i + w + 1] for i in range(length - w)]))
         return masks
 
     def process_all_copy(self, data):
@@ -321,12 +308,8 @@ class PenmanDataModule(_DataModule):
         tgt_lens = [len(inst["tgt_ids"]) for inst in data]
         max_src_len = max(src_lens)
         max_tgt_len = max(tgt_lens)
-        batched_src_ids = torch.full(
-            (len(tgt_lens), max_src_len), self.src_vocab.pad_token_id
-        )
-        batched_tgt_ids = torch.full(
-            (len(tgt_lens), max_tgt_len), self.tgt_vocab.pad_token_id
-        )
+        batched_src_ids = torch.full((len(tgt_lens), max_src_len), self.src_vocab.pad_token_id)
+        batched_tgt_ids = torch.full((len(tgt_lens), max_tgt_len), self.tgt_vocab.pad_token_id)
         for i, inst in enumerate(data):
             s, t = inst["src_ids"], inst["tgt_ids"]
             batched_src_ids[i, : len(s)] = torch.tensor(s)
@@ -357,8 +340,8 @@ class PenmanDataModule(_DataModule):
         for inst, tgt_len in zip(data, tgt_lens):
             pt_neq_constraint = torch.zeros(tgt_len, dtype=torch.float32)
             for groups in inst["var"].values():
-                if len(groups) == 1:
-                    continue
+                # if len(groups) == 1:
+                #     continue
                 for vs in groups.values():
                     # pt_neq_constraint[vs[0]] = 1.0
                     pt_neq_constraint[random.choice(vs)] = 1.0
@@ -369,15 +352,9 @@ class PenmanDataModule(_DataModule):
         # NOTE only consider at most 5 groups each step
         pt_eq_constraints = []
         for inst, tgt_len in zip(data, tgt_lens):
-            constraints_for_groups = [
-                l for v in inst["var"].values() for l in v.values() if len(l) > 1
-            ]
-            constraints_for_groups = random.sample(
-                constraints_for_groups, min(3, len(constraints_for_groups))
-            )
-            pt_eq_constraints.append(
-                [torch.tensor(item) for item in constraints_for_groups]
-            )
+            constraints_for_groups = [l for v in inst["var"].values() for l in v.values() if len(l) > 1]
+            constraints_for_groups = random.sample(constraints_for_groups, min(3, len(constraints_for_groups)))
+            pt_eq_constraints.append([torch.tensor(item) for item in constraints_for_groups])
 
         batched = {}
         batched["id"] = torch.tensor([inst["id"] for inst in data])
@@ -395,9 +372,7 @@ class PenmanDataModule(_DataModule):
 
         copy_token = None
         if "copy_token" in data[0]:
-            copy_token = torch.zeros(
-                len(src), max(src_lens), max(tgt_lens), dtype=torch.bool
-            )
+            copy_token = torch.zeros(len(src), max(src_lens), max(tgt_lens), dtype=torch.bool)
             for i, inst in enumerate(data):
                 inst = torch.from_numpy(inst["copy_token"])
                 copy_token[i, : inst.shape[0], : inst.shape[1]] = inst
@@ -417,9 +392,7 @@ class PenmanDataModule(_DataModule):
                 return_tensors="pt",
             )
             offset_mapping_raw = transformer_inp.pop("offset_mapping")
-            offset_mapping = torch.zeros(
-                transformer_inp["input_ids"].shape, dtype=np.int64
-            )
+            offset_mapping = torch.zeros(transformer_inp["input_ids"].shape, dtype=torch.long)
             for i, mapping in enumerate(offset_mapping_raw):
                 cursor = 0
                 for j, item in enumerate(mapping):

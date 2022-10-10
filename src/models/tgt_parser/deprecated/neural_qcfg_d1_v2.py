@@ -67,9 +67,7 @@ class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
         self.r_emb = nn.Parameter(torch.empty(cpd_rank, dim))
 
         self.root_mlp_child = nn.Linear(dim, 1, bias=False)
-        self.vocab_out = MultiResidualLayer(
-            dim, dim, out_dim=vocab, num_layers=num_layers
-        )
+        self.vocab_out = MultiResidualLayer(dim, dim, out_dim=vocab, num_layers=num_layers)
 
         self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
@@ -139,11 +137,7 @@ class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
         # S->A
         roots = self.root_mlp_child(nt_emb)
         roots = roots.view(batch_size, self.nt_states, nt_num_nodes)
-        mask = (
-            torch.arange(nt_num_nodes, device=device)
-            .view(1, 1, -1)
-            .expand(batch_size, 1, -1)
-        )
+        mask = torch.arange(nt_num_nodes, device=device).view(1, 1, -1).expand(batch_size, 1, -1)
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
         roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
         roots = roots.view(batch_size, -1)
@@ -157,24 +151,16 @@ class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
         state_emb = torch.cat([nt_state_emb, pt_state_emb], 1)
 
         rule_head = (
-            torch.einsum(
-                "baix,xy,ry->bair", self.act(nt_emb), self.ai_r_weight, self.r_emb
-            )
+            torch.einsum("baix,xy,ry->bair", self.act(nt_emb), self.ai_r_weight, self.r_emb)
             .softmax(-1)
             .view(batch_size, -1, self.cpd_rank)
         )
-        rule_left = torch.einsum(
-            "rx,xy,bny->brn", self.r_emb, self.ri_b_weight, state_emb
-        ).softmax(-1)
-        rule_right = torch.einsum(
-            "rx,xy,bny->brn", self.r_emb, self.ri_c_weight, state_emb
-        ).softmax(-1)
+        rule_left = torch.einsum("rx,xy,bny->brn", self.r_emb, self.ri_b_weight, state_emb).softmax(-1)
+        rule_right = torch.einsum("rx,xy,bny->brn", self.r_emb, self.ri_c_weight, state_emb).softmax(-1)
 
         ri = self.act(self.r_emb[None, :, None] + i.unsqueeze(1))
         jk = self.act(j.unsqueeze(2) + k.unsqueeze(1))
-        rule_slr = torch.einsum(
-            "brix,xy,bjky->brijk", ri, self.ri_jk_weight, jk
-        ).clone()
+        rule_slr = torch.einsum("brix,xy,bjky->brijk", ri, self.ri_jk_weight, jk).clone()
         num_nodes = nt_num_nodes  # + pt_num_nodes
 
         # fmt: off
@@ -196,11 +182,7 @@ class NeuralQCFGD1V2TgtParser(NeuralQCFGD1TgtParser):
             mask = mask.unsqueeze(1).expand(-1, self.cpd_rank, -1, -1, -1)
             rule_slr[~mask] = 0
 
-        rule_slr = (
-            rule_slr.flatten(3)
-            .softmax(-1)
-            .view(batch_size, self.cpd_rank, num_nodes, num_nodes, num_nodes)
-        )
+        rule_slr = rule_slr.flatten(3).softmax(-1).view(batch_size, self.cpd_rank, num_nodes, num_nodes, num_nodes)
 
         # A->a
         terms = self.vocab_out(pt_emb).log_softmax(-1).clone()

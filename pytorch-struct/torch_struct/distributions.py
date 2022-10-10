@@ -2,22 +2,23 @@ import torch
 from torch.distributions import constraints
 from torch.distributions.distribution import Distribution
 from torch.distributions.utils import lazy_property
-from .linearchain import LinearChain
-from .cky import CKY
-from .semimarkov import SemiMarkov
+
 from .alignment import Alignment
-from .deptree import DepTree, deptree_nonproj, deptree_part
+from .cky import CKY
 from .cky_crf import CKY_CRF
+from .deptree import DepTree, deptree_nonproj, deptree_part
+from .linearchain import LinearChain
+from .semimarkov import SemiMarkov
 from .semirings import (
+    CrossEntropySemiring,
+    EntropySemiring,
+    GumbelCRFSemiring,
+    KLDivergenceSemiring,
+    KMaxSemiring,
     LogSemiring,
     MaxSemiring,
-    EntropySemiring,
-    CrossEntropySemiring,
-    KLDivergenceSemiring,
     MultiSampledSemiring,
-    KMaxSemiring,
     StdSemiring,
-    GumbelCRFSemiring,
 )
 
 
@@ -39,7 +40,7 @@ class StructDistribution(Distribution):
     """
     arg_constraints = {
         "log_potentials": constraints.real,
-        "lengths": constraints.nonnegative_integer
+        "lengths": constraints.nonnegative_integer,
     }
 
     def __init__(self, log_potentials, lengths=None, args={}, validate_args=False):
@@ -48,7 +49,11 @@ class StructDistribution(Distribution):
         self.log_potentials = log_potentials
         self.lengths = lengths
         self.args = args
-        super().__init__(batch_shape=batch_shape, event_shape=event_shape, validate_args=validate_args)
+        super().__init__(
+            batch_shape=batch_shape,
+            event_shape=event_shape,
+            validate_args=validate_args,
+        )
 
     def _new(self, *args, **kwargs):
         return self._param.new(*args, **kwargs)
@@ -96,9 +101,7 @@ class StructDistribution(Distribution):
             cross entropy (*batch_shape*)
         """
 
-        return self._struct(CrossEntropySemiring).sum(
-            [self.log_potentials, other.log_potentials], self.lengths
-        )
+        return self._struct(CrossEntropySemiring).sum([self.log_potentials, other.log_potentials], self.lengths)
 
     def kl(self, other):
         """
@@ -110,9 +113,7 @@ class StructDistribution(Distribution):
         Returns:
             cross entropy (*batch_shape*)
         """
-        return self._struct(KLDivergenceSemiring).sum(
-            [self.log_potentials, other.log_potentials], self.lengths
-        )
+        return self._struct(KLDivergenceSemiring).sum([self.log_potentials, other.log_potentials], self.lengths)
 
     @lazy_property
     def max(self):
@@ -145,9 +146,7 @@ class StructDistribution(Distribution):
             kmax (*k x batch_shape*)
         """
         with torch.enable_grad():
-            return self._struct(KMaxSemiring(k)).sum(
-                self.log_potentials, self.lengths, _raw=True
-            )
+            return self._struct(KMaxSemiring(k)).sum(self.log_potentials, self.lengths, _raw=True)
 
     def topk(self, k):
         r"""
@@ -160,9 +159,7 @@ class StructDistribution(Distribution):
             kmax (*k x batch_shape x event_shape*)
         """
         with torch.enable_grad():
-            return self._struct(KMaxSemiring(k)).marginals(
-                self.log_potentials, self.lengths, _raw=True
-            )
+            return self._struct(KMaxSemiring(k)).marginals(self.log_potentials, self.lengths, _raw=True)
 
     @lazy_property
     def mode(self):
@@ -191,9 +188,7 @@ class StructDistribution(Distribution):
 
     def gumbel_crf(self, temperature=1.0):
         with torch.enable_grad():
-            st_gumbel = self._struct(GumbelCRFSemiring(temperature)).marginals(
-                self.log_potentials, self.lengths
-            )
+            st_gumbel = self._struct(GumbelCRFSemiring(temperature)).marginals(self.log_potentials, self.lengths)
             return st_gumbel
 
     # @constraints.dependent_property
@@ -224,9 +219,7 @@ class StructDistribution(Distribution):
         samples = []
         for k in range(nsamples):
             if k % 10 == 0:
-                sample = self._struct(MultiSampledSemiring).marginals(
-                    self.log_potentials, lengths=self.lengths
-                )
+                sample = self._struct(MultiSampledSemiring).marginals(self.log_potentials, lengths=self.lengths)
                 sample = sample.detach()
             tmp_sample = MultiSampledSemiring.to_discrete(sample, (k % 10) + 1)
             samples.append(tmp_sample)
@@ -303,18 +296,23 @@ class AlignmentCRF(StructDistribution):
         "log_potentials": constraints.real,
         "local": constraints.boolean,
         "max_gap": constraints.nonnegative_integer,
-        "lengths": constraints.nonnegative_integer
+        "lengths": constraints.nonnegative_integer,
     }
 
-    def __init__(self, log_potentials, local=False, lengths=None, max_gap=None, validate_args=False):
+    def __init__(
+        self,
+        log_potentials,
+        local=False,
+        lengths=None,
+        max_gap=None,
+        validate_args=False,
+    ):
         self.local = local
         self.max_gap = max_gap
         super().__init__(log_potentials, lengths, validate_args=validate_args)
 
     def _struct(self, sr=None):
-        return self.struct(
-            sr if sr is not None else LogSemiring, self.local, max_gap=self.max_gap
-        )
+        return self.struct(sr if sr is not None else LogSemiring, self.local, max_gap=self.max_gap)
 
 
 class HMM(StructDistribution):
@@ -334,7 +332,15 @@ class HMM(StructDistribution):
     Implemented as a special case of linear chain CRF.
     """
 
-    def __init__(self, transition, emission, init, observations, lengths=None, validate_args=False):
+    def __init__(
+        self,
+        transition,
+        emission,
+        init,
+        observations,
+        lengths=None,
+        validate_args=False,
+    ):
         log_potentials = HMM.struct.hmm(transition, emission, init, observations)
         super().__init__(log_potentials, lengths, validate_args=validate_args)
 
@@ -452,8 +458,20 @@ class SentCFG(StructDistribution):
         self.log_potentials = log_potentials
         self.lengths = lengths
         super(StructDistribution, self).__init__(
-            batch_shape=batch_shape, event_shape=event_shape, validate_args=validate_args
+            batch_shape=batch_shape,
+            event_shape=event_shape,
+            validate_args=validate_args,
         )
+
+    @classmethod
+    def from_dict(cls, params, lengths=None):
+        _t, _r, _ro = params["term"], params["rule"], params["root"]
+        _c, _l, _a = (
+            params.get("constraint"),
+            params.get("lse"),
+            params.get("add"),
+        )
+        return cls((_t, _r, _ro, _c, _l, _a), lengths)
 
 
 class NonProjectiveDependencyCRF(StructDistribution):
@@ -478,11 +496,16 @@ class NonProjectiveDependencyCRF(StructDistribution):
 
     """
 
-    arg_constraints = {
-        "log_potentials": constraints.real
-    }
+    arg_constraints = {"log_potentials": constraints.real}
 
-    def __init__(self, log_potentials, lengths=None, args={}, multiroot=False, validate_args=False):
+    def __init__(
+        self,
+        log_potentials,
+        lengths=None,
+        args={},
+        multiroot=False,
+        validate_args=False,
+    ):
         super(NonProjectiveDependencyCRF, self).__init__(log_potentials, lengths, args, validate_args=validate_args)
         self.multiroot = multiroot
 

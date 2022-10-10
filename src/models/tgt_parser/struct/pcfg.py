@@ -8,7 +8,7 @@ from numba import jit
 from torch import Tensor
 from torch_struct import SentCFG
 
-from ._utils import process_param_for_marginal, weighted_random, weighted_random_v2
+from ._utils import process_param_for_trace, weighted_random, weighted_random_v2
 
 log = logging.getLogger(__file__)
 
@@ -53,7 +53,7 @@ class PCFG:
             torch.set_grad_enabled(True)
             cm = torch.inference_mode(False)
             cm.__enter__()
-            params = [process_param_for_marginal(item) for item in params]
+            params = [process_param_for_trace(item) for item in params]
         try:  # this try will not catch anything. just use finally.
             dist = SentCFG(params, lens)
             if marginal:
@@ -147,7 +147,7 @@ class PCFG:
         num_samples=1,
         max_length=100,
         max_actions=100,
-        UNK=1,
+        unk=1,
     ):
         # Kim's impl derive the rightmost NT first. But I change it to left first.
         # My order (LL) should be more nature to combine with LM, as the generation order
@@ -168,17 +168,13 @@ class PCFG:
 
         for i in range(num_samples):
             try:
-                sample = weighted_random(roots)
+                sample = weighted_random_v2(roots)
                 nonterminals: List[int] = [sample]
                 preterminals: List[int] = []
                 is_copy_pt: List[bool] = []
                 actions = 0
 
-                while (
-                    len(nonterminals) > 0
-                    and len(preterminals) < max_length
-                    and actions < max_actions
-                ):
+                while len(nonterminals) > 0 and len(preterminals) < max_length and actions < max_actions:
                     s = nonterminals.pop()  # get the last element
                     if s < NT:
                         if use_copy:
@@ -199,9 +195,7 @@ class PCFG:
             except Exception:
                 status[i] = _SONMASK
 
-            if actions == max_actions or (
-                len(preterminals) == max_length and len(nonterminals) > 0
-            ):
+            if actions == max_actions or (len(preterminals) == max_length and len(nonterminals) > 0):
                 status[i] = _REACHLIMIT
 
             try:
@@ -219,7 +213,7 @@ class PCFG:
                             terminal_type.append(_COPY_PT)
                         else:
                             sample = weighted_random_v2(terms[s])
-                            if use_copy and sample == UNK:
+                            if use_copy and sample == unk:
                                 # force <unk> tokens to copy
                                 src_node = s % pt_num_nodes
                                 terminals.append(src_node)
@@ -247,7 +241,7 @@ class PCFG:
         num_samples=1,
         max_length=100,
         max_actions=100,
-        UNK=1,
+        unk=1,
     ):
         # Kim's impl derive the rightmost NT first. But I change it to left first.
         # My order (LL) should be more nature to combine with LM, as the generation order
@@ -277,11 +271,7 @@ class PCFG:
             preterminals: List[int] = []
             is_copy_pt: List[bool] = []
 
-            while (
-                len(nonterminals) > 0
-                and len(preterminals) < max_length
-                and actions < max_actions
-            ):
+            while len(nonterminals) > 0 and len(preterminals) < max_length and actions < max_actions:
                 s = nonterminals.pop()  # get the last element
                 if s < NT:
                     if use_copy:
@@ -317,7 +307,7 @@ class PCFG:
                         sample = weighted_random(terms[s])
                         trajectory.append(("t", sample))
                         # score += terms[s, sample]
-                        if use_copy and sample == UNK:
+                        if use_copy and sample == unk:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
                             terminals.append(src_node)
@@ -345,7 +335,7 @@ class PCFG:
         num_samples=1,
         max_length=100,
         max_actions=100,
-        UNK=1,
+        unk=1,
     ):
         NT = rules.shape[0]
         PT = terms.shape[0]
@@ -364,11 +354,7 @@ class PCFG:
             preterminals: List[int] = []
             is_copy_pt: List[bool] = []
 
-            while (
-                len(nonterminals) > 0
-                and len(preterminals) < max_length
-                and actions < max_actions
-            ):
+            while len(nonterminals) > 0 and len(preterminals) < max_length and actions < max_actions:
                 s = nonterminals.pop()  # get the last element
                 if s < NT:
                     if use_copy:
@@ -403,7 +389,7 @@ class PCFG:
                         terminal_type.append(_COPY_PT)
                     else:
                         sample = weighted_random(terms[s])
-                        if use_copy and sample == UNK:
+                        if use_copy and sample == unk:
                             # force <unk> tokens to copy
                             src_node = s % pt_num_nodes
                             terminals.append(src_node)
@@ -459,9 +445,7 @@ if __name__ == "__main__":
     B, N, T, NT = 2, 5, 3, 7
     device = "cpu"
     params = {
-        "term": torch.randn(B, N, T, device=device)
-        .log_softmax(-1)
-        .requires_grad_(True),
+        "term": torch.randn(B, N, T, device=device).log_softmax(-1).requires_grad_(True),
         "root": torch.randn(B, NT, device=device).log_softmax(-1).requires_grad_(True),
         "rule": torch.randn(B, NT, (NT + T) ** 2, device=device)
         .log_softmax(-1)
@@ -477,7 +461,5 @@ if __name__ == "__main__":
 
     import torch_struct
 
-    samples = dist._struct(torch_struct.SampledSemiring).marginals(
-        dist.log_potentials, lengths=dist.lengths
-    )
+    samples = dist._struct(torch_struct.SampledSemiring).marginals(dist.log_potentials, lengths=dist.lengths)
     print(samples[-1].nonzero())

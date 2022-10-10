@@ -4,12 +4,12 @@ from torch import Tensor
 from torch.autograd import grad
 
 from ._fn import diagonal, diagonal_copy_, stripe
-from ._utils import checkpoint, process_param_for_marginal
+from ._utils import checkpoint, process_param_for_trace
+from .decomp1 import Decomp1
 from .pcfg import PCFG
-from .type1 import DecompType1
 
 
-class PCFGRandomizedDP(DecompType1):
+class PCFGRandomizedDP(Decomp1):
     """This only implement inside, marginal and decode.
     For sampling, use naive PCFG."""
 
@@ -40,7 +40,7 @@ class PCFGRandomizedDP(DecompType1):
             torch.set_grad_enabled(True)
             cm = torch.inference_mode(False)
             cm.__enter__()
-            params = {k: process_param_for_marginal(v) for k, v in params.items()}
+            params = {k: process_param_for_trace(v) for k, v in params.items()}
 
         terms, rules, roots = params["term"], params["rule"], params["root"]
         constraint = params.get("constraint")
@@ -193,11 +193,7 @@ def XYz(Y: Tensor, Y_ind: Tensor, z: Tensor, rule: Tensor):
     b, n, _, nt = Y.shape
     t = z.shape[-1]
     Y = Y[:, :, -1, :, None]
-    Y_ind = (
-        Y_ind[:, :, -1]
-        .view(b, n, 1, -1, 1)
-        .expand(-1, -1, rule.shape[1], -1, rule.shape[3])
-    )
+    Y_ind = Y_ind[:, :, -1].view(b, n, 1, -1, 1).expand(-1, -1, rule.shape[1], -1, rule.shape[3])
     rule = rule.unsqueeze(1).expand(-1, n, -1, -1, -1)
     rule = rule.gather(3, Y_ind).flatten(3)
     b_n_yz = (Y + z).reshape(b, n, nt * t)
@@ -210,11 +206,7 @@ def XyZ(y: Tensor, Z: Tensor, Z_ind: Tensor, rule: Tensor):
     b, n, _, nt = Z.shape
     t = y.shape[-2]
     Z = Z[:, :, 0, None, :]
-    Z_ind = (
-        Z_ind[:, :, 0]
-        .view(b, n, 1, 1, -1)
-        .expand(-1, -1, rule.shape[1], rule.shape[2], -1)
-    )
+    Z_ind = Z_ind[:, :, 0].view(b, n, 1, 1, -1).expand(-1, -1, rule.shape[1], rule.shape[2], -1)
     rule = rule.unsqueeze(1).expand(-1, n, -1, -1, -1)
     rule = rule.gather(4, Z_ind).flatten(3)
     b_n_yz = (y + Z).reshape(b, n, nt * t)

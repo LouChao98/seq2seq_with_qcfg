@@ -1,6 +1,3 @@
-import sys
-
-sys.path.insert(0, "..")
 from collections import Counter
 
 import torch
@@ -69,9 +66,7 @@ params, pt_spans, pt_num_nodes, nt_spans, nt_num_nodes = tgt_parser.get_params(
 print("D1")
 
 pcfg = D1PCFG(2, 2)
-pred = pcfg.sampled_decoding(
-    params, nt_spans, 2, pt_spans, 2, False, NUM_SAMPLE, max_length=4, strict=True
-)
+pred = pcfg.sampled_decoding(params, nt_spans, 2, pt_spans, 2, False, NUM_SAMPLE, max_length=4, strict=True)
 
 new_pred = []
 
@@ -85,10 +80,7 @@ pred = new_pred
 count = Counter("".join(map(str, item)) for item in pred[PROBE_ID])
 print(count.most_common(15), sum(count.values()), len(count))
 
-params = {
-    key: value[PROBE_ID, None] if isinstance(value, torch.Tensor) else value
-    for key, value in params.items()
-}
+params = {key: value[PROBE_ID, None] if isinstance(value, torch.Tensor) else value for key, value in params.items()}
 
 probs = []
 probs_with_seq = []
@@ -126,9 +118,7 @@ print("Ref")
 
 pcfg_ref = PCFG()
 params2 = D1PCFG.get_pcfg_rules(params, 2)
-pred_ref = pcfg_ref.sampled_decoding(
-    params2, nt_spans, 2, pt_spans, 2, False, NUM_SAMPLE, max_length=4, strict=True
-)
+pred_ref = pcfg_ref.sampled_decoding(params2, nt_spans, 2, pt_spans, 2, False, NUM_SAMPLE, max_length=4, strict=True)
 
 new_pred = []
 
