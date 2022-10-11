@@ -8,7 +8,7 @@ defaults:
   - override /model: styleptb
   - override /model/decoder: decomp3
   - override /callbacks: default
-  - override /logger: tensorboard #wandb
+  - override /logger: tensorboard
   - override /trainer: default
 
 # all parameters below will be merged with parameters from default configurations set above
@@ -21,13 +21,16 @@ datamodule:
   copy_mode: "phrase"
   max_src_len: 32
 
-  batch_size: 4
-  token_size: 200
+  batch_size: 1
+  token_size: 0
 
 model:
+  parser:
+    pt_states: 12
+    nt_states: 12
   decoder:
     use_copy: true
-    cpd_rank: 64
+    cpd_rank: 32
 #     _target_: src.models.tgt_parser.neural_qcfg_amr.NeuralQCFGAMRTgtParser
 #     num_samples: 100
 #     check_ppl_batch_size: 1

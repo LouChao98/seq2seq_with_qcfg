@@ -5,7 +5,6 @@ from itertools import chain
 from typing import Dict, List, Optional
 
 import torch
-from numpy import place
 from torch import Tensor
 from torch.autograd import grad
 from torch.distributions.utils import lazy_property
@@ -50,17 +49,12 @@ class DecompBase:
         self.no_trace = no_trace
         assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
 
-        if not no_trace:
-            if not self.params[self.KEYS[0]].requires_grad:
-                for k in self.KEYS:
-                    self.params[k].requires_grad_()
-
         self._traced_cache = None
         self._untraced_cache = None
 
     def __call__(self, trace=None):
         if trace is None:
-            trace = torch.is_grad_enabled()
+            trace = not self.no_trace and torch.is_grad_enabled()
         if self._traced_cache is not None:
             return self._traced_cache
         if not trace and self._untraced_cache is not None:
@@ -98,34 +92,52 @@ class DecompBase:
 
     @property
     def partition(self):
-        return self(not self.no_trace)[0]
+        return self()[0]
 
     @property
     def nll(self):
-        return -self(not self.no_trace)[0]
+        return -self()[0]
 
     @lazy_property
+    def _compute_marginal(self):
+        logZ, trace = self()
+        logZ.sum().backward()
+        return trace
+
+    @property
     def marginal(self):
-        logZ, trace = self()
-        return grad(logZ.sum(), [trace], create_graph=True, retain_graph=True)[0]
+        # logZ, trace = self()
+        # return grad(logZ.sum(), [trace], create_graph=True, retain_graph=True)[0]
+        # logZ.sum().backward()
+        trace = self._compute_marginal
+        return trace.grad
 
-    @lazy_property
+    @property
     def marginal_rule(self):
-        logZ, trace = self()
-        marginals = grad(
-            logZ.sum(),
-            [self.params[k] for k in self.KEYS],
-            create_graph=True,
-            retain_graph=True,
-            allow_unused=False,
-        )
-        marginals_ = []
-        for k, is_in_log_space, m in zip(self.KEYS, self.LOGSPACE, marginals):
+        _ = self._compute_marginal
+        output = {}
+        for k, is_in_log_space, m in zip(self.KEYS, self.LOGSPACE):
+            g = self.params[k].grad
             if is_in_log_space:
-                marginals_.append(m)
+                output[k] = g
             else:
-                marginals_.append(m * self.params[k])
-        return dict(zip(self.KEYS, marginals_))
+                output[k] = m * self.params[k]
+        return output
+        # logZ, trace = self()
+        # marginals = grad(
+        #     logZ.sum(),
+        #     [self.params[k] for k in self.KEYS],
+        #     create_graph=True,
+        #     retain_graph=True,
+        #     allow_unused=False,
+        # )
+        # marginals_ = []
+        # for k, is_in_log_space, m in zip(self.KEYS, self.LOGSPACE, marginals):
+        #     if is_in_log_space:
+        #         marginals_.append(m)
+        #     else:
+        #         marginals_.append(m * self.params[k])
+        # return dict(zip(self.KEYS, marginals_))
 
     @lazy_property
     def entropy(self):

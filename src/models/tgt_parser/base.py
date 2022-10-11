@@ -185,7 +185,7 @@ class TgtParserBase(nn.Module):
 
     def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:
         if not inplace:
-            pred = copy.copy(pred).clear()
+            pred = copy(pred).clear()
         pred.posterior_params = pred.params | self.build_rules_give_tgt(
             x,
             pred.params["term"],
@@ -203,7 +203,7 @@ class TgtParserBase(nn.Module):
 
     def prepare_sampler(self, pred: TgtParserPrediction, src, src_ids, inplace=True) -> TgtParserPrediction:
         if not inplace:
-            pred = copy.copy(pred).clear()
+            pred = copy(pred).clear()
         pred.src = src
         pred.src_ids = src_ids
         return pred

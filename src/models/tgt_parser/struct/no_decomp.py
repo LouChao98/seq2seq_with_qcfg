@@ -62,8 +62,8 @@ class NoDecomp(DecompBase):
 
             # n: the number of spans of width w.
             n = N - w
-            y = stripe(s, n, w - 1, (0, 1))
-            z = stripe(s, n, w - 1, (1, w), 0)
+            y = stripe(s, n, w - 1, (0, 1)).clone()
+            z = stripe(s, n, w - 1, (1, w), 0).clone()
 
             if w == 2:
                 x = merge(y, z, PTPT)

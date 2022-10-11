@@ -8,7 +8,7 @@ defaults:
   - override /model: amr_v1
   - override /model/decoder: decomp3
   - override /callbacks: default
-  - override /logger: tensorboard #wandb
+  - override /logger: tensorboard
   - override /trainer: default
 
 # all parameters below will be merged with parameters from default configurations set above
@@ -21,13 +21,13 @@ datamodule:
   copy_mode: "phrase"
   max_src_len: 32
 
-  batch_size: 4
-  token_size: 200
+  batch_size: 1
+  token_size: 0
 
 model:
   decoder:
     use_copy: true
-    cpd_rank: 64
+    cpd_rank: 32
 
 trainer:
   # check_val_every_n_epoch: 10
@@ -38,5 +38,5 @@ trainer:
 logger:
   wandb:
     project: "amr"
-    tags: ["v0"]
+    tags: ["v1"]
     offline: ${in_cluster:}

@@ -8,7 +8,7 @@ from hydra.utils import instantiate
 from pytorch_lightning.profilers import PassThroughProfiler
 from pytorch_memlab import profile_every
 from torch_scatter import scatter_mean
-from torchmetrics import MinMetric
+from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
 
 from src.models.base import ModelBase
@@ -16,6 +16,8 @@ from src.models.src_parser.base import SrcParserBase
 from src.models.tgt_parser.base import TgtParserBase
 from src.models.tree_encoder.base import TreeEncoderBase
 from src.utils.fn import (
+    _debug_init_tensor,
+    _debug_mark_and_find_leaked_tensor,
     annotate_snt_with_brackets,
     extract_parses,
     extract_parses_span_only,
@@ -96,7 +98,7 @@ class GeneralSeq2SeqModule(ModelBase):
         self.train_metric = PerplexityMetric()
         self.val_metric = PerplexityMetric()
         self.val_best_metric = MinMetric()
-        self.test_metric = instantiate(self.hparams.test_metric)
+        self.test_metric: Metric = instantiate(self.hparams.test_metric)
 
         self.setup_patch(stage, datamodule)
 

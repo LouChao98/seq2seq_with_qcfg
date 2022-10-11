@@ -40,7 +40,7 @@ class AMRNeqPrTask(PrTask):
                     cparams[key] = cparams[key] * factor
                 else:
                     cparams[key] = torch.pow(cparams[key], factor)
-        return dist.spawn(params=cparams, no_trace=True)
+        return dist.spawn(params=cparams)
 
     def calc_e(self, pred: TgtParserPrediction, constraints):
         m = pred.dist.marginal_rule["term"]

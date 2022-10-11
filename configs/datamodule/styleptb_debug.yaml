@@ -1,6 +1,6 @@
 _target_: src.datamodules.tsv_datamodule.TSVDataModule
 
-train_file: ${data_dir}/StylePTB/ATP/debug_overfit.tsv
+train_file: ${data_dir}/StylePTB/ATP/debug_overfit_val.tsv
 dev_file: ${data_dir}/StylePTB/ATP/debug_overfit_val.tsv
 test_file: ${data_dir}/StylePTB/ATP/debug_overfit_val.tsv
 

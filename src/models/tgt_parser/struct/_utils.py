@@ -10,7 +10,7 @@ def checkpoint(func):
         # The only case is marginal=True and the one need grad is span_indicator.
         # We do not need checkpoint in this case because no big mid tensors need to be traced.
         if all(v.requires_grad for v in args):
-            return torch_ckpt(func, *args, **kwargs, use_reentrant=False)
+            return torch_ckpt(func, *args, **kwargs)
         else:
             return func(*args)
 
@@ -90,7 +90,9 @@ def process_param_for_trace(item):
         # else:
         #     item = item.detach()
         if torch.is_floating_point(item):
-            return item.requires_grad_()
+            if not item.requires_grad:
+                return item.detach().requires_grad_()
+            return item
         else:
             return item
     elif isinstance(item, (list, tuple)):

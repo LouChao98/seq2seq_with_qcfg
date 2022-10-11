@@ -1,3 +1,4 @@
+import gc
 import logging
 from typing import List, Tuple
 
@@ -230,3 +231,26 @@ def apply_to_nested_tensor(nested, func):
     if isinstance(nested, torch.Tensor):
         return func(nested)
     return nested
+
+
+def _debug_init_tensor():
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj) or (hasattr(obj, "data") and torch.is_tensor(obj.data)):
+                obj._debug_version_ = -1
+        except:
+            pass
+
+
+def _debug_mark_and_find_leaked_tensor(version):
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj) or (hasattr(obj, "data") and torch.is_tensor(obj.data)):
+                if not hasattr(obj, "_debug_version_"):
+                    obj._debug_version_ = version
+                elif obj._debug_version_ == -1:
+                    continue
+                else:
+                    print(obj.shape, obj.dtype, obj._debug_version_, sep="\t")
+        except:
+            pass

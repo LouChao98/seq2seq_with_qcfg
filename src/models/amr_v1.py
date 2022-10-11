@@ -35,8 +35,9 @@ log = logging.getLogger(__file__)
 
 
 class AMRV1Module(GeneralSeq2SeqModule):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, pr_entropy_reg=0.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.save_hyperparameters(logger=False)
         self.val_neq_e_metric = MaxMetric()
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
@@ -88,7 +89,9 @@ class AMRV1Module(GeneralSeq2SeqModule):
         tgt_entropy_reg = 0
         pr_terms = 0
         if self.training:
-            pt_neq_pr = compute_pr(tgt_pred, batch["tgt_pt_neq_constraint"], self.pt_neq_task)
+            pt_neq_pr = compute_pr(
+                tgt_pred, batch["tgt_pt_neq_constraint"], self.neq_pr_task, entropy_reg=self.hparams.pr_entropy_reg
+            )
 
             # # # we have closed form of q
             # # params = (params["term"], params["rule"], params["root"], params["copy_nt"])
@@ -275,23 +278,6 @@ class AMRV1Module(GeneralSeq2SeqModule):
         self.log("train/tgt", loss_decoder, prog_bar=True)
         if "log" in output:
             self.log_dict({"train/" + k: v.mean() for k, v in output["log"].items()})
-        return {"loss": loss}
-
-    def on_validation_epoch_start(self) -> None:
-        super().on_validation_epoch_start()
-        self.val_neq_e_metric.reset()
-
-    def validation_step(self, batch: Any, batch_idx: int):
-        output = self(batch)
-        loss_decoder = output["decoder"].mean()
-        loss_encoder = output["encoder"].mean()
-        loss = loss_encoder + loss_decoder
-        self.val_metric(output["tgt_nll"], batch["tgt_lens"])
-        self.val_neq_e_metric(output["log"]["max_neq_e"])
-
-        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0:
-            self.test_step(batch, batch_idx=None)
-
         if batch_idx == 0:
             single_inst = {key: (value[:2] if key != "transformer_inputs" else value) for key, value in batch.items()}
             trees = self.forward_visualize(single_inst)
@@ -330,6 +316,24 @@ class AMRV1Module(GeneralSeq2SeqModule):
                         continue
                     table.add_row((s, t, c, n, e))
                 self.print("\n", table, sep="")
+
+        return {"loss": loss}
+
+    def on_validation_epoch_start(self) -> None:
+        super().on_validation_epoch_start()
+        self.val_neq_e_metric.reset()
+
+    def validation_step(self, batch: Any, batch_idx: int):
+        output = self(batch)
+        loss_decoder = output["decoder"].mean()
+        loss_encoder = output["encoder"].mean()
+        loss = loss_encoder + loss_decoder
+        self.val_metric(output["tgt_nll"], batch["tgt_lens"])
+        self.val_neq_e_metric(output["log"]["max_neq_e"])
+
+        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0:
+            self.test_step(batch, batch_idx=None)
+
         return {"loss": loss}
 
     def validation_epoch_end(self, outputs: List[Any]):
