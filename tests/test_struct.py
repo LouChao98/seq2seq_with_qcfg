@@ -2,12 +2,15 @@ import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from src.models.tgt_parser.struct3.decomp1_copy_as_t import Decomp1CopyPT, convert_decomp1copypt_to_pcfg
 from src.models.tgt_parser.struct.decomp1 import Decomp1, convert_decomp1_to_pcfg
 from src.models.tgt_parser.struct.decomp2 import Decomp2, convert_decomp2_to_pcfg
 from src.models.tgt_parser.struct.decomp3 import Decomp3, convert_decomp3_to_pcfg
 from src.models.tgt_parser.struct.decomp4 import Decomp4, convert_decomp4_to_pcfg
 from src.models.tgt_parser.struct.decomp5 import Decomp5, convert_decomp5_to_pcfg
 from src.models.tgt_parser.struct.decomp7 import Decomp7, convert_decomp7_to_pcfg
+from src.models.tgt_parser.struct.decomp7_impl2 import Decomp7Impl2, convert_decomp7impl2_to_pcfg
+from src.models.tgt_parser.struct.decomp7_impl3 import Decomp7Impl3, convert_decomp7impl3_to_pcfg
 from src.models.tgt_parser.struct.no_decomp import NoDecomp
 from src.models.tgt_parser.struct.pcfg import PCFG
 from src.models.tgt_parser.struct.pcfg_rdp import PCFGRandomizedDP
@@ -305,6 +308,45 @@ def test_decomp1(data):
 
     pcfg_ref = PCFG()
     params_ref = convert_decomp1_to_pcfg(params, NT)
+    nll_ref = pcfg_ref(params_ref, lens)
+    assert torch.allclose(nll, nll_ref)
+
+    m1 = pcfg.marginal
+    assert check_full_marginal(m1, lens)
+
+    m2 = pcfg_ref(params_ref, lens, marginal=True)[-1]
+    assert compare_marginal(m1[..., :NT], m2)
+
+
+@given(st.data())
+@settings(max_examples=100, deadline=None)
+def test_decomp1_copy_as_t(data):
+    B = data.draw(st.integers(min_value=1, max_value=3), label="b")
+    N = data.draw(st.integers(min_value=2, max_value=4), label="n")
+    TGT_PT = data.draw(st.integers(min_value=1, max_value=4), label="tgt_pt")
+    SRC_PT = data.draw(st.integers(min_value=1, max_value=4), label="src_pt")
+    TGT_NT = data.draw(st.integers(min_value=1, max_value=4), label="tgt_nt")
+    SRC_NT = data.draw(st.integers(min_value=1, max_value=4), label="src_nt")
+    r = data.draw(st.integers(min_value=1, max_value=4), label="r")
+    NT = TGT_NT * SRC_NT
+    PT = TGT_PT * SRC_PT
+
+    lens = [max(2, N - i) for i in range(B)]
+    params = Decomp1CopyPT.random(B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r, ngram=False)
+    meta = {
+        "batch_size": B,
+        "nt_states": TGT_NT,
+        "nt_num_nodes": SRC_NT,
+        "pt_states": TGT_PT,
+        "pt_num_nodes": SRC_PT,
+        "batch_size": B,
+    }
+
+    pcfg = Decomp1CopyPT(params, lens, **meta)
+    nll = pcfg.nll
+
+    pcfg_ref = PCFG()
+    params_ref = convert_decomp1copypt_to_pcfg(params, NT)
     nll_ref = pcfg_ref(params_ref, lens)
     assert torch.allclose(nll, nll_ref)
 
@@ -756,3 +798,77 @@ def test_decomp7(data):
 
     m2 = pcfg_ref(params_ref, lens, marginal=True)[-1]
     assert compare_marginal(m1[..., :TGT_NT, :SRC_NT], m2)
+
+
+@given(st.data())
+@settings(max_examples=100, deadline=None)
+def test_decomp7_impl2(data):
+    B = data.draw(st.integers(min_value=1, max_value=3), label="b")
+    N = data.draw(st.integers(min_value=2, max_value=4), label="n")
+    TGT_PT = data.draw(st.integers(min_value=1, max_value=4), label="tgt_pt")
+    SRC_PT = data.draw(st.integers(min_value=1, max_value=4), label="src_pt")
+    TGT_NT = data.draw(st.integers(min_value=1, max_value=4), label="tgt_nt")
+    SRC_NT = data.draw(st.integers(min_value=1, max_value=4), label="src_nt")
+    r = data.draw(st.integers(min_value=1, max_value=4), label="r")
+
+    lens = [max(2, N - i) for i in range(B)]
+    params = Decomp7Impl2.random(B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r)
+    meta = {
+        "batch_size": B,
+        "nt_states": TGT_NT,
+        "nt_num_nodes": SRC_NT,
+        "pt_states": TGT_PT,
+        "pt_num_nodes": SRC_PT,
+        "batch_size": B,
+    }
+
+    pcfg = Decomp7Impl2(params, lens, **meta)
+    nll = pcfg.nll
+
+    pcfg_ref = PCFG()
+    params_ref = convert_decomp7impl2_to_pcfg(params, TGT_NT)
+    nll_ref = pcfg_ref(params_ref, lens)
+    assert torch.allclose(nll, nll_ref)
+
+    m1 = pcfg.marginal
+    assert check_full_marginal(m1, lens)
+
+    m2 = pcfg_ref(params_ref, lens, marginal=True)[-1]
+    assert compare_marginal(m1[..., :TGT_NT, :SRC_NT], m2)
+
+
+@given(st.data())
+@settings(max_examples=100, deadline=None)
+def test_decomp7_impl3(data):
+    B = data.draw(st.integers(min_value=1, max_value=3), label="b")
+    N = data.draw(st.integers(min_value=2, max_value=4), label="n")
+    TGT_PT = data.draw(st.integers(min_value=1, max_value=4), label="tgt_pt")
+    SRC_PT = data.draw(st.integers(min_value=1, max_value=4), label="src_pt")
+    TGT_NT = data.draw(st.integers(min_value=1, max_value=4), label="tgt_nt")
+    SRC_NT = data.draw(st.integers(min_value=1, max_value=4), label="src_nt")
+    r = data.draw(st.integers(min_value=1, max_value=4), label="r")
+
+    lens = [max(2, N - i) for i in range(B)]
+    params = Decomp7Impl3.random(B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r)
+    meta = {
+        "batch_size": B,
+        "nt_states": TGT_NT,
+        "nt_num_nodes": SRC_NT,
+        "pt_states": TGT_PT,
+        "pt_num_nodes": SRC_PT,
+        "batch_size": B,
+    }
+
+    pcfg = Decomp7Impl3(params, lens, **meta)
+    nll = pcfg.nll
+
+    pcfg_ref = PCFG()
+    params_ref = convert_decomp7impl3_to_pcfg(params, TGT_NT)
+    nll_ref = pcfg_ref(params_ref, lens)
+    assert torch.allclose(nll, nll_ref)
+
+    # m1 = pcfg.marginal
+    # assert check_full_marginal(m1, lens)
+
+    # m2 = pcfg_ref(params_ref, lens, marginal=True)[-1]
+    # assert compare_marginal(m1[..., :TGT_NT, :SRC_NT], m2)

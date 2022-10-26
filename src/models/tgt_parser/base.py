@@ -1,4 +1,5 @@
 import dataclasses
+import logging
 from copy import copy
 from dataclasses import dataclass
 from functools import partial
@@ -10,14 +11,15 @@ import torch
 import torch.nn as nn
 from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader
 
+from src.datamodules.datamodule import _DataModule
 from src.utils.fn import apply_to_nested_tensor
 
-from ...datamodules.components.vocab import VocabularyPair
 from ..constraint.base import RuleConstraintBase
-from .struct.decomp_base import DecompBase, DecompSamplerBase, TokenType
+from .struct3.base import DecompBase, DecompSamplerBase, TokenType
 
-# from operator import itemgetter
+logger = logging.getLogger(__file__)
 
 
 def itemgetter(list_of_indices):
@@ -79,6 +81,8 @@ class TgtParserPrediction:
         getter = itemgetter(key)
         obj = copy(self)
         obj.params = apply_to_nested_tensor(obj.params, getter)
+        obj.pt_nodes = [obj.pt_nodes[k] for k in key]
+        obj.nt_nodes = [obj.nt_nodes[k] for k in key]
         if obj.posterior_params is not None:
             obj.posterior_params = apply_to_nested_tensor(obj.posterior_params, getter)
             obj.lengths = getter(obj.lengths)
@@ -97,6 +101,8 @@ class TgtParserPrediction:
         params = apply_to_nested_tensor(self.params, func)
         obj.params = params
         obj.batch_size = size
+        obj.pt_nodes *= size
+        obj.nt_nodes *= size
         if obj.posterior_params is not None:
             obj.posterior_params = apply_to_nested_tensor(self.posterior_params, func)
             assert isinstance(obj.lengths, list)
@@ -115,6 +121,8 @@ class TgtParserPrediction:
         params = apply_to_nested_tensor(self.params, func)
         obj.params = params
         obj.batch_size = size
+        obj.pt_nodes = [obj.pt_nodes[k]] * size
+        obj.nt_nodes = [obj.nt_nodes[k]] * size
         if obj.posterior_params is not None:
             obj.posterior_params = apply_to_nested_tensor(self.posterior_params, func)
             assert isinstance(obj.lengths, list)
@@ -145,7 +153,7 @@ class TgtParserBase(nn.Module):
         pt_span_range: Tuple = (1, 1),
         nt_span_range: Tuple = (2, 1000),
         use_copy: bool = False,
-        vocab_pair: Optional[VocabularyPair] = None,
+        datamodule: Optional[_DataModule] = None,
         rule_hard_constraint=None,
         rule_soft_constraint=None,
         rule_soft_constraint_solver=None,
@@ -162,7 +170,7 @@ class TgtParserBase(nn.Module):
         self.nt_span_range = nt_span_range
         self.pt_span_range = pt_span_range
         self.use_copy = use_copy
-        self.vocab_pair = vocab_pair
+        self.datamodule = datamodule
 
         self.rule_hard_constraint: Optional[RuleConstraintBase] = instantiate(rule_hard_constraint)
         self.rule_soft_constraint: Optional[RuleConstraintBase] = instantiate(rule_soft_constraint)
@@ -222,12 +230,25 @@ class TgtParserBase(nn.Module):
         aligned_spans = []
         for b, (all_span, pt_span, nt_span) in enumerate(zip(out, pred.pt_nodes, pred.nt_nodes)):
             aligned_spans_item = []
-            for l, r, label in all_span:
-                # try:
-                if l == r:
-                    aligned_spans_item.append(pt_span[label % pred.pt_num_nodes])
-                else:
-                    aligned_spans_item.append(nt_span[label % pred.nt_num_nodes])
+            if len(all_span) > 0 and len(all_span[0]) == 5:
+                try:
+                    for l, r, t, state, node in all_span:
+                        if t == "p":
+                            aligned_spans_item.append(pt_span[node])
+                        else:
+                            if node is None:
+                                aligned_spans_item.append(None)
+                            else:
+                                aligned_spans_item.append(nt_span[node])
+                except IndexError:
+                    print("bad alignment")
+            else:
+                for l, r, label in all_span:
+                    # try:
+                    if l == r:
+                        aligned_spans_item.append(pt_span[label % pred.pt_num_nodes])
+                    else:
+                        aligned_spans_item.append(nt_span[label % pred.nt_num_nodes])
             # except IndexError:
             #     breakpoint()
             aligned_spans.append(aligned_spans_item)
@@ -238,138 +259,96 @@ class TgtParserBase(nn.Module):
         preds = pred.sampler()
 
         if self.use_copy:
-            preds, copy_positions = self.expand_preds_using_copy(
-                pred.src_ids,
+            preds = self.expand_preds_using_copy(
+                pred.src,
                 preds,
                 pred.pt_nodes,
                 pred.nt_nodes,
                 self.generation_max_length,
-                pred.device,
             )
         else:
-            preds, copy_positions = self.expand_preds_not_using_copy(preds)
+            preds = self.expand_preds_not_using_copy(pred.src, preds)
 
-        preds = self.choose_samples_by_ppl(preds, copy_positions, pred)
-        preds = self.to_str_tokens(preds, pred.src)
+        preds = self.choose_samples_by_ppl(preds, pred)
         return preds
 
-    def expand_preds_using_copy(self, src_ids, preds, pt_spans, nt_spans, max_len, device):
+    def expand_preds_using_copy(self, src, preds, pt_spans, nt_spans, max_len):
         # expand copied spans and build copy_position
-        vocab_pair = self.vocab_pair
-        src_lens = (src_ids != vocab_pair.src.pad_token_id).sum(1).tolist()
-        src_ids = src_ids.tolist()
         preds_ = []
-        copy_positions = []
-
-        for batch, pt_spans_item, nt_spans_item, src_ids_item, src_len in zip(
-            preds, pt_spans, nt_spans, src_ids, src_lens
-        ):
+        vocab = self.datamodule.tgt_vocab
+        for batch, pt_spans_item, nt_spans_item, src_item in zip(preds, pt_spans, nt_spans, src):
             expanded_batch = []
-            copy_pts = []
-            copy_nts = []
-            copy_unks = []
             for item in batch:
                 expanded = []
-                copy_pt = np.zeros((src_len, max_len), dtype=np.bool8)
-                copy_nt = [[] for _ in range(max_len)]  # no need to prune
-                copy_unk = {}  # record position if copy unk token
                 for v, t in zip(item[0], item[1]):
                     if t == TokenType.VOCAB:
                         if len(expanded) + 1 > max_len:
                             break
-                        expanded.append(v)
+                        expanded.append(vocab.convert_ids_to_tokens(v))
                     elif t == TokenType.COPY_PT:
                         span = pt_spans_item[v]
-                        tokens = vocab_pair.src2tgt(src_ids_item[span[0] : span[1] + 1])
+                        tokens = src_item[span[0] : span[1] + 1]
                         if len(expanded) + len(tokens) > max_len:
                             break
-                        copy_pt[span[0], len(expanded)] = True
-                        if tokens[0] == vocab_pair.tgt.unk_token_id:
-                            copy_unk[len(expanded)] = span[0]
                         expanded.extend(tokens)
                     elif t == TokenType.COPY_NT:
                         span = nt_spans_item[v]
-                        tokens = vocab_pair.src2tgt(src_ids_item[span[0] : span[1] + 1])
+                        tokens = src_item[span[0] : span[1] + 1]
                         if len(expanded) + len(tokens) > max_len:
                             break
-                        copy_nt[span[1] - span[0] - 1].append((span[0], len(expanded)))  # copy_nt starts from w=2
-                        for i, token in enumerate(tokens):
-                            if token == vocab_pair.tgt.unk_token_id:
-                                copy_unk[len(expanded) + i] = span[0] + i
                         expanded.extend(tokens)
 
-                if max(expanded) >= len(vocab_pair.tgt):
-                    assert False, "This should never happen"
                 if len(expanded) > max_len:
-                    continue
-                expanded_batch.append(expanded)
-                copy_pts.append(copy_pt)
-                copy_nts.append(copy_nt)
-                copy_unks.append(copy_unk)
-            copy_pts = torch.from_numpy(np.stack(copy_pts, axis=0)).to(device)
-            copy_positions.append((copy_pts, copy_nts, copy_unks))
-            preds_.append(expanded_batch)
-        return preds_, copy_positions
+                    assert False
 
-    def expand_preds_not_using_copy(self, preds):
-        preds_ = []
-        copy_positions = []
-        for batch in preds:
-            expanded_batch = []
-            for item in batch:
-                expanded_batch.append(item[0])
-            copy_positions.append((None, None, None))
+                pair = {"id": len(expanded_batch), "src": src_item, "tgt": expanded}
+                expanded_batch.append(pair)
+            expanded_batch = self.datamodule.process_all_copy(expanded_batch)
+            expanded_batch = self.datamodule.apply_vocab(expanded_batch)
             preds_.append(expanded_batch)
-        return preds_, copy_positions
+        return preds_
+
+    def expand_preds_not_using_copy(self, src, preds):
+        preds_ = []
+        for batch, src_item in zip(preds, src):
+            expanded_batch = [item[0] for item in batch]
+            expanded_batch = self.datamodule.tgt_vocab.convert_ids_to_tokens(expanded_batch)
+            preds_.append({"id": len(preds_), "src": src_item, "tgt": expanded_batch})
+        return preds_
 
     @torch.no_grad()
-    def choose_samples_by_ppl(self, preds, copy_positions, pred: TgtParserPrediction):
-        padid = self.vocab_pair.tgt.pad_token_id or 0
+    def choose_samples_by_ppl(self, preds, pred: TgtParserPrediction):
         new_preds = []
         pred = copy(pred).clear()
-        for bidx, (
-            preds_item,
-            (copy_pt, copy_nt, copy_unk),
-        ) in enumerate(zip(preds, copy_positions)):
-            sort_id = list(range(len(preds_item)))
-            sort_id.sort(key=lambda i: len(preds_item[i]), reverse=True)
-            _ids = [torch.tensor(preds_item[i]) for i in sort_id]
-            _lens = [len(item) for item in _ids]
-            _ids_t = pad_sequence(_ids, batch_first=True, padding_value=padid)
-            _ids_t = _ids_t.to(pred.device)
-
-            if copy_pt is not None:
-                copy_pt = copy_pt[sort_id]
-                copy_nt = [copy_nt[i] for i in sort_id]
-                copy_unk = [copy_unk[i] for i in sort_id]
-
+        for bidx, preds_batch in enumerate(preds):
             batch_size = pred.batch_size if self.generation_ppl_batch_size is None else self.generation_ppl_batch_size
+            loader = DataLoader(dataset=preds_batch, batch_size=batch_size, collate_fn=self.datamodule.collator)
+            ppl = np.full((len(preds_batch),), 1e9)
 
-            ppl = []
-            for j in range(0, len(_ids), batch_size):
-                if copy_pt is not None:
-                    _pt_copy = copy_pt[j : j + batch_size, :, : _ids_t.shape[1]]
-                    _nt_copy = copy_nt[j : j + batch_size]
-                else:
-                    _pt_copy, _nt_copy = None, None
+            for batch in loader:
+                batch = {
+                    key: value.to(pred.device) if isinstance(value, torch.Tensor) else value
+                    for key, value in batch.items()
+                }
 
-                batch_t = _ids_t[j : j + batch_size]
-                batch_l = _lens[j : j + batch_size]
-                sub_pred = pred[bidx].expand(len(batch_t))
-                sub_pred = self.observe_x(sub_pred, batch_t, batch_l, pt_copy=_pt_copy, nt_copy=_nt_copy)
+                observed = {
+                    "x": batch["tgt_ids"],
+                    "lengths": batch["tgt_lens"],
+                    "pt_copy": batch.get("copy_token"),
+                    "nt_copy": batch.get("copy_phrase"),
+                }
+                sub_pred = pred.get_and_expand(bidx, len(batch["tgt_ids"]))
+                sub_pred = self.observe_x(sub_pred, **observed)
                 nll = sub_pred.dist.nll.detach().cpu().numpy()
-                ppl.append(np.exp(nll / np.array(_lens[j : j + batch_size])))
+                ppl_batch = np.exp(nll / np.array(batch["tgt_lens"]))
+                for i, ppl_item in zip(batch["id"].tolist(), ppl_batch):
+                    ppl[i] = ppl_item
 
-            ppl = np.concatenate(ppl, 0)
             assert not np.any(np.isnan(ppl))
             chosen = np.argmin(ppl)
-            new_preds.append(
-                (
-                    _ids[chosen],
-                    ppl[chosen],
-                    None if copy_unk is None else copy_unk[chosen],
-                )
-            )
+            if ppl[chosen] > 1e6:
+                logger.warning(f"The minimum ppl is {ppl}")
+            new_preds.append((preds_batch[chosen]["tgt"], ppl[chosen]))
         return new_preds
 
     def to_str_tokens(self, preds, src):
@@ -452,6 +431,7 @@ class TgtParserBase(nn.Module):
         pt_copy=None,
         nt_copy=None,
         observed_mask=None,
+        prior_alignment=None,
     ):
         batch_size, n = tgt.shape[:2]
         term = term.unsqueeze(1).expand(batch_size, n, pt, term.size(2))
@@ -489,13 +469,26 @@ class TgtParserBase(nn.Module):
                 batch_size, n, max_nt_spans, observed_mask, constraint_scores
             )
 
+        if prior_alignment is not None:
+            term = self.build_pt_prior_alignment_soft_constraint(term, prior_alignment)
+
         return {"term": term, "root": root, "constraint": constraint_scores, "lse": lse_scores, "add": add_scores}
 
     def build_pt_copy_constraint(self, terms, constraint):
         batch_size, n = terms.shape[:2]
         terms = terms.view(batch_size, n, self.pt_states, -1)
         copy_m = constraint[:, : terms.shape[-1]].transpose(1, 2)
+        terms[:, :, -1].fill_(self.neg_huge)
         terms[:, :, -1, : copy_m.shape[2]] = self.neg_huge * ~copy_m
+        terms = terms.view(batch_size, n, -1)
+        return terms
+
+    def build_pt_prior_alignment_soft_constraint(self, terms, constraint):
+        batch_size, n = terms.shape[:2]
+        terms = terms.clone()
+        terms = terms.view(batch_size, n, self.pt_states, -1)
+        constraint = constraint[:, : terms.shape[-1]].transpose(1, 2)
+        terms[..., : constraint.shape[2]] *= constraint.unsqueeze(2)
         terms = terms.view(batch_size, n, -1)
         return terms
 

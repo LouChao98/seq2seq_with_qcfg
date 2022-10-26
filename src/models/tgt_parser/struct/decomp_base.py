@@ -100,6 +100,11 @@ class DecompBase:
 
     @lazy_property
     def _compute_marginal(self):
+        # FIXME backward without create_graph will not allow backprop through gradients.
+        #   This make the optimization of entropy, ce(w.o. fix left), kl(w.o. fix left) problematic.
+        # If set create_graph=True, gradients should be manually cleared to avoid memory leak.
+        #   But we cannot track all parameters (e.g., params of nn) here.
+        # If use grad(), checkpoint must have use_reentrant=False. There is also a memory leak.
         logZ, trace = self()
         logZ.sum().backward()
         return trace
@@ -116,12 +121,12 @@ class DecompBase:
     def marginal_rule(self):
         _ = self._compute_marginal
         output = {}
-        for k, is_in_log_space, m in zip(self.KEYS, self.LOGSPACE):
+        for k, is_in_log_space in zip(self.KEYS, self.LOGSPACE):
             g = self.params[k].grad
             if is_in_log_space:
                 output[k] = g
             else:
-                output[k] = m * self.params[k]
+                output[k] = g * self.params[k]
         return output
         # logZ, trace = self()
         # marginals = grad(

@@ -1,14 +1,12 @@
 import logging
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
 
 from ..components.common import MultiResidualLayer
 from .base import TgtParserBase, TgtParserPrediction
-from .struct.decomp1 import Decomp1, Decomp1Sampler
+from .struct3.decomp1 import Decomp1, Decomp1Sampler
 
 log = logging.getLogger(__file__)
 
@@ -22,7 +20,7 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         nt_span_range=(2, 1000),
         cpd_rank=32,
         use_copy=False,
-        vocab_pair=None,
+        datamodule=None,
         rule_hard_constraint=None,
         rule_soft_constraint=None,
         rule_soft_constraint_solver=None,
@@ -42,7 +40,7 @@ class NeuralDecomp1TgtParser(TgtParserBase):
             pt_span_range,
             nt_span_range,
             use_copy,
-            vocab_pair,
+            datamodule,
             rule_hard_constraint,
             rule_soft_constraint,
             rule_soft_constraint_solver,
@@ -137,9 +135,9 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         rule_left[~mask] = self.neg_huge
         rule_right[~mask] = self.neg_huge
 
-        rule_head = rule_head.softmax(-1)
-        rule_left = rule_left.transpose(1, 2).softmax(-1)
-        rule_right = rule_right.transpose(1, 2).softmax(-1)
+        rule_head = rule_head.log_softmax(-1)
+        rule_left = rule_left.transpose(1, 2).log_softmax(-1)
+        rule_right = rule_right.transpose(1, 2).log_softmax(-1)
 
         # A->a
         terms = F.log_softmax(self.vocab_out(pt_emb), 2)

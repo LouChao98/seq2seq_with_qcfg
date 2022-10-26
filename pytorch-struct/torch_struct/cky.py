@@ -62,8 +62,9 @@ class CKY(_Struct):
             all_span = []
             v2 = (ssize, batch, N - w, -1)
 
-            Y = beta[A][: N - w, :w, :]
-            Z = beta[B][w:, N - w :, :]
+            Y = beta[A][: N - w, :w, :]  # start 0 width 0
+            Z = beta[B][w:, N - w :, :]  # end w width w
+
             # X1 = matmul(matmul(Y.transpose(-2, -1), Z).view(*v2), X_Y_Z)
             X1 = checkpoint(
                 matmul,
@@ -78,15 +79,11 @@ class CKY(_Struct):
 
             Y = Y[..., -1, :].unsqueeze(-1)
             # X2 = matmul(times(Y, Z_term).view(*v2), X_Y_Z1)
-            X2 = checkpoint(
-                matmul, times(Y, Z_term).view(*v2), X_Y_Z1, use_reentrant=False
-            )
+            X2 = checkpoint(matmul, times(Y, Z_term).view(*v2), X_Y_Z1, use_reentrant=False)
 
             Z = Z[..., 0, :].unsqueeze(-2)
             # X3 = matmul(times(Y_term, Z).view(*v2), X_Y1_Z)
-            X3 = checkpoint(
-                matmul, times(Y_term, Z).view(*v2), X_Y1_Z, use_reentrant=False
-            )
+            X3 = checkpoint(matmul, times(Y_term, Z).view(*v2), X_Y1_Z, use_reentrant=False)
             all_span += [X2, X3]
 
             if w == 1:
@@ -223,9 +220,7 @@ class CKY(_Struct):
         CKY.trace = trace
         return log_Z, (term_use, rules, roots, span[1:])
 
-    def marginals(
-        self, scores, lengths=None, _autograd=True, _raw=False, inside_func=None
-    ):
+    def marginals(self, scores, lengths=None, _autograd=True, _raw=False, inside_func=None):
         """
         Compute the marginals of a CFG using CKY.
 
@@ -244,12 +239,8 @@ class CKY(_Struct):
         batch, N, T = terms.shape
         _, NT, _, _ = rules.shape
 
-        inside_func = (
-            self.logpartition_trace if inside_func == "trace" else self.logpartition
-        )
-        v, (term_use, rule_use, root_use, spans) = inside_func(
-            scores, lengths=lengths, force_grad=True
-        )
+        inside_func = self.logpartition_trace if inside_func == "trace" else self.logpartition
+        v, (term_use, rule_use, root_use, spans) = inside_func(scores, lengths=lengths, force_grad=True)
 
         def marginal(obj, inputs):
             obj = self.semiring.unconvert(obj).sum(dim=0)
@@ -261,9 +252,7 @@ class CKY(_Struct):
                 allow_unused=False,
             )
 
-            spans_marg = torch.zeros(
-                batch, N, N, NT, dtype=scores[1].dtype, device=scores[1].device
-            )
+            spans_marg = torch.zeros(batch, N, N, NT, dtype=scores[1].dtype, device=scores[1].device)
             span_ls = marg[3:]
             for w in range(len(span_ls)):
                 x = span_ls[w].sum(dim=0, keepdim=True)
@@ -313,9 +302,7 @@ class CKY(_Struct):
         roots = torch.zeros(batch, NT)
         for b in range(batch):
             roots[b, :] = spans[b, 0, lengths[b] - 1, :NT]
-            terms[b, : lengths[b]] = spans[
-                b, torch.arange(lengths[b]), torch.arange(lengths[b]), NT:
-            ]
+            terms[b, : lengths[b]] = spans[b, torch.arange(lengths[b]), torch.arange(lengths[b]), NT:]
             cover = spans[b].nonzero()
             left = {i: [] for i in range(N)}
             right = {i: [] for i in range(N)}
@@ -345,9 +332,7 @@ class CKY(_Struct):
         spans = torch.zeros(batch, N, N, S, dtype=rules.dtype, device=rules.device)
         rules = rules.sum(dim=-1).sum(dim=-1)
         for n in range(N):
-            spans[:, torch.arange(N - n - 1), torch.arange(n + 1, N), :NT] = rules[
-                :, n, torch.arange(N - n - 1)
-            ]
+            spans[:, torch.arange(N - n - 1), torch.arange(n + 1, N), :NT] = rules[:, n, torch.arange(N - n - 1)]
         spans[:, torch.arange(N), torch.arange(N), NT:] = terms
         return spans, (NT, S - NT)
 

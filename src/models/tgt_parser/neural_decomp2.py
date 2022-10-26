@@ -26,7 +26,7 @@ class NeuralDecomp2TgtParser(TgtParserBase):
         cpd_rank=32,
         direction=0,  # Although this has dir, but we always recovery rules.
         use_copy=False,
-        vocab_pair=None,
+        datamodule=None,
         rule_hard_constraint=None,
         rule_soft_constraint=None,
         rule_soft_constraint_solver=None,
@@ -46,7 +46,7 @@ class NeuralDecomp2TgtParser(TgtParserBase):
             pt_span_range,
             nt_span_range,
             use_copy,
-            vocab_pair,
+            datamodule,
             rule_hard_constraint,
             rule_soft_constraint,
             rule_soft_constraint_solver,

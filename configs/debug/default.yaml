@@ -3,9 +3,6 @@
 # default debugging setup, runs 1 full epoch
 # other debugging configs can inherit from this one
 
-defaults:
-  - override /log_dir: debug.yaml
-
 trainer:
   max_epochs: 1
   gpus: 0 # debuggers don't like gpus

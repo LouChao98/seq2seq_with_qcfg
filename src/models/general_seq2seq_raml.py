@@ -12,6 +12,7 @@ from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
 
 from src.models.base import ModelBase
+from src.models.constraint.fully_parameterized import FPSimpleHierarchy
 from src.models.src_parser.base import SrcParserBase
 from src.models.tgt_parser.base import TgtParserBase
 from src.models.tree_encoder.base import TreeEncoderBase
@@ -189,10 +190,23 @@ class GeneralSeq2SeqModule(ModelBase):
         soft_constraint_loss = 0
         src_entropy_reg = 0
         tgt_entropy_reg = 0
+        tgt_loss = tgt_nll
         if self.training:
             if self.decoder.rule_soft_constraint_solver is not None:
-                with self.profiler.profile("compute_soft_constraint"):
-                    soft_constraint_loss = self.decoder.get_soft_constraint_loss(tgt_pred)
+                reward = self.decoder.rule_soft_constraint.get_reward_from_pred(tgt_pred)
+                mask = FPSimpleHierarchy().get_mask_from_pred(tgt_pred)
+                dist = tgt_pred.dist.spawn(
+                    params={
+                        "term": torch.where(tgt_pred.dist.params["term"] > -1e8, 0, -1e9),
+                        "rule": torch.where(tgt_pred.dist.params["rule"] > -1e8, (reward + 1e-9).log(), -1e9),
+                        "root": torch.where(tgt_pred.dist.params["root"] > -1e8, 0.0, -1e9),
+                    }
+                )
+                # rule = tgt_pred.dist.params['rule'].clone()
+                # rule[~mask] = -1e9
+                # dist2 =tgt_pred.dist.spawn(params={'rule': rule, 'constraint': None})
+                tgt_dist = tgt_pred.dist.spawn(params={"constraint": None})
+                tgt_loss = dist.cross_entropy(tgt_dist, fix_left=True)
             if (e := self.hparams.parser_entropy_reg) > 0:
                 entropy = self.parser.entropy(src_ids, src_lens, dist)
                 src_entropy_reg = -e * entropy
@@ -203,7 +217,7 @@ class GeneralSeq2SeqModule(ModelBase):
                 logging_vals["tgt_entropy"] = entropy
 
         return {
-            "decoder": self.threshold(tgt_nll) + soft_constraint_loss + tgt_entropy_reg,
+            "decoder": tgt_loss + soft_constraint_loss + tgt_entropy_reg,
             "encoder": self.threshold(src_nll) + objective + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
@@ -279,16 +293,16 @@ class GeneralSeq2SeqModule(ModelBase):
                             break
                     if should_skip:
                         continue
-                    if isinstance(tgt_span[2], str):
-                        if tgt_span[2] == "p":
-                            is_copy = tgt_span[3] == self.decoder.pt_states - 1
-                        elif batch.get("copy_phrase") is not None:
-                            is_copy = tgt_span[3] == self.decoder.nt_states - 1
-                    else:
-                        if tgt_span[0] == tgt_span[1]:
-                            is_copy = tgt_span[2] // num_pt_spans == self.decoder.pt_states - 1
-                        elif batch.get("copy_nt") is not None:
-                            is_copy = tgt_span[2] // num_nt_spans == self.decoder.nt_states - 1
+                    # if isinstance(tgt_span[2],  str):
+                    if tgt_span[2] == "p":
+                        is_copy = tgt_span[3] == self.decoder.pt_states - 1
+                    elif batch.get("copy_phrase") is not None:
+                        is_copy = tgt_span[3] == self.decoder.nt_states - 1
+                    # else:
+                    #     if tgt_span[0] == tgt_span[1]:
+                    #         is_copy = tgt_span[2] // num_pt_spans == self.decoder.pt_states - 1
+                    #     elif batch.get("copy_nt") is not None:
+                    #         is_copy = tgt_span[2] // num_nt_spans == self.decoder.nt_states - 1
                     if is_copy:
                         copied.append(tgt_span)
                 alignments_inst.append(
@@ -321,18 +335,9 @@ class GeneralSeq2SeqModule(ModelBase):
         tgt_pred = self.decoder.prepare_sampler(tgt_pred, batch["src"], src_ids)
         y_preds = self.decoder.generate(tgt_pred)
 
-        import numpy as np
-
-        observed = {
-            "x": batch["tgt_ids"],
-            "lengths": batch["tgt_lens"],
-            "pt_copy": batch.get("copy_token"),
-            "nt_copy": batch.get("copy_phrase"),
-            "prior_alignment": batch.get("prior_alignment"),
-        }
-        tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-        tgt_nll = tgt_pred.dist.nll
-        tgt_ppl = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"]))
+        # import numpy as np
+        # tgt_pred = self.decoder.observe_x(batch["tgt_ids"], batch["tgt_lens"], inplace=False)
+        # tgt_ppl = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"]))
 
         return {"pred": [item[0] for item in y_preds]}
 

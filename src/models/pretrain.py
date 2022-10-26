@@ -10,13 +10,7 @@ from torchmetrics import MaxMetric, MinMetric
 from src.models.base import ModelBase
 from src.models.src_parser.base import SrcParserBase
 from src.models.src_parser.gold import GoldTreeProcessor
-from src.utils.fn import (
-    annotate_snt_with_brackets,
-    extract_parses,
-    get_actions,
-    get_tree,
-    report_ids_when_err,
-)
+from src.utils.fn import annotate_snt_with_brackets, extract_parses, get_actions, get_tree, report_ids_when_err
 from src.utils.metric import PerplexityMetric
 
 log = logging.getLogger(__file__)
@@ -41,9 +35,7 @@ class SrcParserPretrainModule(ModelBase):
         assert datamodule is not None or self.trainer.datamodule is not None
         self.datamodule = datamodule or self.trainer.datamodule
 
-        self.parser: SrcParserBase = instantiate(
-            self.hparams.parser, vocab=len(self.datamodule.src_vocab)
-        )
+        self.parser: SrcParserBase = instantiate(self.hparams.parser, vocab=len(self.datamodule.src_vocab))
         self.gold_tree_processor = GoldTreeProcessor(binarize=False)
 
         self.train_metric = PerplexityMetric()
@@ -54,9 +46,7 @@ class SrcParserPretrainModule(ModelBase):
         self.test_metric = instantiate(self.hparams.test_metric)
 
         if self.hparams.load_from_checkpoint is not None:
-            state_dict = torch.load(
-                self.hparams.load_from_checkpoint, map_location="cpu"
-            )
+            state_dict = torch.load(self.hparams.load_from_checkpoint, map_location="cpu")
             if "state_dict" in state_dict:
                 state_dict = state_dict["state_dict"]
             self.load_state_dict(state_dict)

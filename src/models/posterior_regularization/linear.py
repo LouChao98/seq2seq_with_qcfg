@@ -29,14 +29,13 @@ class UngroundedPRLineSearchSolver:
     num_iter: int = 3
 
     def __call__(self, pred: TgtParserPrediction, constraint_feature):
-        lambdas = self.solve(pred, constraint_feature)
         cparams = apply_to_nested_tensor(pred.posterior_params, lambda x: x.detach())
         if cparams[self.field].ndim != constraint_feature.ndim:
             # TODO: REMOVE DANGEROUS ASSUMPTION
             assert cparams[self.field].shape[2:] == constraint_feature.shape[1:]
             constraint_feature = constraint_feature.unsqueeze(1)
-
         if self.b > 0:
+            lambdas = self.solve(pred, constraint_feature)
             cparams[self.field] = self.make_constrained_params(
                 cparams[self.field], constraint_feature, lambdas, pred.dist.is_log_param(self.field)
             )
@@ -73,7 +72,7 @@ class UngroundedPRLineSearchSolver:
             params[self.field] = self.make_constrained_params(
                 params[self.field], constraint_feature, lgrid, pred.dist.is_log_param(self.field)
             )
-            dist = pred.dist.spawn(params=params)
+            dist = pred.dist.spawn(params=params, batch_size=self.num_point)
             target = -lgrid * self.b + dist.nll
             target = target.cpu().numpy()
             if itidx > 0:  # take back lb, rb and argmax

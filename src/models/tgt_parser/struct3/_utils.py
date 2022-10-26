@@ -1,3 +1,5 @@
+from itertools import product
+
 import numpy as np
 import torch
 from numba import jit
@@ -9,7 +11,7 @@ def checkpoint(func):
         # If not all argument tensors are requires_grad=True, use checkpoint will raise some errors.
         # The only case is marginal=True and the one need grad is span_indicator.
         # We do not need checkpoint in this case because no big mid tensors need to be traced.
-        if all(v.requires_grad for v in args):
+        if any(v.requires_grad for v in args):
             return torch_ckpt(func, *args, **kwargs)
         else:
             return func(*args)
@@ -99,3 +101,35 @@ def process_param_for_trace(item):
     elif isinstance(item, (list, tuple)):
         return [process_param_for_trace(i) for i in item]
     raise NotImplementedError
+
+
+def compare_marginal(m1, m2):
+    # m1: (l, r, t)
+    # m2: (w, l, t)
+    m1 = m1.contiguous().flatten(3)
+    for i in range(m1.shape[1] - 2):
+        if not torch.allclose(
+            m1.diagonal(2 + i, dim1=1, dim2=2).transpose(1, 2), m2[:, i, : -i - 1], rtol=1e-4, atol=1e-6
+        ):
+            assert False
+
+
+def check_full_marginal(term_m, trace_m, lens):
+    if term_m.ndim == 3:
+        assert torch.allclose(term_m.flatten(1).sum(1), torch.tensor(lens, dtype=torch.float))
+        assert torch.allclose(trace_m.flatten(1).sum(1), torch.tensor(lens, dtype=torch.float) - 1)
+    else:
+        raise NotImplementedError
+
+
+def compute_unnormalized_prob(seq, parser, pred):
+    x = torch.tensor([seq])
+    pred = parser.observe_x(pred, x, [len(seq)], inplace=False)
+    return pred.dist.partition.exp().item()
+
+
+def enumerate_seq(length, vocab):
+    v = list(range(vocab))
+    for i in range(2, length + 1):
+        for x in product(*([v] * i)):
+            yield x

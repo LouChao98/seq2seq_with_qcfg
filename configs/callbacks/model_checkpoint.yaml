@@ -8,3 +8,4 @@ model_checkpoint:
   dirpath: "checkpoints/"
   filename: "epoch_{epoch:03d}_val_{${.monitor}:03f}"
   auto_insert_metric_name: false
+  save_weights_only: True

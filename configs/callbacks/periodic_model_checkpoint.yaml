@@ -9,3 +9,4 @@ periodic_checkpoint:
   dirpath: "checkpoints/"
   filename: "epoch_{epoch:03d}"
   auto_insert_metric_name: False
+  save_weights_only: True

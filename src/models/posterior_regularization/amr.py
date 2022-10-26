@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 class AMRNeqPrTask(PrTask):
     def get_b(self, pred: TgtParserPrediction):
-        return torch.ones(pred.batch_size, pred.pt_num_nodes, device=pred.device) * 0
+        return torch.ones(pred.batch_size, pred.pt_num_nodes, device=pred.device)
 
     def get_init_lambdas(self, pred: TgtParserPrediction):
         return torch.full((pred.batch_size, pred.pt_num_nodes), 2.0, device=pred.device, requires_grad=True)

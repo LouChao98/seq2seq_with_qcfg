@@ -1,5 +1,7 @@
 import logging
+import pickle
 from collections import Counter
+from functools import partial
 from pathlib import Path
 from typing import Any, List, Optional, Union
 
@@ -22,6 +24,7 @@ class TSVDataModule(_DataModule):
         train_file,
         dev_file,
         test_file,
+        prior_alignment_file: str = None,
         load_gold_tree: bool = False,
         max_src_len: int = 100,
         max_tgt_len: int = 100,
@@ -43,8 +46,11 @@ class TSVDataModule(_DataModule):
             self.vocab_pair: Optional[VocabularyPair] = None
             self.use_transformer_tokenizer = transformer_tokenizer_name is not None
             if transformer_tokenizer_name is not None:
+                extra_args = {}
+                if transformer_tokenizer_name.startswith("roberta"):
+                    extra_args["add_prefix_space"] = True
                 self.transformer_tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
-                    transformer_tokenizer_name
+                    transformer_tokenizer_name, **extra_args
                 )
 
             self.data_train: Optional[Dataset] = None
@@ -59,6 +65,8 @@ class TSVDataModule(_DataModule):
             data_train = self.load_gold_tree(data_train, self.hparams.train_file)
             data_val = self.load_gold_tree(data_val, self.hparams.dev_file)
             data_test = self.load_gold_tree(data_test, self.hparams.test_file)
+        if self.hparams.prior_alignment_file:
+            data_train = self.load_prior_alignment(data_train, self.hparams.prior_alignment_file)
 
         _num_orig_train = len(data_train)
         data_train = [
@@ -169,6 +177,17 @@ class TSVDataModule(_DataModule):
             item["src_tree"] = tree
         return data
 
+    def load_prior_alignment(self, data, path):
+        baseline = 0.85
+        with open(path, "rb") as f:
+            prior_alignments = pickle.load(f)
+        assert len(data) == len(prior_alignments)
+        for item, pa in zip(data, prior_alignments):
+            assert pa.shape[0] == len(item["src"])
+            assert pa.shape[1] == len(item["tgt"])
+            item["prior_alignment"] = np.clip(baseline - pa + 1, 1e-6, None)
+        return data
+
     def build_vocab(self, data):
         src_vocab_cnt = Counter()
         tgt_vocab_cnt = Counter()
@@ -179,8 +198,8 @@ class TSVDataModule(_DataModule):
             logger.warning("I set src tokens in tgt vocab due to copy mode.")
             for inst in data:
                 tgt_vocab_cnt.update(inst["src"])
-        src_vocab = Vocabulary(src_vocab_cnt)
-        tgt_vocab = Vocabulary(tgt_vocab_cnt)
+        src_vocab = Vocabulary(src_vocab_cnt, threshold=3)
+        tgt_vocab = Vocabulary(tgt_vocab_cnt, threshold=3)
         return src_vocab, tgt_vocab
 
     def apply_vocab(self, data):
@@ -195,14 +214,20 @@ class TSVDataModule(_DataModule):
             )
         return processed
 
-    def train_dataloader(self):
+    def train_dataloader(self, keep_order=False):
+        if keep_order:
+            shuffle = False
+            collator = partial(self.collator, sort=False)
+        else:
+            shuffle = not is_under_debugger()
+            collator = self.collator
         loader = DataLoader(
             dataset=self.data_train,
             batch_size=self.hparams.batch_size,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
-            collate_fn=self.collator,
-            shuffle=False if is_under_debugger() else True,
+            collate_fn=collator,
+            shuffle=shuffle,
         )
         logger.info(f"Train dataloader: {len(loader)}")
         return loader
@@ -244,8 +269,8 @@ class TSVDataModule(_DataModule):
         max_tgt_len = max(tgt_lens)
         batched_src_ids = torch.full((len(tgt_lens), max_src_len), self.src_vocab.pad_token_id)
         batched_tgt_ids = torch.full((len(tgt_lens), max_tgt_len), self.tgt_vocab.pad_token_id)
-        for i, inst in enumerate(data):
-            s, t = inst["src_ids"], inst["tgt_ids"]
+        for i, item in enumerate(data):
+            s, t = item["src_ids"], item["tgt_ids"]
             batched_src_ids[i, : len(s)] = torch.tensor(s)
             batched_tgt_ids[i, : len(t)] = torch.tensor(t)
 
@@ -261,9 +286,9 @@ class TSVDataModule(_DataModule):
         copy_token = None
         if "copy_token" in data[0]:
             copy_token = torch.zeros(len(src), max_src_len, max_tgt_len, dtype=torch.bool)
-            for i, inst in enumerate(data):
-                inst = torch.from_numpy(inst["copy_token"])
-                copy_token[i, : inst.shape[0], : inst.shape[1]] = inst
+            for i, item in enumerate(data):
+                item = torch.from_numpy(item["copy_token"])
+                copy_token[i, : item.shape[0], : item.shape[1]] = item
             batched["copy_token"] = copy_token
 
         copy_phrase = None
@@ -272,25 +297,7 @@ class TSVDataModule(_DataModule):
             batched["copy_phrase"] = copy_phrase
 
         if self.use_transformer_tokenizer:
-            transformer_inp = self.transformer_tokenizer(
-                src,
-                padding=True,
-                is_split_into_words=True,
-                return_offsets_mapping=True,
-                return_tensors="pt",
-            )
-            offset_mapping_raw = transformer_inp.pop("offset_mapping")
-            offset_mapping = torch.zeros(transformer_inp["input_ids"].shape, dtype=torch.long)
-            for i, mapping in enumerate(offset_mapping_raw):
-                cursor = 0
-                for j, item in enumerate(mapping):
-                    if item[0] == item[1] == 0:
-                        if j != 0:
-                            break
-                        cursor = 0
-                    elif item[0] == 0:
-                        cursor += 1
-                    offset_mapping[i, j] = cursor
+            transformer_inp, offset_mapping = self.make_transformer_input(src)
             batched["transformer_inputs"] = transformer_inp
             batched["transformer_offset"] = offset_mapping
 
@@ -298,7 +305,38 @@ class TSVDataModule(_DataModule):
             trees = [item["src_tree"] for item in data]
             batched["src_tree"] = trees
 
+        if "prior_alignment" in data[0]:
+            prior_alignment = torch.ones(len(src), max_src_len, max_tgt_len)
+            for i, item in enumerate(data):
+                item = torch.from_numpy(item["prior_alignment"]).to(torch.float32)
+                prior_alignment[i, : item.shape[0], : item.shape[1]] = item
+            batched["prior_alignment"] = prior_alignment
+
         return batched
+
+    def make_transformer_input(self, tokens, blocked_ids=None):
+        transformer_inp = self.transformer_tokenizer(
+            tokens,
+            padding=True,
+            is_split_into_words=True,
+            return_offsets_mapping=True,
+            return_tensors="pt",
+        )
+        offset_mapping_raw = transformer_inp.pop("offset_mapping")
+        offset_mapping = torch.zeros(transformer_inp["input_ids"].shape, dtype=torch.long)
+        for i, (mapping, ids) in enumerate(zip(offset_mapping_raw, transformer_inp["input_ids"])):
+            cursor = 0
+            for j, (item, id_item) in enumerate(zip(mapping, ids)):
+                if blocked_ids is not None and id_item.item() in blocked_ids:
+                    continue
+                if item[0] == item[1] == 0:
+                    if j != 0:
+                        break
+                    cursor = 0
+                elif item[0] == 0:
+                    cursor += 1
+                offset_mapping[i, j] = cursor
+        return transformer_inp, offset_mapping
 
     def transfer_batch_to_device(self, batch: Any, device: torch.device, dataloader_idx: int) -> Any:
         excluded = []

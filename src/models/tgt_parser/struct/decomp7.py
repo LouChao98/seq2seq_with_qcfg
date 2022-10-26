@@ -178,6 +178,7 @@ class Decomp7(DecompBase):
             .flatten(3)
             .softmax(-1)
             .view(bsz, r, src_nt, src_nt + src_pt, src_nt + src_pt)
+            .requires_grad_(True)
         )
         return {
             "term": torch.randn(bsz, max_len, pt).log_softmax(-1).requires_grad_(True),

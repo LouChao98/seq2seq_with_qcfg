@@ -1,0 +1,23 @@
+_target_: src.models.tgt_parser.neural_decomp1_copy_as_t.NeuralDecomp1TgtParser
+_recursive_: false
+
+# NeuralQCFGTgtParser
+dim: 512
+num_layers: 3
+cpd_rank: 64
+max_copy_width: 5
+
+# base
+pt_states: 8
+nt_states: 8
+pt_span_range:
+  - 1
+  - 5 # larger than max_copy_width
+nt_span_range: [2, 1000]
+use_copy: true
+rule_hard_constraint: ~
+rule_soft_constraint: ~
+rule_soft_constraint_solver: ~
+generation_max_length: 40
+generation_num_samples: 10
+generation_ppl_batch_size: 1

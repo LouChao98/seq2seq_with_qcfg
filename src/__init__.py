@@ -9,6 +9,7 @@ _hit_debug, debugging = True, False
 
 
 def is_under_debugger():
+    return False
     if os.environ.get("DEBUG_MODE", "").lower() in ("true", "t", "1", "yes", "y"):
         result = True
     else:
@@ -21,9 +22,7 @@ def is_under_debugger():
     return result
 
 
-OmegaConf.register_new_resolver(
-    "in_debugger", lambda x, default=None: x if is_under_debugger() else default
-)
+OmegaConf.register_new_resolver("in_debugger", lambda x, default=None: x if is_under_debugger() else default)
 
 
 def in_cluster():

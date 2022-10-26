@@ -86,7 +86,7 @@ class UDepthBoundedHierarchy(RuleConstraintBase):
         return node_mask.view(batch_size, nt, nt, nt).to(device)
 
 
-def show_constraint(self, mask, spans):
+def show_constraint(mask, spans):
     # mask should be N * N. not allow batch.
     position = mask[: len(spans), : len(spans)].nonzero(as_tuple=True)
     allowed = defaultdict(list)

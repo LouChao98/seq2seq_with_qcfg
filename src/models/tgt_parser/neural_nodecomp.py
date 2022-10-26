@@ -7,7 +7,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from ..components.common import MultiResidualLayer
 from .base import TgtParserBase, TgtParserPrediction
-from .struct.no_decomp import NoDecomp, NoDecompSampler
+from .struct3.no_decomp import NoDecomp, NoDecompSampler
 
 log = logging.getLogger(__file__)
 

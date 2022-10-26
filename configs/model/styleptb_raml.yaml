@@ -3,9 +3,9 @@ defaults:
   - parser: pcfg
   - tree_encoder: treelstm
   - decoder: nodecomp
-  - test_metric: bleu1234_and_exact
+  - test_metric: bleu1234
 
-_target_: src.models.general_seq2seq.GeneralSeq2SeqModule
+_target_: src.models.general_seq2seq_raml.GeneralSeq2SeqModule
 _recursive_: false
 
 param_initializer: "xavier_uniform"
@@ -15,6 +15,12 @@ embedding:
   _target_: torch.nn.Embedding
   embedding_dim: 300
 
+decoder:
+  rule_soft_constraint:
+    _target_: src.models.constraint.fully_parameterized.FPPenaltyDepth
+  rule_soft_constraint_solver:
+    _target_: src.models.posterior_regularization.linear.UngroundedPRLineSearchSolver
+    b: 0
 optimizer:
   groups: ~
   args:

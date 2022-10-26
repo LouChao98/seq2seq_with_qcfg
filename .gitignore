@@ -1,5 +1,8 @@
 /vendor
 *.sh
+benchmark*.py
+play*.py
+wrong*.py
 !eval.sh
 
 # Byte-compiled / optimized / DLL files
