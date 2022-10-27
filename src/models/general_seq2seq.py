@@ -1,5 +1,6 @@
 import logging
 import operator
+import random
 from copy import copy
 from typing import Any, List, Optional
 
@@ -167,6 +168,19 @@ class GeneralSeq2SeqModule(ModelBase):
             "prior_alignment": batch.get("prior_alignment"),
         }
         logging_vals = {}
+
+        if self.training and (rate := self.hparams.copy_dropout) > 0:
+            if (pt_copy := observed["pt_copy"]) is not None:
+                mask = torch.rand(pt_copy.shape, device=pt_copy.device) < rate
+                pt_copy[mask] = False
+            if (nt_copy := observed["nt_copy"]) is not None:
+                # TODO respect hierarchy
+                for item in nt_copy:
+                    for item_w in item:
+                        if len(item_w) == 0:
+                            continue
+                        flags = [random.random() > rate for _ in item_w]
+                        item_w[:] = [i for i, f in zip(item_w, flags) if f]
 
         with self.profiler.profile("compute_src_nll_and_sampling"):
             dist = self.parser(src_ids, src_lens)
