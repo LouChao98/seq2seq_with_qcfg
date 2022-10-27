@@ -194,7 +194,6 @@ class GeneralSeq2SeqModule(ModelBase):
         if self.training:
             if self.decoder.rule_soft_constraint_solver is not None:
                 reward = self.decoder.rule_soft_constraint.get_reward_from_pred(tgt_pred)
-                mask = FPSimpleHierarchy().get_mask_from_pred(tgt_pred)
                 dist = tgt_pred.dist.spawn(
                     params={
                         "term": torch.where(tgt_pred.dist.params["term"] > -1e8, 0, -1e9),
@@ -202,11 +201,7 @@ class GeneralSeq2SeqModule(ModelBase):
                         "root": torch.where(tgt_pred.dist.params["root"] > -1e8, 0.0, -1e9),
                     }
                 )
-                # rule = tgt_pred.dist.params['rule'].clone()
-                # rule[~mask] = -1e9
-                # dist2 =tgt_pred.dist.spawn(params={'rule': rule, 'constraint': None})
-                tgt_dist = tgt_pred.dist.spawn(params={"constraint": None})
-                tgt_loss = dist.cross_entropy(tgt_dist, fix_left=True)
+                tgt_loss = dist.cross_entropy(tgt_pred.dist, fix_left=True) + tgt_pred.dist.nll
             if (e := self.hparams.parser_entropy_reg) > 0:
                 entropy = self.parser.entropy(src_ids, src_lens, dist)
                 src_entropy_reg = -e * entropy

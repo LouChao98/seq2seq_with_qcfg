@@ -6,19 +6,14 @@ from itertools import chain
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-from torch import Tensor, fix_
+from torch import Tensor
+from torch.autograd import grad
 from torch.distributions.utils import lazy_property
 
 from ._fn import ns_diagonal as diagonal
 from ._fn import ns_diagonal_copy_ as diagonal_copy_
 from ._fn import ns_stripe as stripe
-from .semiring import (
-    CrossEntropySemiring,
-    EntropySemiring,
-    LogSemiring,
-    SampledSemiring,
-    UnnormalizedCrossEntropySemiring,
-)
+from .semiring import CrossEntropySemiring, EntropySemiring, LogSemiring, SampledSemiring
 
 log = logging.getLogger(__file__)
 _OK, _SONMASK, _REACHLIMIT = 0, 1, 2
@@ -49,8 +44,6 @@ class DecompBase:
 
         super().__init__()
         self.params = params
-        # for key in self.KEYS:
-        #     self.params[key].requires_grad_().retain_grad()
         self.lens = lens = torch.tensor(lens)
         self.batch_size = batch_size
         self.nt_states = nt_states
@@ -133,6 +126,12 @@ class DecompBase:
         return output
 
     @lazy_property
+    def marginal_with_grad(self):
+        logZ, trace = self.inside(self.params, LogSemiring, trace=True, use_reentrant=False)
+        grads = grad(logZ.sum(), [trace])[0]
+        return grads
+
+    @lazy_property
     def entropy(self):
         return self.inside(self.params, EntropySemiring, False)[0]
 
@@ -142,13 +141,6 @@ class DecompBase:
         else:
             oparams = other.params
         return self.inside((self.params, oparams), CrossEntropySemiring, False)[0]
-
-    def unnormalized_cross_entropy(self, other: "DecompBase", fix_left=False):
-        if fix_left:
-            oparams = {k: v.detach() if isinstance(v, Tensor) else v for k, v in other.params.items()}
-        else:
-            oparams = other.params
-        return self.inside((self.params, oparams), UnnormalizedCrossEntropySemiring, False)[0]
 
     def kl(self, other):
         ...

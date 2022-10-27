@@ -29,11 +29,11 @@ class Decomp1(DecompBase):
     KEYS = ("term", "head", "left", "right", "root")
     LOGSPACE = (True, True, True, True, True)
 
-    def inside(self, params, semiring, trace=False):
+    def inside(self, params, semiring, trace=False, use_reentrant=True):
         params = self.preprocess(params, semiring)
-        merge = checkpoint(partial(g_merge, semiring=semiring))
-        merge2 = checkpoint(partial(g_merge2, semiring=semiring))
-        merge3 = checkpoint(partial(g_merge3, semiring=semiring))
+        merge = checkpoint(partial(g_merge, semiring=semiring), use_reentrant=use_reentrant)
+        merge2 = checkpoint(partial(g_merge2, semiring=semiring), use_reentrant=use_reentrant)
+        merge3 = checkpoint(partial(g_merge3, semiring=semiring), use_reentrant=use_reentrant)
 
         head: Tensor = params["head"]  # (batch, NT, r), A[i] -> R
         term: Tensor = params["term"]  # (batch, seq_len, PT)

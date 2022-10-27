@@ -9,7 +9,7 @@ import pytorch_lightning as pl
 import torch
 from torch_struct.distributions import SentCFG
 
-from src.models.tgt_parser.struct.pcfg import PCFG
+from src.models.tgt_parser.struct3.no_decomp import NoDecomp
 from src.utils.fn import spans2tree
 
 pl.seed_everything(1)
@@ -124,7 +124,7 @@ def entropy(params, x, n, nt, pt):
     return -(ll * ll.exp()).sum()
 
 
-def ce_entropy(params, params2, x, n, nt, pt):
+def unnormalized_ce_entropy(params, params2, x, n, nt, pt):
     ll = []
     ll2 = []
     for tree in enumerate_tree(0, n, nt, pt):
@@ -136,24 +136,24 @@ def ce_entropy(params, params2, x, n, nt, pt):
     ll = torch.tensor(ll)
     ll = ll.log_softmax(0)
     ll2 = torch.tensor(ll2)
-    ll2 = ll2.log_softmax(0)
+    # ll2 = ll2.log_softmax(0)
     return -(ll2 * ll.exp()).sum()
 
 
-def kl(params, params2, x, n, nt, pt):
-    ll = []
-    ll2 = []
-    for tree in enumerate_tree(0, n, nt, pt):
-        tree = [(l, r - 1, t) for l, r, t in tree]
-        stree = score2(params, x, tree, nt)
-        ll.append(stree)
-        ll2.append(score2(params2, x, tree, nt))
+# def kl(params, params2, x, n, nt, pt):
+#     ll = []
+#     ll2 = []
+#     for tree in enumerate_tree(0, n, nt, pt):
+#         tree = [(l, r - 1, t) for l, r, t in tree]
+#         stree = score2(params, x, tree, nt)
+#         ll.append(stree)
+#         ll2.append(score2(params2, x, tree, nt))
 
-    ll = torch.tensor(ll)
-    ll = ll.log_softmax(0)
-    ll2 = torch.tensor(ll2)
-    ll2 = ll2.log_softmax(0)
-    return (ll.exp() * (ll - ll2)).sum()
+#     ll = torch.tensor(ll)
+#     ll = ll.log_softmax(0)
+#     ll2 = torch.tensor(ll2)
+#     ll2 = ll2.log_softmax(0)
+#     return (ll.exp() * (ll - ll2)).sum()
 
 
 def convert(params):
@@ -196,13 +196,16 @@ terms = params2["term"].unsqueeze(1).expand(B, n, PT, params2["term"].size(2))
 terms = torch.gather(terms, 3, x_expand).squeeze(3)
 params2["term"] = terms
 
-pcfg = PCFG()
+pcfg = NoDecomp(params, lens, TGT_NT, SRC_NT, TGT_PT, SRC_PT, B)
+pcfg2 = NoDecomp(params2, lens, TGT_NT, SRC_NT, TGT_PT, SRC_PT, B)
 
 print("Brute force ll", log_likelihood2(params, seq_inst, N, NT, PT))
-print(pcfg(params, lens))
+print(pcfg.nll)
 
-print("Brute force kl", kl(params, params2, seq_inst, N, NT, PT))
-print(pcfg.kl(params, params2, lens))
+# print("Brute force kl", kl(params, params2, seq_inst, N, NT, PT))
+# print(pcfg.kl(params, params2, lens))
 
-print("Brute force ce", ce_entropy(params, params2, seq_inst, N, NT, PT))
-print(pcfg.ce(params, params2, lens))
+print("Brute force ce", unnormalized_ce_entropy(params, params2, seq_inst, N, NT, PT))
+print(pcfg.cross_entropy(pcfg2, lens) - pcfg2.partition)
+
+# - p log q + p log Z

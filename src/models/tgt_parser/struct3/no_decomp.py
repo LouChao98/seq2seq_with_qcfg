@@ -33,11 +33,11 @@ class NoDecomp(DecompBase):
     KEYS = ("term", "rule", "root")
     LOGSPACE = (True, True, True)
 
-    def inside(self, params, semiring, trace=False):
+    def inside(self, params, semiring, trace=False, use_reentrant=True):
         params = self.preprocess(params, semiring)
-        merge = checkpoint(partial(g_merge, semiring=semiring))
-        merge2 = checkpoint(partial(g_merge2, semiring=semiring))
-        merge3 = checkpoint(partial(g_merge3, semiring=semiring))
+        merge = checkpoint(partial(g_merge, semiring=semiring), use_reentrant=use_reentrant)
+        merge2 = checkpoint(partial(g_merge2, semiring=semiring), use_reentrant=use_reentrant)
+        merge3 = checkpoint(partial(g_merge3, semiring=semiring), use_reentrant=use_reentrant)
 
         term: Tensor = params["term"]
         rule: Tensor = params["rule"]

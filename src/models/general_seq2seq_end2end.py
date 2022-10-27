@@ -1,6 +1,5 @@
 import logging
 import operator
-from copy import copy
 from typing import Any, List, Optional
 
 import torch
@@ -8,7 +7,7 @@ import torch.nn as nn
 from hydra.utils import instantiate
 from pytorch_lightning.profilers import PassThroughProfiler
 from pytorch_memlab import profile_every
-from torch_scatter import scatter_mean, scatter_sum
+from torch_scatter import scatter_mean
 from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
 
@@ -45,13 +44,10 @@ class GeneralSeq2SeqModule(ModelBase):
         tree_encoder=None,
         decoder=None,
         parser=None,
-        tgt_parser=None,  #  not a part of qcfg. just a regularizer
-        tgt_parser_reg=0.0,
         optimizer=None,
         scheduler=None,
         test_metric=None,
         load_from_checkpoint=None,
-        copy_dropout=0.0,
         parser_entropy_reg=0.0,
         decoder_entropy_reg=0.0,
         param_initializer="xavier_uniform",
@@ -95,10 +91,6 @@ class GeneralSeq2SeqModule(ModelBase):
             datamodule=self.datamodule,
             src_dim=self.tree_encoder.get_output_dim(),
         )
-        if self.hparams.tgt_parser_reg > 0:
-            self.tgt_parser: SrcParserBase = instantiate(
-                self.hparams.tgt_parser, vocab=len(self.datamodule.tgt_vocab)
-            )
         self.threshold = torch.nn.Threshold(0.1, 0)
 
         self.train_metric = PerplexityMetric()
@@ -158,21 +150,19 @@ class GeneralSeq2SeqModule(ModelBase):
     @profile_every(5, enable=False)
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        tgt_ids, tgt_lens = batch["tgt_ids"], batch["tgt_lens"]
         observed = {
-            "x": tgt_ids,
-            "lengths": tgt_lens,
+            "x": batch["tgt_ids"],
+            "lengths": batch["tgt_lens"],
             "pt_copy": batch.get("copy_token"),
             "nt_copy": batch.get("copy_phrase"),
             "prior_alignment": batch.get("prior_alignment"),
         }
         logging_vals = {}
 
-        with self.profiler.profile("compute_src_nll_and_sampling"):
+        with self.profiler.profile("compute_src_nll_and_marginal"):
             dist = self.parser(src_ids, src_lens)
             src_nll = -dist.partition
-            src_event, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
-            src_spans = extract_parses_span_only(src_event[-1], src_lens, inc=1)
+            marginal = dist.marginal
 
         with self.profiler.profile("src_encoding"):
             x = self.encode(batch)
@@ -183,22 +173,9 @@ class GeneralSeq2SeqModule(ModelBase):
             tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
             tgt_nll = tgt_pred.dist.nll
 
-        with self.profiler.profile("reward"), torch.no_grad():
-            src_event_argmax, src_logprob_argmax = self.parser.argmax(src_ids, src_lens, dist=dist)
-            src_spans_argmax = extract_parses_span_only(src_event_argmax[-1], src_lens, inc=1)
-            node_features_argmax, node_spans_argmax = self.tree_encoder(x, src_lens, spans=src_spans_argmax)
-            tgt_argmax_pred = self.decoder(node_features_argmax, node_spans_argmax)
-            tgt_argmax_pred = self.decoder.observe_x(tgt_argmax_pred, **observed)
-            tgt_nll_argmax = tgt_argmax_pred.dist.nll
-            neg_reward = (tgt_nll - tgt_nll_argmax).detach()
-            logging_vals["reward"] = -neg_reward
-
-        objective = src_logprob * neg_reward
-
         soft_constraint_loss = 0
         src_entropy_reg = 0
         tgt_entropy_reg = 0
-        tgt_parser_reg = 0
         if self.training:
             if self.decoder.rule_soft_constraint_solver is not None:
                 with self.profiler.profile("compute_soft_constraint"):
@@ -211,29 +188,16 @@ class GeneralSeq2SeqModule(ModelBase):
                 entropy = tgt_pred.dist.entropy
                 tgt_entropy_reg = -e * entropy
                 logging_vals["tgt_entropy"] = entropy
-            if (e := self.hparams.tgt_parser_reg) > 0:
-
-                pred = copy(tgt_pred).clear()
-                pred = self.decoder.observe_x(pred, x=tgt_ids, lengths=tgt_lens)
-                q = pred.dist
-                p = self.tgt_parser(tgt_ids, tgt_lens)
-                qm = q.marginal_with_grad.flatten(3).sum(3)
-                pm = p.marginal_with_grad.flatten(3).sum(3)
-                sigma = 0.1
-                diff = (qm - pm).abs()
-                l = torch.where(diff < sigma, (qm - pm) ** 2 / (2 * sigma), diff - sigma)
-                tgt_parser_reg = l.flatten(1).sum(1) + p.nll
 
         return {
-            "decoder": self.threshold(tgt_nll) + soft_constraint_loss + tgt_entropy_reg + tgt_parser_reg,
-            "encoder": self.threshold(src_nll) + objective + src_entropy_reg,
+            "decoder": self.threshold(tgt_nll) + soft_constraint_loss + tgt_entropy_reg,
+            "encoder": self.threshold(src_nll) + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
             "runtime": {"seq_encoded": x},
             "src_runtime": {
                 "dist": dist,
                 "event": src_event,
-                "argmax_event": src_event_argmax,
             },
             "tgt_runtime": {"pred": tgt_pred},
             "log": logging_vals,
@@ -343,18 +307,18 @@ class GeneralSeq2SeqModule(ModelBase):
         tgt_pred = self.decoder.prepare_sampler(tgt_pred, batch["src"], src_ids)
         y_preds = self.decoder.generate(tgt_pred)
 
-        # import numpy as np
+        import numpy as np
 
-        # observed = {
-        #     "x": batch["tgt_ids"],
-        #     "lengths": batch["tgt_lens"],
-        #     "pt_copy": batch.get("copy_token"),
-        #     "nt_copy": batch.get("copy_phrase"),
-        #     "prior_alignment": batch.get("prior_alignment"),
-        # }
-        # tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-        # tgt_nll = tgt_pred.dist.nll
-        # tgt_ppl = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"]))
+        observed = {
+            "x": batch["tgt_ids"],
+            "lengths": batch["tgt_lens"],
+            "pt_copy": batch.get("copy_token"),
+            "nt_copy": batch.get("copy_phrase"),
+            "prior_alignment": batch.get("prior_alignment"),
+        }
+        tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
+        tgt_nll = tgt_pred.dist.nll
+        tgt_ppl = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"]))
 
         return {"pred": [item[0] for item in y_preds]}
 

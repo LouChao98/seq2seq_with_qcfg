@@ -1,3 +1,4 @@
+import functools
 from itertools import product
 
 import numpy as np
@@ -6,17 +7,21 @@ from numba import jit
 from torch.utils.checkpoint import checkpoint as torch_ckpt
 
 
-def checkpoint(func):
-    def wrapper(*args, **kwargs):
-        # If not all argument tensors are requires_grad=True, use checkpoint will raise some errors.
-        # The only case is marginal=True and the one need grad is span_indicator.
-        # We do not need checkpoint in this case because no big mid tensors need to be traced.
-        if any(v.requires_grad for v in args):
-            return torch_ckpt(func, *args, **kwargs)
-        else:
-            return func(*args)
+def checkpoint(original_function=None, *, use_reentrant=True):
+    def _decorate(function):
+        @functools.wraps(function)
+        def wrapped_function(*args, **kwargs):
+            if any(v.requires_grad for v in args):
+                return torch_ckpt(function, *args, use_reentrant=use_reentrant, **kwargs)
+            else:
+                return function(*args)
 
-    return wrapper
+        return wrapped_function
+
+    if original_function:
+        return _decorate(original_function)
+
+    return _decorate
 
 
 @jit(nopython=True)

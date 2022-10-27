@@ -348,6 +348,7 @@ class TgtParserBase(nn.Module):
             chosen = np.argmin(ppl)
             if ppl[chosen] > 1e6:
                 logger.warning(f"The minimum ppl is {ppl}")
+            print(ppl)
             new_preds.append((preds_batch[chosen]["tgt"], ppl[chosen]))
         return new_preds
 

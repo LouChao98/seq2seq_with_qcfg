@@ -152,7 +152,14 @@ class Decomp1Sampler(DecompSamplerBase):
     def process_params(self, params: Dict[str, Tensor]):
         terms = params["term"].exp().cumsum(2).cpu().numpy()
         roots = params["root"].exp().cumsum(1).cpu().numpy()
-        H = params["head"].exp().cumsum(2).cpu().numpy()
+        H = (
+            params["head"]
+            .view(self.batch_size, self.nt_states, self.nt_num_nodes, H.shape[-1])
+            .exp()
+            .cumsum(3)
+            .cpu()
+            .numpy()
+        )
         L = params["left"].exp().cumsum(2).cpu().numpy()
         R = params["right"].exp().cumsum(2).cpu().numpy()
         return terms, H, L, R, roots
@@ -194,7 +201,7 @@ class Decomp1Sampler(DecompSamplerBase):
                     s = nonterminals.pop()
                     if s < NT:
                         actions += 1
-                        head = weighted_random_v2(rules_head[s])
+                        head = weighted_random_v2(rules_head[s, np.random.randint(0, nt_num_nodes)])
                         left = weighted_random_v2(rules_left[head])
                         right = weighted_random_v2(rules_right[head])
                         nonterminals.extend([right, left])
