@@ -139,7 +139,6 @@ class TSVDataModule(_DataModule):
 
     def process_phrase_copy(self, inst):
         # generate a list of bool vectors from width 2 to len(tgt)-1.
-        # NOTE this assume phrases are at least length 2
         src = inst["src"]
         tgt = inst["tgt"]
         output = []
@@ -297,7 +296,25 @@ class TSVDataModule(_DataModule):
             batched["copy_phrase"] = copy_phrase
 
         if self.use_transformer_tokenizer:
-            transformer_inp, offset_mapping = self.make_transformer_input(src)
+            transformer_inp = self.transformer_tokenizer(
+                src,
+                padding=True,
+                is_split_into_words=True,
+                return_offsets_mapping=True,
+                return_tensors="pt",
+            )
+            offset_mapping_raw = transformer_inp.pop("offset_mapping")
+            offset_mapping = torch.zeros(transformer_inp["input_ids"].shape, dtype=torch.long)
+            for i, mapping in enumerate(offset_mapping_raw):
+                cursor = 0
+                for j, item in enumerate(mapping):
+                    if item[0] == item[1] == 0:
+                        if j != 0:
+                            break
+                        cursor = 0
+                    elif item[0] == 0:
+                        cursor += 1
+                    offset_mapping[i, j] = cursor
             batched["transformer_inputs"] = transformer_inp
             batched["transformer_offset"] = offset_mapping
 
@@ -313,30 +330,6 @@ class TSVDataModule(_DataModule):
             batched["prior_alignment"] = prior_alignment
 
         return batched
-
-    def make_transformer_input(self, tokens, blocked_ids=None):
-        transformer_inp = self.transformer_tokenizer(
-            tokens,
-            padding=True,
-            is_split_into_words=True,
-            return_offsets_mapping=True,
-            return_tensors="pt",
-        )
-        offset_mapping_raw = transformer_inp.pop("offset_mapping")
-        offset_mapping = torch.zeros(transformer_inp["input_ids"].shape, dtype=torch.long)
-        for i, (mapping, ids) in enumerate(zip(offset_mapping_raw, transformer_inp["input_ids"])):
-            cursor = 0
-            for j, (item, id_item) in enumerate(zip(mapping, ids)):
-                if blocked_ids is not None and id_item.item() in blocked_ids:
-                    continue
-                if item[0] == item[1] == 0:
-                    if j != 0:
-                        break
-                    cursor = 0
-                elif item[0] == 0:
-                    cursor += 1
-                offset_mapping[i, j] = cursor
-        return transformer_inp, offset_mapping
 
     def transfer_batch_to_device(self, batch: Any, device: torch.device, dataloader_idx: int) -> Any:
         excluded = []

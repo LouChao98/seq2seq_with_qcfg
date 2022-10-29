@@ -33,6 +33,7 @@ class SemanticParsingDataModule(_DataModule):
         max_src_len: int = 100,
         max_tgt_len: int = 100,
         copy_mode: str = "none",
+        add_eos: bool = False,
         transformer_tokenizer_name: str = None,
         batch_size: int = 64,
         token_size: int = 0,  # enable if nonzero
@@ -52,8 +53,11 @@ class SemanticParsingDataModule(_DataModule):
             self.vocab_pair: Optional[VocabularyPair] = None
             self.use_transformer_tokenizer = transformer_tokenizer_name is not None
             if transformer_tokenizer_name is not None:
+                extra_args = {}
+                if transformer_tokenizer_name.startswith("roberta"):
+                    extra_args["add_prefix_space"] = True
                 self.transformer_tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
-                    transformer_tokenizer_name
+                    transformer_tokenizer_name, **extra_args
                 )
 
             self.data_train: Optional[Dataset] = None
@@ -85,6 +89,11 @@ class SemanticParsingDataModule(_DataModule):
         data_train = self.process_all_copy(data_train)
         data_val = self.process_all_copy(data_val)
         data_test = self.process_all_copy(data_test)
+
+        if self.hparams.add_eos:
+            data_train = self.add_eos(data_train)
+            data_val = self.add_eos(data_val)
+            data_test = self.add_eos(data_test)
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
         self.vocab_pair = VocabularyPair(self.src_vocab, self.tgt_vocab)
@@ -170,6 +179,12 @@ class SemanticParsingDataModule(_DataModule):
             previous = copy_position
             output.append(copy_position)
         inst["copy_phrase"] = output
+
+    def add_eos(self, data):
+        for item in data:
+            item["src"].append("<eos>")
+            item["tgt"].append("<eos>")
+        return data
 
     def build_vocab(self, data):
         src_vocab_cnt = Counter()
@@ -268,8 +283,8 @@ class SemanticParsingDataModule(_DataModule):
         max_tgt_len = max(tgt_lens)
         batched_src_ids = torch.full((len(tgt_lens), max_src_len), self.src_vocab.pad_token_id)
         batched_tgt_ids = torch.full((len(tgt_lens), max_tgt_len), self.tgt_vocab.pad_token_id)
-        for i, inst in enumerate(data):
-            s, t = inst["src_ids"], inst["tgt_ids"]
+        for i, item in enumerate(data):
+            s, t = item["src_ids"], item["tgt_ids"]
             batched_src_ids[i, : len(s)] = torch.tensor(s)
             batched_tgt_ids[i, : len(t)] = torch.tensor(t)
 
@@ -284,10 +299,10 @@ class SemanticParsingDataModule(_DataModule):
 
         copy_token = None
         if "copy_token" in data[0]:
-            copy_token = torch.zeros(len(src), max(src_lens), max(tgt_lens), dtype=torch.bool)
-            for i, inst in enumerate(data):
-                inst = torch.from_numpy(inst["copy_token"])
-                copy_token[i, : inst.shape[0], : inst.shape[1]] = inst
+            copy_token = torch.zeros(len(src), max_src_len, max_tgt_len, dtype=torch.bool)
+            for i, item in enumerate(data):
+                item = torch.from_numpy(item["copy_token"])
+                copy_token[i, : item.shape[0], : item.shape[1]] = item
             batched["copy_token"] = copy_token
 
         copy_phrase = None
@@ -317,10 +332,6 @@ class SemanticParsingDataModule(_DataModule):
                     offset_mapping[i, j] = cursor
             batched["transformer_inputs"] = transformer_inp
             batched["transformer_offset"] = offset_mapping
-
-        if "src_tree" in data[0]:
-            trees = [item["src_tree"] for item in data]
-            batched["src_tree"] = trees
 
         return batched
 

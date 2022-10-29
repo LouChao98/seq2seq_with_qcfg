@@ -16,18 +16,18 @@ defaults:
 # name of the run determines folder name in logs
 name: "geoquery"
 
-datamodule:
-  copy_mode: "phrase"
-  transformer_tokenizer_name: bert-base-cased
+# datamodule:
+#   copy_mode: "phrase"
+#   transformer_tokenizer_name: bert-base-cased
 
-model:
-  transformer_pretrained_model: bert-base-cased
-  decoder:
-    pt_states: 6
-    nt_states: 6
-    generation_num_samples: 5
-    generation_ppl_batch_size: 5
-    # rule_hard_constraint: ~
+# model:
+#   transformer_pretrained_model: bert-base-cased
+#   decoder:
+#     pt_states: 6
+#     nt_states: 6
+#     generation_num_samples: 5
+#     generation_ppl_batch_size: 5
+# rule_hard_constraint: ~
 
 trainer:
   max_epochs: 100

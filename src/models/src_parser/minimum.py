@@ -3,14 +3,13 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_struct
 
 from ..components.common import MultiResidualLayer
 from ..tgt_parser.struct3.no_decomp import NoDecomp
-from .base import SrcParserBase
 
 
-class MinimumSrcParser(SrcParserBase):
+class MinimumSrcParser(nn.Module):
+    # TODO consider remove this out from src_parser.
     def __init__(
         self,
         vocab=100,
@@ -72,3 +71,10 @@ class MinimumSrcParser(SrcParserBase):
             len(lengths),
         )
         return dist
+
+    @torch.enable_grad()
+    def argmax(self, x, lengths, dist: Optional[NoDecomp] = None, extra_scores=None):
+        if dist is None:
+            dist = self(x, lengths, extra_scores)
+
+        return dist.viterbi_deocoded

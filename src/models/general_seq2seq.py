@@ -15,6 +15,7 @@ from transformers import AutoModel
 
 from src.models.base import ModelBase
 from src.models.src_parser.base import SrcParserBase
+from src.models.src_parser.minimum import MinimumSrcParser
 from src.models.tgt_parser.base import TgtParserBase
 from src.models.tree_encoder.base import TreeEncoderBase
 from src.utils.fn import (
@@ -53,6 +54,8 @@ class GeneralSeq2SeqModule(ModelBase):
         test_metric=None,
         load_from_checkpoint=None,
         copy_dropout=0.0,
+        noisy_spans_reg=0.0,
+        noisy_spans_num=0.0,
         parser_entropy_reg=0.0,
         decoder_entropy_reg=0.0,
         param_initializer="xavier_uniform",
@@ -97,7 +100,7 @@ class GeneralSeq2SeqModule(ModelBase):
             src_dim=self.tree_encoder.get_output_dim(),
         )
         if self.hparams.tgt_parser_reg > 0:
-            self.tgt_parser: SrcParserBase = instantiate(
+            self.tgt_parser: MinimumSrcParser = instantiate(
                 self.hparams.tgt_parser, vocab=len(self.datamodule.tgt_vocab)
             )
         self.threshold = torch.nn.Threshold(0.1, 0)
@@ -186,10 +189,12 @@ class GeneralSeq2SeqModule(ModelBase):
             dist = self.parser(src_ids, src_lens)
             src_nll = -dist.partition
             src_event, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
+            # these spans are labeled
             src_spans = extract_parses_span_only(src_event[-1], src_lens, inc=1)
 
         with self.profiler.profile("src_encoding"):
             x = self.encode(batch)
+            # span labels are discarded (set to -1)
             node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         with self.profiler.profile("compute_tgt_nll"):
@@ -210,6 +215,7 @@ class GeneralSeq2SeqModule(ModelBase):
         objective = src_logprob * neg_reward
 
         soft_constraint_loss = 0
+        noisy_span_loss = 0
         src_entropy_reg = 0
         tgt_entropy_reg = 0
         tgt_parser_reg = 0
@@ -217,6 +223,7 @@ class GeneralSeq2SeqModule(ModelBase):
             if self.decoder.rule_soft_constraint_solver is not None:
                 with self.profiler.profile("compute_soft_constraint"):
                     soft_constraint_loss = self.decoder.get_soft_constraint_loss(tgt_pred)
+                logging_vals["tgt_reg"] = soft_constraint_loss
             if (e := self.hparams.parser_entropy_reg) > 0:
                 entropy = self.parser.entropy(src_ids, src_lens, dist)
                 src_entropy_reg = -e * entropy
@@ -226,7 +233,6 @@ class GeneralSeq2SeqModule(ModelBase):
                 tgt_entropy_reg = -e * entropy
                 logging_vals["tgt_entropy"] = entropy
             if (e := self.hparams.tgt_parser_reg) > 0:
-
                 pred = copy(tgt_pred).clear()
                 pred = self.decoder.observe_x(pred, x=tgt_ids, lengths=tgt_lens)
                 q = pred.dist
@@ -235,11 +241,23 @@ class GeneralSeq2SeqModule(ModelBase):
                 pm = p.marginal_with_grad.flatten(3).sum(3)
                 sigma = 0.1
                 diff = (qm - pm).abs()
-                l = torch.where(diff < sigma, (qm - pm) ** 2 / (2 * sigma), diff - sigma)
-                tgt_parser_reg = l.flatten(1).sum(1) + p.nll
+                l = torch.where(diff < sigma, (qm - pm) ** 2 / (2 * sigma), diff - sigma).flatten(1).sum(1)
+                tgt_parser_reg = e * l + p.nll
+                logging_vals["tgt_reg"] = l
+                logging_vals["tgt_parser_nll"] = p.nll
+            if (e := self.hparams.noisy_spans_reg) > 0:
+                l = self.decoder.get_noisy_span_loss(
+                    node_features, node_spans, self.hparams.noisy_spans_num, observed
+                )
+                logging_vals["noisy_spans"] = l
+                noisy_span_loss = e * l
 
         return {
-            "decoder": self.threshold(tgt_nll) + soft_constraint_loss + tgt_entropy_reg + tgt_parser_reg,
+            "decoder": self.threshold(tgt_nll)
+            + soft_constraint_loss
+            + tgt_entropy_reg
+            + tgt_parser_reg
+            + noisy_span_loss,
             "encoder": self.threshold(src_nll) + objective + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
@@ -279,11 +297,19 @@ class GeneralSeq2SeqModule(ModelBase):
         tgt_pred = self.decoder(node_features, node_spans)
         tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
         tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(tgt_pred)
-
         tgt_annotated = []
         for snt, tgt_spans_inst in zip(batch["tgt"], tgt_spans):
             tree = annotate_snt_with_brackets(snt, tgt_spans_inst)
             tgt_annotated.append(tree)
+
+        if self.tgt_parser is not None:
+            tgt_parser_annotated = []
+            tgt_parser_spans = self.tgt_parser.argmax(batch["tgt_ids"], batch["tgt_lens"])
+            for snt, tgt_parser_spans_inst in zip(batch["tgt"], tgt_parser_spans):
+                tree = annotate_snt_with_brackets(snt, tgt_parser_spans_inst)
+                tgt_parser_annotated.append(tree)
+        else:
+            tgt_parser_annotated = [None for _ in tgt_annotated]
 
         num_pt_spans = max(len(item) for item in pt_spans)
         num_nt_spans = max(len(item) for item in nt_spans)
@@ -338,6 +364,7 @@ class GeneralSeq2SeqModule(ModelBase):
         return {
             "src_tree": src_annotated,
             "tgt_tree": tgt_annotated,
+            "tgt_parser_tree": tgt_parser_annotated,
             "alignment": alignments,
         }
 
@@ -355,7 +382,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
         tgt_pred = self.decoder(node_features, node_spans)
         tgt_pred = self.decoder.prepare_sampler(tgt_pred, batch["src"], src_ids)
-        y_preds = self.decoder.generate(tgt_pred)
+        y_preds = self.decoder.generate(tgt_pred, baseline_model=self.tgt_parser)
 
         # import numpy as np
 
@@ -386,13 +413,17 @@ class GeneralSeq2SeqModule(ModelBase):
             self.log_dict({"train/" + k: v.mean() for k, v in output["log"].items()})
         if batch_idx == 0:
             self.eval()
-            single_inst = {key: (value[:2] if key != "transformer_inputs" else value) for key, value in batch.items()}
+            single_inst = {key: (value[:1] if key != "transformer_inputs" else value) for key, value in batch.items()}
             trees = self.forward_visualize(single_inst)
             self.print("=" * 79)
-            for src, tgt, alg in zip(trees["src_tree"], trees["tgt_tree"], trees["alignment"]):
-                self.print("Src:", src)
-                self.print("Tgt:", tgt)
-                self.print("Alg:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
+            for src, tgt, tgt_p, alg in zip(
+                trees["src_tree"], trees["tgt_tree"], trees["tgt_parser_tree"], trees["alignment"]
+            ):
+                self.print("Src:  ", src)
+                self.print("Tgt:  ", tgt)
+                if tgt_p is not None:
+                    self.print("TgtP: ", tgt_p)
+                self.print("Alignment:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
             self.train()
         return {"loss": loss}
 
@@ -425,13 +456,17 @@ class GeneralSeq2SeqModule(ModelBase):
             self.test_step(batch, batch_idx=None)
 
         if batch_idx == 0:
-            single_inst = {key: (value[:2] if key != "transformer_inputs" else value) for key, value in batch.items()}
+            single_inst = {key: (value[:1] if key != "transformer_inputs" else value) for key, value in batch.items()}
             trees = self.forward_visualize(single_inst)
             self.print("=" * 79)
-            for src, tgt, alg in zip(trees["src_tree"], trees["tgt_tree"], trees["alignment"]):
-                self.print("Src:", src)
-                self.print("Tgt:", tgt)
-                self.print("Alg:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
+            for src, tgt, tgt_p, alg in zip(
+                trees["src_tree"], trees["tgt_tree"], trees["tgt_parser_tree"], trees["alignment"]
+            ):
+                self.print("Src:  ", src)
+                self.print("Tgt:  ", tgt)
+                if tgt_p is not None:
+                    self.print("TgtP: ", tgt_p)
+                self.print("Alignment:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
 
         return {"loss": loss}
 

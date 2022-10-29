@@ -1,5 +1,7 @@
 import dataclasses
 import logging
+import math
+import random
 from copy import copy
 from dataclasses import dataclass
 from functools import partial
@@ -143,6 +145,9 @@ class DirTgtParserPrediction(TgtParserPrediction):
         return {**super().common(), "direction": self.direction}
 
 
+NO_COPY_SPAN = -103
+
+
 class TgtParserBase(nn.Module):
     # spans should have inclusive boundries.
 
@@ -157,6 +162,7 @@ class TgtParserBase(nn.Module):
         rule_hard_constraint=None,
         rule_soft_constraint=None,
         rule_soft_constraint_solver=None,
+        generation_criteria: str = "ppl",
         generation_max_length: int = 40,
         generation_max_actions: int = 80,
         generation_num_samples: int = 10,
@@ -179,7 +185,9 @@ class TgtParserBase(nn.Module):
         assert (
             self.rule_soft_constraint is None or self.rule_soft_constraint_solver is not None
         ), "A solver is required."
+        assert generation_criteria in ("ppl", "likelihood", "contrastive")
 
+        self.generation_criteria = generation_criteria
         self.generation_max_length = generation_max_length
         self.generation_max_actions = generation_max_actions
         self.generation_num_samples = generation_num_samples
@@ -223,9 +231,33 @@ class TgtParserBase(nn.Module):
         constraint_feature = self.rule_soft_constraint.get_feature_from_pred(pred)
         return self.rule_soft_constraint_solver(pred, constraint_feature)
 
+    def get_noisy_span_loss(self, node_features, node_spans, num_or_ratio, observes):
+        noisy_features, noisy_spans = [], []
+        bsz = len(node_features)
+        for bidx in range(bsz):
+            num = num_or_ratio if isinstance(num_or_ratio, int) else math.ceil(len(node_spans[bidx]) * num_or_ratio)
+            features_item, spans_item = [], []
+            for _ in range(num):
+                _i = random.choice([i for i in range(bsz) if i != bidx])
+                # do not add root and leaves
+                _ii = random.choice([i for i, span in enumerate(node_spans[_i][:-1]) if span[1] - span[0] > 0])
+                features_item.append(node_features[_i][_ii, None].detach())
+                span = node_spans[_i][_ii]
+                spans_item.append((span[0], span[1], NO_COPY_SPAN))
+            noisy_features.append(torch.cat([node_features[bidx]] + features_item, dim=0))
+            noisy_spans.append(node_spans[bidx][:-1] + spans_item + node_spans[bidx][-1:])
+        pred = self(noisy_features, noisy_spans)
+        pred = self.observe_x(pred, **observes)  # TODO handle hard constraint
+        marginal = pred.dist.marginal_with_grad  # b n n tgt_nt src_nt
+        noisy_nodes = [torch.tensor([span[2] == NO_COPY_SPAN for span in spans]) for spans in pred.nt_nodes]
+        noisy_nodes = pad_sequence(noisy_nodes, batch_first=True, padding_value=False).to(marginal.device)  # b srcnt
+        loss = marginal * noisy_nodes[:, None, None, None].expand_as(marginal)
+        return loss.flatten(1).sum(1)
+
     def parse(self, pred: TgtParserPrediction):
         assert pred.dist is not None
         out = pred.dist.mbr_decoded
+        # out = pred.dist.viterbi_deocoded
         # find alignments
         aligned_spans = []
         for b, (all_span, pt_span, nt_span) in enumerate(zip(out, pred.pt_nodes, pred.nt_nodes)):
@@ -254,7 +286,7 @@ class TgtParserBase(nn.Module):
             aligned_spans.append(aligned_spans_item)
         return out, aligned_spans, pred.pt_nodes, pred.nt_nodes
 
-    def generate(self, pred: TgtParserPrediction):
+    def generate(self, pred: TgtParserPrediction, **kwargs):
         assert pred.sampler is not None
         preds = pred.sampler()
 
@@ -269,7 +301,12 @@ class TgtParserBase(nn.Module):
         else:
             preds = self.expand_preds_not_using_copy(pred.src, preds)
 
-        preds = self.choose_samples_by_ppl(preds, pred)
+        if self.generation_criteria == "ppl":
+            preds = self.choose_samples_by_ppl(preds, pred, **kwargs)
+        elif self.generation_criteria == "likelihood":
+            preds = self.choose_samples_by_likelihood(preds, pred, **kwargs)
+        elif self.generation_criteria == "contrastive":
+            preds = self.choose_samples_by_constrastive(preds, pred, **kwargs)
         return preds
 
     def expand_preds_using_copy(self, src, preds, pt_spans, nt_spans, max_len):
@@ -317,7 +354,7 @@ class TgtParserBase(nn.Module):
         return preds_
 
     @torch.no_grad()
-    def choose_samples_by_ppl(self, preds, pred: TgtParserPrediction):
+    def choose_samples_by_ppl(self, preds, pred: TgtParserPrediction, **kwargs):
         new_preds = []
         pred = copy(pred).clear()
         for bidx, preds_batch in enumerate(preds):
@@ -347,9 +384,84 @@ class TgtParserBase(nn.Module):
             assert not np.any(np.isnan(ppl))
             chosen = np.argmin(ppl)
             if ppl[chosen] > 1e6:
-                logger.warning(f"The minimum ppl is {ppl}")
-            print(ppl)
+                logger.warning(f"The minimum ppl is {ppl[chosen]}")
             new_preds.append((preds_batch[chosen]["tgt"], ppl[chosen]))
+        return new_preds
+
+    @torch.no_grad()
+    def choose_samples_by_likelihood(self, preds, pred: TgtParserPrediction, **kwargs):
+        new_preds = []
+        pred = copy(pred).clear()
+        for bidx, preds_batch in enumerate(preds):
+            batch_size = pred.batch_size if self.generation_ppl_batch_size is None else self.generation_ppl_batch_size
+            loader = DataLoader(dataset=preds_batch, batch_size=batch_size, collate_fn=self.datamodule.collator)
+            nll = np.full((len(preds_batch),), 1e9)
+
+            for batch in loader:
+                batch = {
+                    key: value.to(pred.device) if isinstance(value, torch.Tensor) else value
+                    for key, value in batch.items()
+                }
+
+                observed = {
+                    "x": batch["tgt_ids"],
+                    "lengths": batch["tgt_lens"],
+                    "pt_copy": batch.get("copy_token"),
+                    "nt_copy": batch.get("copy_phrase"),
+                }
+                sub_pred = pred.get_and_expand(bidx, len(batch["tgt_ids"]))
+                sub_pred = self.observe_x(sub_pred, **observed)
+                nll_batch = sub_pred.dist.nll.detach().cpu().numpy()
+
+                for i, nll_item in zip(batch["id"].tolist(), nll_batch):
+                    nll[i] = nll_item
+
+            assert not np.any(np.isnan(nll))
+            chosen = np.argmin(nll)
+            if nll[chosen] > 1e6:
+                logger.warning(f"The minimum nll is {nll[chosen]}")
+            new_preds.append((preds_batch[chosen]["tgt"], nll[chosen]))
+        return new_preds
+
+    @torch.no_grad()
+    def choose_samples_by_constrastive(self, preds, pred: TgtParserPrediction, baseline_model, **kwargs):
+        new_preds = []
+        pred = copy(pred).clear()
+        for bidx, preds_batch in enumerate(preds):
+            batch_size = pred.batch_size if self.generation_ppl_batch_size is None else self.generation_ppl_batch_size
+            loader = DataLoader(dataset=preds_batch, batch_size=batch_size, collate_fn=self.datamodule.collator)
+            criteria = np.full((len(preds_batch),), 1e9)
+
+            for batch in loader:
+                batch = {
+                    key: value.to(pred.device) if isinstance(value, torch.Tensor) else value
+                    for key, value in batch.items()
+                }
+
+                observed = {
+                    "x": batch["tgt_ids"],
+                    "lengths": batch["tgt_lens"],
+                    "pt_copy": batch.get("copy_token"),
+                    "nt_copy": batch.get("copy_phrase"),
+                }
+                sub_pred = pred.get_and_expand(bidx, len(batch["tgt_ids"]))
+                sub_pred = self.observe_x(sub_pred, **observed)
+                nll = sub_pred.dist.nll.detach().cpu().numpy()
+                ppl_batch = np.exp(nll / np.array(batch["tgt_lens"]))
+
+                nll2 = baseline_model(batch["tgt_ids"], batch["tgt_lens"]).nll.detach().cpu().numpy()
+                ppl_batch_baseline = np.exp(nll2 / np.array(batch["tgt_lens"]))
+
+                ppl_batch = ppl_batch - ppl_batch_baseline
+
+                for i, ppl_item in zip(batch["id"].tolist(), ppl_batch):
+                    criteria[i] = ppl_item
+
+            assert not np.any(np.isnan(criteria))
+            chosen = np.argmin(criteria)
+            if criteria[chosen] > 1e6:
+                logger.warning(f"The minimum criteria is {criteria[chosen]}")
+            new_preds.append((preds_batch[chosen]["tgt"], criteria[chosen]))
         return new_preds
 
     def to_str_tokens(self, preds, src):
@@ -511,7 +623,9 @@ class TgtParserBase(nn.Module):
         if constraint is None:
             constraint = self.get_init_nt_constraint(batch_size, n, max_nt_spans)
         for batch_idx, (nt_spans_inst, possible_copy) in enumerate(zip(nt_spans, copy_position)):
-            for i, (l, r, _) in enumerate(nt_spans_inst):
+            for i, (l, r, tag) in enumerate(nt_spans_inst):
+                if tag == NO_COPY_SPAN:
+                    continue
                 w = r - l - 1
                 t = None
                 if w >= len(possible_copy) or w < 0:

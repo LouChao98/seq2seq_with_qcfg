@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..components.common import MultiResidualLayer
-from .base import TgtParserBase, TgtParserPrediction
+from .base import NO_COPY_SPAN, TgtParserBase, TgtParserPrediction
 from .neural_decomp1 import NeuralDecomp1TgtParser as _BaseModel
 from .struct3.base import TokenType
 from .struct3.decomp1_copy_as_t import Decomp1, Decomp1Sampler
@@ -84,7 +84,9 @@ class NeuralDecomp1TgtParser(_BaseModel):
 
     def build_nt_copy_constraint(self, terms2d, pt_spans, copy_position):
         for batch_idx, (pt_spans_inst, possible_copy) in enumerate(zip(pt_spans, copy_position)):
-            for i, (l, r, _) in enumerate(pt_spans_inst):
+            for i, (l, r, tag) in enumerate(pt_spans_inst):
+                if tag == NO_COPY_SPAN:
+                    continue
                 w = r - l - 1
                 t = None
                 if w >= len(possible_copy) or w < 0 or (w + 1) >= self.max_copy_width:

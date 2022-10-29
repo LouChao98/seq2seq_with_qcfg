@@ -13,7 +13,7 @@ from torch.distributions.utils import lazy_property
 from ._fn import ns_diagonal as diagonal
 from ._fn import ns_diagonal_copy_ as diagonal_copy_
 from ._fn import ns_stripe as stripe
-from .semiring import CrossEntropySemiring, EntropySemiring, LogSemiring, SampledSemiring
+from .semiring import CrossEntropySemiring, EntropySemiring, LogSemiring, MaxSemiring, SampledSemiring
 
 log = logging.getLogger(__file__)
 _OK, _SONMASK, _REACHLIMIT = 0, 1, 2
@@ -128,7 +128,7 @@ class DecompBase:
     @lazy_property
     def marginal_with_grad(self):
         logZ, trace = self.inside(self.params, LogSemiring, trace=True, use_reentrant=False)
-        grads = grad(logZ.sum(), [trace])[0]
+        grads = grad(logZ.sum(), [trace], create_graph=True)[0]
         return grads
 
     @lazy_property
@@ -180,6 +180,27 @@ class DecompBase:
             e = event[k]
             output += (p * e).flatten(1).sum(1)
         return output
+
+    @lazy_property
+    def viterbi_deocoded(self):
+        assert self.params["term"].ndim == 3
+        params = {}
+        for key, value in self.params.items():
+            if key in self.KEYS:
+                params[key] = value.detach().requires_grad_()
+            else:
+                params[key] = value
+        logZ, trace = self.inside(params, MaxSemiring, trace=True)
+        logZ.sum().backward()
+        terms = [torch.nonzero(i).tolist() for i in params["term"].grad]
+        spans = [torch.nonzero(i).tolist() for i in trace.grad]
+        spans_ = []
+        for terms_item, spans_item in zip(terms, spans):
+            spans_.append(
+                [(i, i, "p", *divmod(t, self.pt_num_nodes)) for i, t in terms_item]
+                + [(l, r - 1, "n", tt, st) for l, r, tt, st in spans_item]
+            )
+        return spans_
 
     @lazy_property
     def mbr_decoded(self):

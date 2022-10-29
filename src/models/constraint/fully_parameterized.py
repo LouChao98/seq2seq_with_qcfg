@@ -126,7 +126,7 @@ class FPSynchronous(RuleConstraintBase):
 
 class FPPenaltyDepth(RuleConstraintBase):
     def __init__(
-        self, upwards_score=0.7, stay_score=0.9, down1_score=1, down2_score=0.9, down3_score=0.8, down_score=0.7
+        self, upwards_score=0.2, stay_score=0.2, down1_score=1, down2_score=0.7, down3_score=0.5, down_score=0.2
     ) -> None:
         super().__init__()
         self.upwards_score = upwards_score
@@ -149,9 +149,9 @@ class FPPenaltyDepth(RuleConstraintBase):
 
         nt_ntnt = node_score[:, nt_idx, nt_idx].view(batch_size, nt_states, nt_num_nodes, nt_states, nt_num_nodes)
         nt_ntpt = node_score[:, nt_idx, pt_idx].view(batch_size, nt_states, nt_num_nodes, pt_states, pt_num_nodes)
-        nt_ntpt.fill_(1.0)
+        nt_ntpt.fill_(0.1)
 
-        for b, nt_spans_inst in enumerate(nt_spans):
+        for b, (nt_spans_inst, pt_spans_inst) in enumerate(zip(nt_spans, pt_spans)):
             spans, parents, mapping_ = spans2tree(nt_spans_inst, return_mapping=True)
             mapping = list(range(len(mapping_)))
             mapping.sort(key=lambda x: mapping_[x])
@@ -176,6 +176,10 @@ class FPPenaltyDepth(RuleConstraintBase):
                     else:
                         nt_ntnt[b, :, mapping[i], :, mapping[j]] = self.down_score
                     nt_ntnt[b, :, mapping[j], :, mapping[i]] = self.upwards_score
+            for i, span1 in enumerate(nt_spans_inst):
+                for j, span2 in enumerate(pt_spans_inst):
+                    if is_parent(span1, span2):
+                        nt_ntpt[b, :, i, :, j] = 1
 
         node_score = node_score.to(device)
         node_score = node_score.unsqueeze(2) * node_score.unsqueeze(3)
