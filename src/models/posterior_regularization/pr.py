@@ -7,6 +7,8 @@ import torch
 
 from src.utils.fn import apply_to_nested_tensor
 
+from .project_simplex import project_simplex
+
 if TYPE_CHECKING:
     from src.models.tgt_parser.base import TgtParserPrediction
 
@@ -27,17 +29,22 @@ class PrTask:
     def calc_e(self, pred, constraints):
         ...
 
+    def lambda_simplex_constraint(self):
+        ...
+
 
 @torch.enable_grad()
 def compute_pr(pred: TgtParserPrediction, constraints, task: PrTask, get_dist=False, **kwargs):
     constraints = task.process_constraint(pred, constraints)
     entropy_reg = kwargs.get("entropy_reg", 0.0)
 
-    e = task.calc_e(pred, constraints)
-    if (e < task.get_b(pred)).all():
-        if get_dist:  # do nothing
-            return copy(pred)
-        return torch.zeros(pred, device=pred.device)
+    b = task.get_b(pred)
+    if b is not None:
+        e = task.calc_e(pred, constraints)
+        if (e < task.get_b(pred)).all():
+            if get_dist:  # do nothing
+                return copy(pred)
+            return torch.zeros(pred, device=pred.device)
 
     lambdas = pgd_solver(pred, constraints, task, **kwargs)
     cdist = task.build_constrained_dist(pred, lambdas, constraints, entropy_reg)
@@ -52,7 +59,10 @@ def pgd_solver(pred: TgtParserPrediction, constraints, task: PrTask, **kwargs):
     entropy_reg = kwargs.get("entropy_reg", 0.0)
 
     lambdas = task.get_init_lambdas(pred)
+    lambda_simplex_constraint = task.lambda_simplex_constraint()
     b = task.get_b(pred)
+    # b is for constraint set, lambda_simplex_constraint is for slack penalty
+    assert (b is None) != (lambda_simplex_constraint is None), "Bad task"
     pred = copy(pred)
     pred.posterior_params = apply_to_nested_tensor(pred.posterior_params, lambda x: x.detach())
     pred.dist = pred.dist.spawn(params=pred.posterior_params)
@@ -63,7 +73,10 @@ def pgd_solver(pred: TgtParserPrediction, constraints, task: PrTask, **kwargs):
         #     for item in factorized_constraint
         # ]
         cdist = task.build_constrained_dist(pred, lambdas, constraints, entropy_reg)
-        target = (-(lambdas * b).sum(-1) + (1 - entropy_reg) * cdist.nll).sum()
+        if b is None:
+            target = ((1 - entropy_reg) * cdist.nll).sum()
+        else:
+            target = (-(lambdas * b).sum(-1) + (1 - entropy_reg) * cdist.nll).sum()
         target.backward()
         if (lambdas.grad.abs() < 1e-4).all():
             break
@@ -83,7 +96,13 @@ def pgd_solver(pred: TgtParserPrediction, constraints, task: PrTask, **kwargs):
             # step_size = step_size.unsqueeze(-1).to(lambdas.device)
 
             lambdas += step_size * lambdas.grad
-            lambdas.clamp_(0)
+
+            # projection
+            if lambda_simplex_constraint is not None:
+                lambdas.data = project_simplex(lambdas.data, lambda_simplex_constraint, axis=1)
+            else:
+                lambdas.clamp_(0)
+
             lambdas.grad.zero_()
     # print(itidx)
     return lambdas.detach()

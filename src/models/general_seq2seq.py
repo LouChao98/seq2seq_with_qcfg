@@ -14,6 +14,8 @@ from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
 
 from src.models.base import ModelBase
+from src.models.posterior_regularization.general import NeqPT
+from src.models.posterior_regularization.pr import compute_pr
 from src.models.src_parser.base import SrcParserBase
 from src.models.src_parser.minimum import MinimumSrcParser
 from src.models.tgt_parser.base import TgtParserBase
@@ -49,6 +51,7 @@ class GeneralSeq2SeqModule(ModelBase):
         parser=None,
         tgt_parser=None,  #  not a part of qcfg. just a regularizer
         tgt_parser_reg=0.0,
+        pr_pt_neq_reg=0.0,
         optimizer=None,
         scheduler=None,
         test_metric=None,
@@ -99,10 +102,15 @@ class GeneralSeq2SeqModule(ModelBase):
             datamodule=self.datamodule,
             src_dim=self.tree_encoder.get_output_dim(),
         )
+
         if self.hparams.tgt_parser_reg > 0:
             self.tgt_parser: MinimumSrcParser = instantiate(
                 self.hparams.tgt_parser, vocab=len(self.datamodule.tgt_vocab)
             )
+            assert self.tgt_parser is not None
+        else:
+            self.tgt_parser = None
+
         self.threshold = torch.nn.Threshold(0.1, 0)
 
         self.train_metric = PerplexityMetric()
@@ -219,6 +227,7 @@ class GeneralSeq2SeqModule(ModelBase):
         src_entropy_reg = 0
         tgt_entropy_reg = 0
         tgt_parser_reg = 0
+        pr_neq_pt_reg = 0
         if self.training:
             if self.decoder.rule_soft_constraint_solver is not None:
                 with self.profiler.profile("compute_soft_constraint"):
@@ -251,13 +260,17 @@ class GeneralSeq2SeqModule(ModelBase):
                 )
                 logging_vals["noisy_spans"] = l
                 noisy_span_loss = e * l
+            if (e := self.hparams.pr_pt_neq_reg) > 0:
+                pr_neq_pt_reg = compute_pr(tgt_pred, None, NeqPT(e))
+                logging_vals["pr_neq_pt"] = pr_neq_pt_reg
 
         return {
             "decoder": self.threshold(tgt_nll)
             + soft_constraint_loss
             + tgt_entropy_reg
             + tgt_parser_reg
-            + noisy_span_loss,
+            + noisy_span_loss
+            + pr_neq_pt_reg,
             "encoder": self.threshold(src_nll) + objective + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
@@ -498,21 +511,6 @@ class GeneralSeq2SeqModule(ModelBase):
         targets = batch["tgt"]
 
         self.test_metric(preds, targets)
-
-        # if batch_idx == 0:
-        #     single_inst = {key: value[:2] for key, value in batch.items()}
-        #     trees = self.forward_visualize(single_inst)
-        #     self.print("=" * 79)
-        #     for src, tgt, alg in zip(
-        #         trees["src_tree"], trees["tgt_tree"], trees["alignment"]
-        #     ):
-        #         self.print("Src:", src)
-        #         self.print("Tgt:", tgt)
-        #         self.print(
-        #             "Alg:\n"
-        #             + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
-        #         )
-
         return {"preds": preds, "targets": targets, "id": batch["id"]}
 
     def test_epoch_end(self, outputs) -> None:

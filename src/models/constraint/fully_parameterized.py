@@ -155,11 +155,13 @@ class FPPenaltyDepth(RuleConstraintBase):
             spans, parents, mapping_ = spans2tree(nt_spans_inst, return_mapping=True)
             mapping = list(range(len(mapping_)))
             mapping.sort(key=lambda x: mapping_[x])
+            is_leaf = {(span[0], span[1]): True for span in spans}
             for i, span1 in enumerate(spans):
                 nt_ntnt[b, :, mapping[i], :, mapping[i]] = self.stay_score
                 for j, span2 in enumerate(spans[i + 1 :], start=i + 1):
                     if not (is_parent(span1, span2)):
                         continue
+                    is_leaf[(span1[0], span1[1])] = False
                     depth = 1
                     k = parents[j]
                     while k != -1:
@@ -177,10 +179,14 @@ class FPPenaltyDepth(RuleConstraintBase):
                         nt_ntnt[b, :, mapping[i], :, mapping[j]] = self.down_score
                     nt_ntnt[b, :, mapping[j], :, mapping[i]] = self.upwards_score
             for i, span1 in enumerate(nt_spans_inst):
-                for j, span2 in enumerate(pt_spans_inst):
-                    if is_parent(span1, span2):
-                        nt_ntpt[b, :, i, :, j] = 1
-
+                if is_leaf[(span1[0], span1[1])]:
+                    for j, span2 in enumerate(pt_spans_inst):
+                        if is_parent(span1, span2):
+                            nt_ntpt[b, :, i, :, j] = 1
+                else:
+                    for j, span2 in enumerate(pt_spans_inst):
+                        if is_parent(span1, span2):
+                            nt_ntpt[b, :, i, :, j] = 0.5
         node_score = node_score.to(device)
         node_score = node_score.unsqueeze(2) * node_score.unsqueeze(3)
         return node_score
