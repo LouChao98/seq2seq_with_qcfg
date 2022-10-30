@@ -137,10 +137,10 @@ class DecompBase:
 
     def cross_entropy(self, other: "DecompBase", fix_left=False):
         if fix_left:
-            oparams = {k: v.detach() if isinstance(v, Tensor) else v for k, v in other.params.items()}
+            sparams = {k: v.detach() if isinstance(v, Tensor) else v for k, v in self.params.items()}
         else:
-            oparams = other.params
-        return self.inside((self.params, oparams), CrossEntropySemiring, False)[0]
+            sparams = self.params
+        return self.inside((sparams, other.params), CrossEntropySemiring, False)[0]
 
     def kl(self, other):
         ...

@@ -14,7 +14,7 @@ from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
 
 from src.models.base import ModelBase
-from src.models.posterior_regularization.general import NeqPT
+from src.models.posterior_regularization.general import NeqPT, NeqPTImpl2
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.src_parser.base import SrcParserBase
 from src.models.src_parser.minimum import MinimumSrcParser
@@ -52,6 +52,7 @@ class GeneralSeq2SeqModule(ModelBase):
         tgt_parser=None,  #  not a part of qcfg. just a regularizer
         tgt_parser_reg=0.0,
         pr_pt_neq_reg=0.0,
+        pr_pt_neq_reg_type=0,
         optimizer=None,
         scheduler=None,
         test_metric=None,
@@ -61,6 +62,7 @@ class GeneralSeq2SeqModule(ModelBase):
         noisy_spans_num=0.0,
         parser_entropy_reg=0.0,
         decoder_entropy_reg=0.0,
+        warmup=0,
         param_initializer="xavier_uniform",
         track_param_norm=False,
         real_val_every_n_epochs=5,
@@ -228,7 +230,7 @@ class GeneralSeq2SeqModule(ModelBase):
         tgt_entropy_reg = 0
         tgt_parser_reg = 0
         pr_neq_pt_reg = 0
-        if self.training:
+        if self.training and self.current_epoch >= self.hparams.warmup:
             if self.decoder.rule_soft_constraint_solver is not None:
                 with self.profiler.profile("compute_soft_constraint"):
                     soft_constraint_loss = self.decoder.get_soft_constraint_loss(tgt_pred)
@@ -261,8 +263,13 @@ class GeneralSeq2SeqModule(ModelBase):
                 logging_vals["noisy_spans"] = l
                 noisy_span_loss = e * l
             if (e := self.hparams.pr_pt_neq_reg) > 0:
-                pr_neq_pt_reg = compute_pr(tgt_pred, None, NeqPT(e))
-                logging_vals["pr_neq_pt"] = pr_neq_pt_reg
+                if self.hparams.pr_pt_neq_reg_type == 0:
+                    pr_neq_pt_reg = compute_pr(tgt_pred, None, NeqPT(e))
+                    logging_vals["pr_neq_pt"] = pr_neq_pt_reg
+                else:
+                    l = compute_pr(tgt_pred, None, NeqPTImpl2())
+                    logging_vals["pr_neq_pt"] = l
+                    pr_neq_pt_reg = l * e
 
         return {
             "decoder": self.threshold(tgt_nll)
