@@ -7,6 +7,7 @@ import re
 from collections import Counter, defaultdict
 from email.policy import default
 from pathlib import Path
+from tokenize import single_quoted
 from typing import Any, List, Optional, Union
 
 import numpy as np
@@ -112,27 +113,39 @@ class SemanticParsingDataModule(_DataModule):
 
         converted = []
         for di, item in enumerate(data):
-            question = word_tokenize(item["question"])
-            program = item["program"].split()
-            assert program[0] == "answer"
-            assert program[1] == "("
-            assert program[-1] == ")"
-            program = program[2:-1]
+            question = item["question"]
+            program = item["program"]
 
             # just drop brackets because in FunQL:
             # 1. we can recover them according to the grammar
             # 2. they do not tell much about spans
-            # remove ', in tokens: we can recover them
-            program = [re.sub(r"[',]", "", item) for item in program if item not in ("(", ")")]
+            program, spans = tokenize_program(item["program"])
+            spans = [[item[0], item[1]] for item in spans if item[1] > item[0] + 1]
 
+            question = word_tokenize(question)
             assert len(program) > 1 and len(question) > 1
+
             inst = {
                 "id": di,
                 "src": question,
                 "tgt": program,
+                "tgt_spans": spans,
+                "tgt_mask": self.gen_impossible_span_mask(spans, len(program)),
             }
             converted.append(inst)
         return converted
+
+    def gen_impossible_span_mask(self, spans, length):
+        # spans: inclusive start, exclusive end
+        # True = impossible
+        span_mask = np.zeros((length + 1, length + 1), dtype=np.bool8)
+        for left, right in spans:
+            span_mask[:left, left + 1 : right] = True
+            span_mask[left + 1 : right, right + 1 :] = True
+        masks = []
+        for w in range(1, length):
+            masks.append(torch.tensor([span_mask[i, i + w + 1] for i in range(length - w)]))
+        return masks
 
     def process_all_copy(self, data):
         # none = do nothing
@@ -197,7 +210,8 @@ class SemanticParsingDataModule(_DataModule):
             prior_alignments = pickle.load(f)
         assert len(data) == len(prior_alignments)
         for item, pa in zip(data, prior_alignments):
-            pa = np.transpose(pa)
+            pa[:, :-1] += pa[:, -1, None] / (pa.shape[1] - 1)
+            pa = np.transpose(pa)[:-1]
             assert pa.shape[0] == len(item["src"])
             assert pa.shape[1] == len(item["tgt"])
             item["prior_alignment"] = pa
@@ -209,10 +223,10 @@ class SemanticParsingDataModule(_DataModule):
         for inst in data:
             src_vocab_cnt.update(inst["src"])
             tgt_vocab_cnt.update(inst["tgt"])
-        if self.hparams.copy_mode != "none":
-            logger.warning("I set src tokens in tgt vocab due to copy mode.")
-            for inst in data:
-                tgt_vocab_cnt.update(inst["src"])
+        # if self.hparams.copy_mode != "none":
+        #     logger.warning("I set src tokens in tgt vocab due to copy mode.")
+        #     for inst in data:
+        #         tgt_vocab_cnt.update(inst["src"])
         src_vocab = Vocabulary(src_vocab_cnt)
         tgt_vocab = Vocabulary(tgt_vocab_cnt)
         return src_vocab, tgt_vocab
@@ -286,6 +300,7 @@ class SemanticParsingDataModule(_DataModule):
         )
 
     def collator(self, data):
+        batch_size = len(data)
         tgt_lens = [len(inst["tgt_ids"]) for inst in data]
         argsort = list(range(len(data)))
         argsort.sort(key=lambda i: tgt_lens[i], reverse=True)
@@ -352,10 +367,65 @@ class SemanticParsingDataModule(_DataModule):
             prior_alignment = torch.zeros(len(src), max_src_len, max_tgt_len)
             for i, item in enumerate(data):
                 item = torch.from_numpy(item["prior_alignment"]).to(torch.float32)
-                prior_alignment[i, : item.shape[0], : item.shape[1]] = item
+                prior_alignment[i, : item.shape[0], : item.shape[1]] = (
+                    item * 0.9 + torch.ones_like(item) / item.shape[0] * 0.1
+                )
             batched["prior_alignment"] = prior_alignment
 
+        if "tgt_spans" in data[0]:
+            batched["tgt_spans"] = [inst["tgt_spans"] for inst in data]
+
+        if "tgt_mask" in data[0]:
+            tgt_masks = []
+            max_tgt_len = max(tgt_lens)
+            for wi, w in enumerate(range(1, max_tgt_len)):
+                mask = torch.zeros(batch_size, max_tgt_len - w, dtype=torch.bool)
+                for bidx, inst in enumerate(data):
+                    m = inst["tgt_mask"]
+                    if wi >= len(m):
+                        continue
+                    m = m[wi]
+                    mask[bidx, : len(m)] = m
+                tgt_masks.append(mask)
+            batched["tgt_masks"] = tgt_masks
         return batched
+
+
+def tokenize_program(program):
+    tokens = []
+    spans = []
+    buffer = []
+    token_buffer = []
+    comma = []
+    single_quote = None
+
+    for i, c in enumerate(program):
+        if c in "()', ":
+            if len(token_buffer) > 0:
+                tokens.append("".join(token_buffer))
+                token_buffer.clear()
+            if c == "(":
+                buffer.append(len(tokens))
+                comma.append(len(tokens))
+            elif c == ")":
+                _c = comma.pop()
+                _b = buffer.pop()
+                if _c != _b:
+                    spans.append((_c, len(tokens), "argument"))
+                spans.append((_b, len(tokens), "all_argument"))
+            elif c == "'":
+                if single_quote is None:
+                    single_quote = len(tokens)
+                else:
+                    spans.append((single_quote, len(tokens), "noun"))
+                    single_quote = None
+            elif c == ",":
+                spans.append((comma[-1], len(tokens), "argument"))
+                comma[-1] = len(tokens)
+        else:
+            token_buffer.append(c)
+    assert single_quote is None and len(buffer) == 0
+    return tokens, spans
 
 
 if __name__ == "__main__":

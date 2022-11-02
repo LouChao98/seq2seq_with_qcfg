@@ -203,6 +203,19 @@ class DecompBase:
         return spans_
 
     @lazy_property
+    def viterbi_decoded_event(self):
+        assert self.params["term"].ndim == 3
+        params = {}
+        for key, value in self.params.items():
+            if key in self.KEYS:
+                params[key] = value.detach().requires_grad_()
+            else:
+                params[key] = value
+        logZ, _ = self.inside(params, MaxSemiring)
+        logZ.sum().backward()
+        return {k: v.grad for k, v in params.items()}
+
+    @lazy_property
     def mbr_decoded(self):
         if self.params["term"].ndim == 3:
             return self.mbr_decoding_1gram_pt()

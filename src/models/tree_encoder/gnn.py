@@ -17,9 +17,7 @@ class GeneralGNN(torch.nn.Module):
     def __init__(self, nn, global_pooling, dim):
         super().__init__()
         self.nn = instantiate(nn, in_channels=dim)
-        self.global_pooling = instantiate(
-            global_pooling, in_channels=self.nn.out_channels
-        )
+        self.global_pooling = instantiate(global_pooling, in_channels=self.nn.out_channels)
 
     def forward(self, x, lens, spans):
         # build graph
@@ -28,11 +26,8 @@ class GeneralGNN(torch.nn.Module):
         # split ~and pad~
         splitted = self.postprocess_gnn_output(x, meta)
         if self.global_pooling is not None:
-            global_features = self.global_pooling(x, batch.batch, batch.edge_index)
-            splitted = [
-                localf + globalf.unsqueeze(0)
-                for localf, globalf in zip(splitted, global_features)
-            ]
+            global_features = self.global_pooling(x, batch.batch, edge_index=batch.edge_index)
+            splitted = [localf + globalf.unsqueeze(0) for localf, globalf in zip(splitted, global_features)]
         return splitted, meta["spans"]
 
     def build_gnn_input(self, spans_inp: List[List[Tuple[int, int]]], x: torch.Tensor):
@@ -92,9 +87,7 @@ class GeneralGNN(torch.nn.Module):
 
 
 class GeneralGNNForGumbel(GeneralGNN):
-    def build_gnn_input(
-        self, spans_inp: List[List[Tuple[int, int]]], x: List[List[torch.Tensor]]
-    ):
+    def build_gnn_input(self, spans_inp: List[List[Tuple[int, int]]], x: List[List[torch.Tensor]]):
         # spans: batch x nspans x 2
         # x: batch x seq_len x hidden
 
@@ -139,6 +132,7 @@ class GeneralGNNForGumbel(GeneralGNN):
 
 if __name__ == "__main__":
     from torch_geometric.nn import GCN
+    from torch_geometric.nn.aggr import GraphMultisetTransformer
 
     spans_inst = [(0, 6), (1, 3), (1, 2), (4, 5)]
     spans = [spans_inst[:], spans_inst[:]]

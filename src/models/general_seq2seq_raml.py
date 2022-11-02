@@ -193,11 +193,11 @@ class GeneralSeq2SeqModule(ModelBase):
         tgt_loss = tgt_nll
         if self.training:
             if self.decoder.rule_soft_constraint_solver is not None:
-                reward = self.decoder.rule_soft_constraint.get_reward_from_pred(tgt_pred)
+                reward = self.decoder.rule_soft_constraint.get_weight_from_pred(tgt_pred)
                 dist = tgt_pred.dist.spawn(
                     params={
                         "term": torch.where(tgt_pred.dist.params["term"] > -1e8, 0, -1e9),
-                        "rule": torch.where(tgt_pred.dist.params["rule"] > -1e8, (reward + 1e-9).log(), -1e9),
+                        "rule": torch.where(tgt_pred.dist.params["rule"] > -1e8, reward, -1e9),
                         "root": torch.where(tgt_pred.dist.params["root"] > -1e8, 0.0, -1e9),
                     }
                 )
@@ -252,7 +252,7 @@ class GeneralSeq2SeqModule(ModelBase):
         tgt_pred = self.decoder(node_features, node_spans)
         tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
 
-        reward = self.decoder.rule_soft_constraint.get_reward_from_pred(tgt_pred)
+        reward = self.decoder.rule_soft_constraint.get_weight_from_pred(tgt_pred)
         tgt_pred.dist = tgt_pred.dist.spawn(
             params={
                 "term": torch.where(tgt_pred.dist.params["term"] > -1e8, 0, -1e9),

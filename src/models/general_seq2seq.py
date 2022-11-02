@@ -9,16 +9,18 @@ import torch.nn as nn
 from hydra.utils import instantiate
 from pytorch_lightning.profilers import PassThroughProfiler
 from pytorch_memlab import profile_every
+from torch.autograd import grad
 from torch_scatter import scatter_mean, scatter_sum
 from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
 
 from src.models.base import ModelBase
-from src.models.posterior_regularization.general import NeqPT, NeqPTImpl2
+from src.models.posterior_regularization.general import NeqNTImpl2, NeqPT, NeqPTImpl2
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.src_parser.base import SrcParserBase
 from src.models.src_parser.minimum import MinimumSrcParser
 from src.models.tgt_parser.base import TgtParserBase
+from src.models.tgt_parser.struct3.semiring import LogSemiring
 from src.models.tree_encoder.base import TreeEncoderBase
 from src.utils.fn import (
     annotate_snt_with_brackets,
@@ -53,6 +55,8 @@ class GeneralSeq2SeqModule(ModelBase):
         tgt_parser_reg=0.0,
         pr_pt_neq_reg=0.0,
         pr_pt_neq_reg_type=0,
+        pr_nt_neq_reg=0,
+        pr_nt_neq_reg_type=1,
         optimizer=None,
         scheduler=None,
         test_metric=None,
@@ -63,6 +67,7 @@ class GeneralSeq2SeqModule(ModelBase):
         parser_entropy_reg=0.0,
         decoder_entropy_reg=0.0,
         warmup=0,
+        loss_threshold=0.1,
         param_initializer="xavier_uniform",
         track_param_norm=False,
         real_val_every_n_epochs=5,
@@ -113,7 +118,7 @@ class GeneralSeq2SeqModule(ModelBase):
         else:
             self.tgt_parser = None
 
-        self.threshold = torch.nn.Threshold(0.1, 0)
+        self.threshold = torch.nn.Threshold(self.hparams.loss_threshold, 0)
 
         self.train_metric = PerplexityMetric()
         self.val_metric = PerplexityMetric()
@@ -178,7 +183,8 @@ class GeneralSeq2SeqModule(ModelBase):
             "lengths": tgt_lens,
             "pt_copy": batch.get("copy_token"),
             "nt_copy": batch.get("copy_phrase"),
-            "prior_alignment": batch.get("prior_alignment"),
+            # "prior_alignment": batch.get("prior_alignment"),
+            "observed_mask": batch.get("tgt_masks"),
         }
         logging_vals = {}
 
@@ -226,10 +232,12 @@ class GeneralSeq2SeqModule(ModelBase):
 
         soft_constraint_loss = 0
         noisy_span_loss = 0
+        pt_prior_loss = 0
         src_entropy_reg = 0
         tgt_entropy_reg = 0
         tgt_parser_reg = 0
         pr_neq_pt_reg = 0
+        pr_neq_nt_reg = 0
         if self.training and self.current_epoch >= self.hparams.warmup:
             if self.decoder.rule_soft_constraint_solver is not None:
                 with self.profiler.profile("compute_soft_constraint"):
@@ -270,6 +278,23 @@ class GeneralSeq2SeqModule(ModelBase):
                     l = compute_pr(tgt_pred, None, NeqPTImpl2())
                     logging_vals["pr_neq_pt"] = l
                     pr_neq_pt_reg = l * e
+            if (e := self.hparams.pr_nt_neq_reg) > 0:
+                if self.hparams.pr_nt_neq_reg_type == 0:
+                    raise NotImplementedError
+                    pr_neq_nt_reg = compute_pr(tgt_pred, None, NeqNt(e))
+                    logging_vals["pr_neq_nt"] = pr_neq_nt_reg
+                else:
+                    l = compute_pr(tgt_pred, None, NeqNTImpl2())
+                    logging_vals["pr_neq_nt"] = l
+                    pr_neq_nt_reg = l * e
+            if (prior_alignment := batch.get("prior_alignment")) is not None:
+                prior_alignment = prior_alignment.transpose(1, 2)
+                logZ, trace = tgt_pred.dist.inside(tgt_pred.dist.params, LogSemiring, use_reentrant=False)
+                term_m = grad(logZ.sum(), [tgt_pred.dist.params["term"]], create_graph=True)[0]
+                term_m = term_m.view(tgt_pred.batch_size, -1, tgt_pred.pt_states, tgt_pred.pt_num_nodes)
+                term_m = term_m.sum(2)[:, : prior_alignment.shape[1], : prior_alignment.shape[2]]
+                pt_prior_loss = -(prior_alignment * term_m.clamp(1e-9).log()).sum((1, 2))
+                logging_vals["pt_prior_ce"] = pt_prior_loss
 
         return {
             "decoder": self.threshold(tgt_nll)
@@ -277,7 +302,8 @@ class GeneralSeq2SeqModule(ModelBase):
             + tgt_entropy_reg
             + tgt_parser_reg
             + noisy_span_loss
-            + pr_neq_pt_reg,
+            + pr_neq_pt_reg
+            + pt_prior_loss,
             "encoder": self.threshold(src_nll) + objective + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
@@ -300,7 +326,8 @@ class GeneralSeq2SeqModule(ModelBase):
             "lengths": batch["tgt_lens"],
             "pt_copy": batch.get("copy_token"),
             "nt_copy": batch.get("copy_phrase"),
-            "prior_alignment": batch.get("prior_alignment"),
+            # "prior_alignment": batch.get("prior_alignment"),
+            # "observed_mask": batch.get('tgt_masks')
         }
 
         parse = self.parser.sample if sample else self.parser.argmax
@@ -433,7 +460,7 @@ class GeneralSeq2SeqModule(ModelBase):
             self.log_dict({"train/" + k: v.mean() for k, v in output["log"].items()})
         if batch_idx == 0:
             self.eval()
-            single_inst = {key: (value[:1] if key != "transformer_inputs" else value) for key, value in batch.items()}
+            single_inst = make_subbatch(batch, 1)
             trees = self.forward_visualize(single_inst)
             self.print("=" * 79)
             for src, tgt, tgt_p, alg in zip(
@@ -476,7 +503,7 @@ class GeneralSeq2SeqModule(ModelBase):
             self.test_step(batch, batch_idx=None)
 
         if batch_idx == 0:
-            single_inst = {key: (value[:1] if key != "transformer_inputs" else value) for key, value in batch.items()}
+            single_inst = make_subbatch(batch, 1)
             trees = self.forward_visualize(single_inst)
             self.print("=" * 79)
             for src, tgt, tgt_p, alg in zip(
@@ -518,6 +545,20 @@ class GeneralSeq2SeqModule(ModelBase):
         targets = batch["tgt"]
 
         self.test_metric(preds, targets)
+
+        if batch_idx == 0:
+            single_inst = make_subbatch(batch, 1)
+            trees = self.forward_visualize(single_inst)
+            self.print("=" * 79)
+            for src, tgt, tgt_p, alg in zip(
+                trees["src_tree"], trees["tgt_tree"], trees["tgt_parser_tree"], trees["alignment"]
+            ):
+                self.print("Src:  ", src)
+                self.print("Tgt:  ", tgt)
+                if tgt_p is not None:
+                    self.print("TgtP: ", tgt_p)
+                self.print("Alignment:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
+
         return {"preds": preds, "targets": targets, "id": batch["id"]}
 
     def test_epoch_end(self, outputs) -> None:
@@ -527,3 +568,15 @@ class GeneralSeq2SeqModule(ModelBase):
         self.log_dict(d)
         self.print(acc)
         self.save_predictions(outputs)
+
+
+def make_subbatch(batch, size):
+    output = {}
+    for key, value in batch.items():
+        if key == "transformer_inputs":
+            output[key] = value
+        elif key == "tgt_masks":
+            output[key] = [item[:size] for item in value]
+        else:
+            output[key] = value[:size]
+    return output

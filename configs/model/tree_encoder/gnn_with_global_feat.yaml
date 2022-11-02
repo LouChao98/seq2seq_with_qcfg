@@ -8,6 +8,6 @@ nn:
   dropout: 0.1
   jk: lstm
 global_pooling:
-  _target_: torch_geometric.nn.GraphMultisetTransformer
+  _target_: torch_geometric.nn.aggr.GraphMultisetTransformer
   hidden_channels: ${..nn.hidden_channels}
   out_channels: ${..nn.hidden_channels}

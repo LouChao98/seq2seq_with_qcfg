@@ -162,6 +162,7 @@ class TgtParserBase(nn.Module):
         rule_hard_constraint=None,
         rule_soft_constraint=None,
         rule_soft_constraint_solver=None,
+        rule_reweight_constraint=None,
         generation_criteria: str = "ppl",
         generation_max_length: int = 40,
         generation_max_actions: int = 80,
@@ -181,6 +182,7 @@ class TgtParserBase(nn.Module):
         self.rule_hard_constraint: Optional[RuleConstraintBase] = instantiate(rule_hard_constraint)
         self.rule_soft_constraint: Optional[RuleConstraintBase] = instantiate(rule_soft_constraint)
         self.rule_soft_constraint_solver = instantiate(rule_soft_constraint_solver)
+        self.rule_reweight_constraint: Optional[RuleConstraintBase] = instantiate(rule_reweight_constraint)
 
         assert (
             self.rule_soft_constraint is None or self.rule_soft_constraint_solver is not None
@@ -350,7 +352,10 @@ class TgtParserBase(nn.Module):
         for batch, src_item in zip(preds, src):
             expanded_batch = [item[0] for item in batch]
             expanded_batch = self.datamodule.tgt_vocab.convert_ids_to_tokens(expanded_batch)
-            preds_.append({"id": len(preds_), "src": src_item, "tgt": expanded_batch})
+            expanded_batch = [{"id": i, "src": src_item, "tgt": item} for i, item in enumerate(expanded_batch)]
+            expanded_batch = self.datamodule.process_all_copy(expanded_batch)
+            expanded_batch = self.datamodule.apply_vocab(expanded_batch)
+            preds_.append(expanded_batch)
         return preds_
 
     @torch.no_grad()
@@ -583,6 +588,7 @@ class TgtParserBase(nn.Module):
             )
 
         if prior_alignment is not None:
+            raise NotImplementedError
             term = self.build_pt_prior_alignment_soft_constraint(term, prior_alignment)
 
         return {"term": term, "root": root, "constraint": constraint_scores, "lse": lse_scores, "add": add_scores}
@@ -642,7 +648,9 @@ class TgtParserBase(nn.Module):
 
     def build_observed_span_constraint(self, batch_size, n, max_nt_spans, observed_constraint, constraint=None):
         if constraint is None:
-            constraint = self.get_init_nt_constraint(batch_size, n, max_nt_spans)
+            constraint = self.post_process_nt_constraint(
+                self.get_init_nt_constraint(batch_size, n, max_nt_spans), observed_constraint[0].device
+            )
         for item, (value, mask) in zip(observed_constraint, constraint):
             mask |= item.view(list(item.shape) + [1] * (mask.ndim - item.ndim))
             value[item] = self.neg_huge

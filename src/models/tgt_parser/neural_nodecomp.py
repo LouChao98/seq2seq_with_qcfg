@@ -13,54 +13,17 @@ log = logging.getLogger(__file__)
 
 
 class NeuralNoDecompTgtParser(TgtParserBase):
-    def __init__(
-        self,
-        pt_states=1,
-        nt_states=10,
-        pt_span_range=(1, 1),
-        nt_span_range=(2, 1000),
-        use_copy=False,
-        datamodule=None,
-        rule_hard_constraint=None,
-        rule_soft_constraint=None,
-        rule_soft_constraint_solver=None,
-        generation_criteria="ppl",
-        generation_max_length=40,
-        generation_max_actions=80,
-        generation_num_samples=10,
-        generation_ppl_batch_size=None,
-        generation_strict=False,
-        vocab=100,
-        dim=256,
-        num_layers=3,
-        src_dim=256,
-    ):
-        super().__init__(
-            pt_states,
-            nt_states,
-            pt_span_range,
-            nt_span_range,
-            use_copy,
-            datamodule,
-            rule_hard_constraint,
-            rule_soft_constraint,
-            rule_soft_constraint_solver,
-            generation_criteria,
-            generation_max_length,
-            generation_max_actions,
-            generation_num_samples,
-            generation_ppl_batch_size,
-            generation_strict,
-        )
+    def __init__(self, vocab=100, dim=256, num_layers=3, src_dim=256, **kwargs):
+        super().__init__(**kwargs)
 
         self.vocab = vocab
         self.dim = dim
         self.src_dim = src_dim
         self.num_layers = num_layers
 
-        self.src_nt_emb = nn.Parameter(torch.randn(nt_states, dim))
+        self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
-        self.src_pt_emb = nn.Parameter(torch.randn(pt_states, dim))
+        self.src_pt_emb = nn.Parameter(torch.randn(self.pt_states, dim))
         self.src_pt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
         self.vocab_out = MultiResidualLayer(dim, dim, out_dim=vocab, num_layers=num_layers)
 
@@ -143,14 +106,18 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         valid_mask = torch.einsum("bx,by,bz->bxyz", lhs_mask, rhs_mask, rhs_mask)
         rules[~valid_mask] = self.neg_huge
 
+        common = batch_size, self.pt_states, self.nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device
         if self.rule_hard_constraint is not None:
-            mask = self.rule_hard_constraint.get_mask(
-                batch_size, self.pt_states, self.nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device
-            )
+            mask = self.rule_hard_constraint.get_mask(*common)
             rules[~mask] = self.neg_huge
 
         rules = rules.flatten(2).log_softmax(-1).clone()
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
+
+        if self.rule_reweight_constraint is not None:
+            weight = self.rule_reweight_constraint.get_weight(*common)
+            rules = rules + weight
+
         rules[~lhs_mask] = self.neg_huge
 
         # A->a

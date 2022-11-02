@@ -17,13 +17,7 @@ embedding:
 
 decoder:
   rule_soft_constraint:
-    _target_: src.models.constraint.fully_parameterized.FPPenaltyDepth
-    upwards_score: 0.1
-    stay_score: 0.1
-    down1_score: 1.
-    down2_score: 0.9
-    down3_score: 0.85
-    down_score: 0.8
+    _target_: src.models.constraint.fully_parameterized.FPPenaltyDepth2
   rule_soft_constraint_solver:
     _target_: src.models.posterior_regularization.linear.UngroundedPRLineSearchSolver
     b: 0

@@ -21,9 +21,11 @@ class RuleConstraintBase:
         mask = self.get_mask(batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device)
         return 1.0 - mask.float()
 
-    def get_reward(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
-        mask = self.get_mask(batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device)
-        return mask.float()
+    def get_weight(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+        mask = self.get_weight(
+            batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device
+        )
+        return mask.float().clamp(0.5).log()
 
     def get_mask_from_pred(self, pred: TgtParserPrediction):
         nt_spans = copy(pred.nt_nodes)
@@ -53,10 +55,10 @@ class RuleConstraintBase:
             pred.device,
         )
 
-    def get_reward_from_pred(self, pred: TgtParserPrediction):
+    def get_weight_from_pred(self, pred: TgtParserPrediction):
         nt_spans = copy(pred.nt_nodes)
         pt_spans = copy(pred.pt_nodes)
-        return self.get_reward(
+        return self.get_weight(
             pred.batch_size,
             pred.pt_states,
             pred.nt_states,

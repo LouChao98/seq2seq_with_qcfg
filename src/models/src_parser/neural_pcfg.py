@@ -30,13 +30,9 @@ class NeuralPCFGSrcParser(SrcParserBase):
         self.nt_emb = nn.Parameter(torch.randn(nt_states, dim))
         self.root_emb = nn.Parameter(torch.randn(1, dim))
         self.rule_mlp = nn.Sequential(nn.Linear(dim, self.all_states**2))
-        self.root_mlp = MultiResidualLayer(
-            in_dim=dim, res_dim=dim, num_layers=num_layers, out_dim=nt_states
-        )
+        self.root_mlp = MultiResidualLayer(in_dim=dim, res_dim=dim, num_layers=num_layers, out_dim=nt_states)
         if vocab_out is None:
-            self.vocab_out = MultiResidualLayer(
-                in_dim=dim, res_dim=dim, num_layers=num_layers, out_dim=vocab
-            )
+            self.vocab_out = MultiResidualLayer(in_dim=dim, res_dim=dim, num_layers=num_layers, out_dim=vocab)
         else:
             self.vocab_out = vocab_out
         self.reset_parameters()
@@ -81,9 +77,7 @@ class NeuralPCFGSrcParser(SrcParserBase):
     def sample(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
         if dist is None:
             dist = self(x, lengths, extra_scores)
-        samples = dist._struct(torch_struct.SampledSemiring).marginals(
-            dist.log_potentials, lengths=dist.lengths
-        )
+        samples = dist._struct(torch_struct.SampledSemiring).marginals(dist.log_potentials, lengths=dist.lengths)
         log_Z = dist.partition
         logprobs = dist._struct().score(dist.log_potentials, samples) - log_Z
         return samples, logprobs
@@ -101,9 +95,7 @@ class NeuralPCFGSrcParser(SrcParserBase):
             dist = self(x, lengths, extra_scores)
         semiring = GumbelCRFSemiring(temperature)
         with torch.enable_grad():
-            samples = dist._struct(semiring).marginals(
-                dist.log_potentials, dist.lengths, inside_func="trace"
-            )
+            samples = dist._struct(semiring).marginals(dist.log_potentials, dist.lengths, inside_func="trace")
         # log_Z = dist.partition
         # logprobs = dist._struct().score(dist.log_potentials, samples) - log_Z
         logprobs = 0
@@ -126,14 +118,14 @@ class NeuralPCFGSrcParser(SrcParserBase):
     def entropy(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
         if dist is None:
             dist = self(x, lengths, extra_scores)
-
-        margin = dist.marginals
-        return (
-            dist.partition
-            - (margin[0] * dist.log_potentials[0]).flatten(1).sum(1)
-            - (margin[1] * dist.log_potentials[1]).flatten(1).sum(1)
-            - (margin[2] * dist.log_potentials[2]).flatten(1).sum(1)
-        )
+        return dist.entropy
+        # margin = dist.marginals
+        # return (
+        #     dist.partition
+        #     - (margin[0] * dist.log_potentials[0]).flatten(1).sum(1)
+        #     - (margin[1] * dist.log_potentials[1]).flatten(1).sum(1)
+        #     - (margin[2] * dist.log_potentials[2]).flatten(1).sum(1)
+        # )
 
     def process_extra_scores(self, params, extra_scores):
         # constraint_scores, lse_scores, add_scores = None, None, None

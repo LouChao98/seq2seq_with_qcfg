@@ -101,13 +101,6 @@ class NeqPTImpl2(PrTask):
 
 
 class NeqNTImpl2(PrTask):
-    def __init__(self, mode) -> None:
-        super().__init__()
-        # mode 1 = rule with shape bsz x nt x (nt + pt) x (nt + pt)
-        # mode 2 = head with shape bsz x nt x r
-        assert mode in (1, 2)
-        self.mode = mode
-
     def get_b(self, pred: TgtParserPrediction):
         return -torch.ones(pred.batch_size, pred.nt_num_nodes, device=pred.device)
 
@@ -121,7 +114,7 @@ class NeqNTImpl2(PrTask):
     def build_constrained_dist(self, pred: TgtParserPrediction, lambdas, constraints, entropy_reg=None):
         dist = pred.dist
         cparams = {**dist.params}
-        field = "rule" if self.model == 1 else "head"
+        field = "rule" if "rule" in cparams else "head"
         cparams[field] = (
             cparams[field].view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1)
             - (lambdas * constraints)[:, None, :, None]
@@ -134,3 +127,8 @@ class NeqNTImpl2(PrTask):
                 else:
                     cparams[key] = torch.pow(cparams[key], factor)
         return dist.spawn(params=cparams)
+
+    def calc_e(self, pred: TgtParserPrediction, constraints):
+        m = pred.dist.marginal
+        m = m["rule"] if "rule" in m else m["head"]
+        return m.view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1).sum((1, 3)) * constraints

@@ -2,6 +2,7 @@ from collections import defaultdict
 from logging import getLogger
 from pprint import pprint
 
+import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
@@ -125,24 +126,27 @@ class FPSynchronous(RuleConstraintBase):
 
 
 class FPPenaltyDepth(RuleConstraintBase):
+    # p(m) ^ k > p(0) ^ {k-1} p(mk), assume p(0) -> 1
+    # k log p(m) > log p(mk)
+
     def __init__(
         self, upwards_score=0.2, stay_score=0.2, down1_score=1, down2_score=0.7, down3_score=0.5, down_score=0.2
     ) -> None:
         super().__init__()
-        self.upwards_score = upwards_score
-        self.stay_score = stay_score
-        self.down1_score = down1_score
-        self.down2_score = down2_score
-        self.down3_score = down3_score
-        self.down_score = down_score
+        self.upwards_score = np.log(upwards_score)
+        self.stay_score = np.log(stay_score)
+        self.down1_score = np.log(down1_score)
+        self.down2_score = np.log(down2_score)
+        self.down3_score = np.log(down3_score)
+        self.down_score = np.log(down_score)
 
     def get_mask(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
         raise NotImplementedError
 
-    def get_reward(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+    def get_weight(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
         nt = nt_num_nodes * nt_states
         pt = pt_num_nodes * pt_states
-        node_score = torch.zeros(batch_size, nt, nt + pt)
+        node_score = torch.full((batch_size, nt, nt + pt), -1e9)
 
         nt_idx = slice(0, nt)
         pt_idx = slice(nt, nt + pt)
@@ -189,6 +193,74 @@ class FPPenaltyDepth(RuleConstraintBase):
                             nt_ntpt[b, :, i, :, j] = 0.5
         node_score = node_score.to(device)
         node_score = node_score.unsqueeze(2) * node_score.unsqueeze(3)
+        return node_score.clamp(1e-9).log()
+
+
+class FPPenaltyDepth2(RuleConstraintBase):
+    # p(m) ^ k > p(0) ^ {k-1} p(mk), assume p(0) -> 1
+    # k log p(m) >= log p(mk)
+
+    def __init__(self, upwards_score=1e-4, stay_score=0.9, nt_temperature=1.0, pt_temperature=1.0) -> None:
+        super().__init__()
+        self.upwards_score = np.log(upwards_score)
+        self.stay_score = np.log(stay_score)
+        self.nt_temperature = nt_temperature
+        self.pt_temperature = pt_temperature
+        self.nt_score = -np.linspace(0, 99 / nt_temperature, 100)
+        self.pt_score = -np.linspace(0, 99 / pt_temperature, 100)
+
+    def get_mask(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+        raise NotImplementedError
+
+    def get_weight(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+        nt = nt_num_nodes * nt_states
+        pt = pt_num_nodes * pt_states
+        node_score = torch.full((batch_size, nt, nt + pt), -1e9)
+
+        nt_idx = slice(0, nt)
+        pt_idx = slice(nt, nt + pt)
+
+        nt_ntnt = node_score[:, nt_idx, nt_idx].view(batch_size, nt_states, nt_num_nodes, nt_states, nt_num_nodes)
+        nt_ntpt = node_score[:, nt_idx, pt_idx].view(batch_size, nt_states, nt_num_nodes, pt_states, pt_num_nodes)
+
+        for b, (nt_spans_inst, pt_spans_inst) in enumerate(zip(nt_spans, pt_spans)):
+            spans, parents, mapping_ = spans2tree(nt_spans_inst, return_mapping=True)
+            mapping = list(range(len(mapping_)))
+            mapping.sort(key=lambda x: mapping_[x])
+
+            nt_depths = [0]
+            pt_depths = [0] * len(pt_spans_inst)
+            for j in range(1, len(spans)):
+                depth = 1
+                k = parents[j]
+                while k != 0:
+                    k = parents[k]
+                    depth += 1
+                nt_depths.append(depth)
+
+            for i, span1 in enumerate(spans):
+                nt_ntnt[b, :, mapping[i], :, mapping[i]] = self.stay_score
+                for j, span2 in enumerate(spans[i + 1 :], start=i + 1):
+                    if not (is_parent(span1, span2)):
+                        continue
+                    distance = nt_depths[j] - nt_depths[i]
+                    assert distance >= 0
+                    nt_ntnt[b, :, mapping[i], :, mapping[j]] = self.nt_score[distance]
+                    nt_ntnt[b, :, mapping[j], :, mapping[i]] = self.upwards_score
+                for j, pt_span in enumerate(pt_spans_inst):
+                    if not (is_parent(span1, pt_span)):
+                        continue
+                    pt_depths[j] = max(pt_depths[j], nt_depths[i] + 1)
+
+            for i, span1 in enumerate(spans):
+                for j, span2 in enumerate(pt_spans_inst):
+                    if is_parent(span1, span2):
+                        distance = pt_depths[j] - nt_depths[i]
+                        assert distance >= 0
+                        nt_ntpt[b, :, i, :, j] = self.pt_score[distance]
+
+        node_score = node_score.to(device)
+        node_score = torch.min(node_score.unsqueeze(2), node_score.unsqueeze(3))
         return node_score
 
 

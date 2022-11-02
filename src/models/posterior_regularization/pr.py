@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from copy import copy
 from typing import TYPE_CHECKING
 
@@ -12,12 +13,14 @@ from .project_simplex import project_simplex
 if TYPE_CHECKING:
     from src.models.tgt_parser.base import TgtParserPrediction
 
+logger = logging.getLogger(__file__)
+
 
 class PrTask:
-    def get_b(self, pred, batch_size):
+    def get_b(self, pred):
         ...
 
-    def get_init_lambdas(self, pred, batch_size):
+    def get_init_lambdas(self, pred):
         ...
 
     def process_constraint(self, pred, constraints):
@@ -33,6 +36,69 @@ class PrTask:
         ...
 
 
+class MultiTask(PrTask):
+    def __init__(self, *tasks):
+        self.tasks = tasks
+        self.sizes = None
+
+    def get_b(self, pred):
+        b = [task.get_b(pred) for task in self.tasks]
+        sizes = [item.shape[1] for item in b]
+        if self.sizes is None:
+            self.sizes = sizes
+        else:
+            assert self.sizes == sizes
+        return torch.cat(b, dim=1)
+
+    def get_init_lambdas(self, pred):
+        lambdas = [task.get_b(pred) for task in self.tasks]
+        sizes = [item.shape[1] for item in lambdas]
+        if self.sizes is None:
+            self.sizes = sizes
+        else:
+            assert self.sizes == sizes
+        return torch.cat(lambdas, dim=1)
+
+    def process_constraint(self, pred, constraints):
+        output = []
+        assert len(self.tasks) == len(constraints)
+        for task, constraint in zip(self.tasks, constraints):
+            output.append(task.process_constraint(pred, constraint))
+        return output
+
+    def build_constrained_dist(self, pred, lambdas, constraints, entropy_reg=None):
+        pred = copy(pred)
+        offset = 0
+        for task, size in zip(self.tasks, self.sizes):
+            dist = task.build_constrained_dist(
+                pred, lambdas[:, offset : offset + size], constraints[:, offset : offset + size], None
+            )
+            pred.dist = dist
+            offset += size
+        if entropy_reg is not None and entropy_reg > 0:
+            cparams = pred.dist.params
+            factor = 1 / (1 - entropy_reg)
+            for key, is_log_param in zip(dist.KEYS, dist.LOGSPACE):
+                if is_log_param:
+                    cparams[key] = cparams[key] * factor
+                else:
+                    cparams[key] = torch.pow(cparams[key], factor)
+            dist = dist.spawn(params=cparams)
+        return dist
+
+    def calc_e(self, pred, constraints):
+        offset = 0
+        e = []
+        for task, size in zip(self.tasks, self.sizes):
+            e.append(task.calc_e(pred, constraints[:, offset : offset + size]))
+            offset += size
+        return torch.cat(e, dim=1)
+
+    def lambda_simplex_constraint(self):
+        c = [task.lambda_simplex_constraint for task in self.tasks]
+        assert all(item is None for item in c)
+
+
 @torch.enable_grad()
 def compute_pr(pred: TgtParserPrediction, constraints, task: PrTask, get_dist=False, **kwargs):
     constraints = task.process_constraint(pred, constraints)
@@ -41,10 +107,11 @@ def compute_pr(pred: TgtParserPrediction, constraints, task: PrTask, get_dist=Fa
     b = task.get_b(pred)
     if b is not None:
         e = task.calc_e(pred, constraints)
-        if (e < task.get_b(pred)).all():
+        if (e < b).all():
+            logger.warning("Skipping PR.")
             if get_dist:  # do nothing
                 return copy(pred)
-            return torch.zeros(pred, device=pred.device)
+            return torch.zeros(pred.batch_size, device=pred.device)
 
     lambdas = pgd_solver(pred, constraints, task, **kwargs)
     cdist = task.build_constrained_dist(pred, lambdas, constraints, entropy_reg)

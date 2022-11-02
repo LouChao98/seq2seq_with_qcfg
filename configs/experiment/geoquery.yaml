@@ -4,7 +4,7 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: geoquery_template
+  - override /datamodule: geoquery_len
   - override /model: geoquery
   - override /callbacks: default
   - override /logger: wandb
@@ -16,7 +16,13 @@ defaults:
 # name of the run determines folder name in logs
 name: "geoquery"
 
-# datamodule:
+datamodule:
+  copy_mode: "phrase"
+  batch_size: 4
+  dev_file: ${.test_file}
+model:
+  decoder:
+    use_copy: true
 #   copy_mode: "phrase"
 #   transformer_tokenizer_name: bert-base-cased
 
@@ -30,7 +36,7 @@ name: "geoquery"
 # rule_hard_constraint: ~
 
 trainer:
-  max_epochs: 100
+  max_epochs: 40
   accumulate_grad_batches: 1
   gradient_clip_val: 3
 

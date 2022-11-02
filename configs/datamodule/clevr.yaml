@@ -1,0 +1,17 @@
+_target_: src.datamodules.semantic_parsing_datamodule.SemanticParsingDataModule
+
+train_file: ${data_dir}/clevr/dsl/train_small.json
+dev_file: ${data_dir}/clevr/dsl/dev.json
+test_file: ${data_dir}/clevr/dsl/test_small.json
+
+copy_mode: "phrase"
+max_src_len: 16
+
+batch_size: 2
+token_size: 0
+eval_batch_size: 1
+num_workers: ${in_debugger:0,4}
+pin_memory: true
+
+cache_dir: ${data_dir}/cache
+enable_cache: false
