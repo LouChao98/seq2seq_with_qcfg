@@ -244,8 +244,8 @@ class FPPenaltyDepth2(RuleConstraintBase):
                     if not (is_parent(span1, span2)):
                         continue
                     distance = nt_depths[j] - nt_depths[i]
-                    assert distance >= 0
-                    nt_ntnt[b, :, mapping[i], :, mapping[j]] = self.nt_score[distance]
+                    assert distance > 0
+                    nt_ntnt[b, :, mapping[i], :, mapping[j]] = self.nt_score[distance - 1]
                     nt_ntnt[b, :, mapping[j], :, mapping[i]] = self.upwards_score
                 for j, pt_span in enumerate(pt_spans_inst):
                     if not (is_parent(span1, pt_span)):
@@ -256,8 +256,8 @@ class FPPenaltyDepth2(RuleConstraintBase):
                 for j, span2 in enumerate(pt_spans_inst):
                     if is_parent(span1, span2):
                         distance = pt_depths[j] - nt_depths[i]
-                        assert distance >= 0
-                        nt_ntpt[b, :, i, :, j] = self.pt_score[distance]
+                        assert distance > 0
+                        nt_ntpt[b, :, mapping[i], :, j] = self.pt_score[distance - 1]
 
         node_score = node_score.to(device)
         node_score = torch.min(node_score.unsqueeze(2), node_score.unsqueeze(3))

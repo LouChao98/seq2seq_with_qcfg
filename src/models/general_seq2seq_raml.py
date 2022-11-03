@@ -51,6 +51,8 @@ class GeneralSeq2SeqModule(ModelBase):
         load_from_checkpoint=None,
         parser_entropy_reg=0.0,
         decoder_entropy_reg=0.0,
+        warmup=0,
+        loss_threshold=0.1,
         param_initializer="xavier_uniform",
         track_param_norm=False,
         real_val_every_n_epochs=5,
@@ -92,7 +94,8 @@ class GeneralSeq2SeqModule(ModelBase):
             datamodule=self.datamodule,
             src_dim=self.tree_encoder.get_output_dim(),
         )
-        self.threshold = torch.nn.Threshold(0.1, 0)
+
+        self.threshold = torch.nn.Threshold(self.hparams.loss_threshold, 0)
 
         self.train_metric = PerplexityMetric()
         self.val_metric = PerplexityMetric()
@@ -151,12 +154,13 @@ class GeneralSeq2SeqModule(ModelBase):
     @profile_every(5, enable=False)
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
+        tgt_ids, tgt_lens = batch["tgt_ids"], batch["tgt_lens"]
         observed = {
-            "x": batch["tgt_ids"],
-            "lengths": batch["tgt_lens"],
+            "x": tgt_ids,
+            "lengths": tgt_lens,
             "pt_copy": batch.get("copy_token"),
             "nt_copy": batch.get("copy_phrase"),
-            "prior_alignment": batch.get("prior_alignment"),
+            # "prior_alignment": batch.get("prior_alignment"),
         }
         logging_vals = {}
 
@@ -212,7 +216,7 @@ class GeneralSeq2SeqModule(ModelBase):
                 logging_vals["tgt_entropy"] = entropy
 
         return {
-            "decoder": tgt_loss + soft_constraint_loss + tgt_entropy_reg,
+            "decoder": self.threshold(tgt_nll) + soft_constraint_loss + tgt_entropy_reg,
             "encoder": self.threshold(src_nll) + objective + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
@@ -235,7 +239,7 @@ class GeneralSeq2SeqModule(ModelBase):
             "lengths": batch["tgt_lens"],
             "pt_copy": batch.get("copy_token"),
             "nt_copy": batch.get("copy_phrase"),
-            "prior_alignment": batch.get("prior_alignment"),
+            # "prior_alignment": batch.get("prior_alignment"),
         }
 
         parse = self.parser.sample if sample else self.parser.argmax
@@ -251,18 +255,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
         tgt_pred = self.decoder(node_features, node_spans)
         tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-
-        reward = self.decoder.rule_soft_constraint.get_weight_from_pred(tgt_pred)
-        tgt_pred.dist = tgt_pred.dist.spawn(
-            params={
-                "term": torch.where(tgt_pred.dist.params["term"] > -1e8, 0, -1e9),
-                "rule": torch.where(tgt_pred.dist.params["rule"] > -1e8, (reward + 1e-9).log(), -1e9),
-                "root": torch.where(tgt_pred.dist.params["root"] > -1e8, 0.0, -1e9),
-            }
-        )
-
         tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(tgt_pred)
-
         tgt_annotated = []
         for snt, tgt_spans_inst in zip(batch["tgt"], tgt_spans):
             tree = annotate_snt_with_brackets(snt, tgt_spans_inst)
@@ -360,13 +353,13 @@ class GeneralSeq2SeqModule(ModelBase):
             self.log_dict({"train/" + k: v.mean() for k, v in output["log"].items()})
         if batch_idx == 0:
             self.eval()
-            single_inst = {key: (value[:2] if key != "transformer_inputs" else value) for key, value in batch.items()}
+            single_inst = make_subbatch(batch, 1)
             trees = self.forward_visualize(single_inst)
             self.print("=" * 79)
             for src, tgt, alg in zip(trees["src_tree"], trees["tgt_tree"], trees["alignment"]):
                 self.print("Src:", src)
                 self.print("Tgt:", tgt)
-                self.print("Alg:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
+                self.print("Alignment:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
             self.train()
         return {"loss": loss}
 
@@ -399,13 +392,13 @@ class GeneralSeq2SeqModule(ModelBase):
             self.test_step(batch, batch_idx=None)
 
         if batch_idx == 0:
-            single_inst = {key: (value[:2] if key != "transformer_inputs" else value) for key, value in batch.items()}
+            single_inst = make_subbatch(batch, 1)
             trees = self.forward_visualize(single_inst)
             self.print("=" * 79)
             for src, tgt, alg in zip(trees["src_tree"], trees["tgt_tree"], trees["alignment"]):
                 self.print("Src:", src)
                 self.print("Tgt:", tgt)
-                self.print("Alg:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
+                self.print("Alignment:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
 
         return {"loss": loss}
 
@@ -448,7 +441,7 @@ class GeneralSeq2SeqModule(ModelBase):
         #         self.print("Src:", src)
         #         self.print("Tgt:", tgt)
         #         self.print(
-        #             "Alg:\n"
+        #             "Alignment:\n"
         #             + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg))
         #         )
 
@@ -461,3 +454,15 @@ class GeneralSeq2SeqModule(ModelBase):
         self.log_dict(d)
         self.print(acc)
         self.save_predictions(outputs)
+
+
+def make_subbatch(batch, size):
+    output = {}
+    for key, value in batch.items():
+        if key == "transformer_inputs":
+            output[key] = value
+        elif key == "tgt_masks":
+            output[key] = [item[:size] for item in value]
+        else:
+            output[key] = value[:size]
+    return output

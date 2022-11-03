@@ -158,6 +158,7 @@ class TgtParserBase(nn.Module):
         pt_span_range: Tuple = (1, 1),
         nt_span_range: Tuple = (2, 1000),
         use_copy: bool = False,
+        use_observed: bool = False,
         datamodule: Optional[_DataModule] = None,
         rule_hard_constraint=None,
         rule_soft_constraint=None,
@@ -177,6 +178,7 @@ class TgtParserBase(nn.Module):
         self.nt_span_range = nt_span_range
         self.pt_span_range = pt_span_range
         self.use_copy = use_copy
+        self.use_observed = use_observed
         self.datamodule = datamodule
 
         self.rule_hard_constraint: Optional[RuleConstraintBase] = instantiate(rule_hard_constraint)
@@ -582,7 +584,7 @@ class TgtParserBase(nn.Module):
         if constraint_scores is not None:
             constraint_scores = self.post_process_nt_constraint(constraint_scores, tgt.device)
 
-        if observed_mask is not None:
+        if observed_mask is not None and self.use_observed:
             constraint_scores = self.build_observed_span_constraint(
                 batch_size, n, max_nt_spans, observed_mask, constraint_scores
             )

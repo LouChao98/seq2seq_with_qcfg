@@ -97,8 +97,9 @@ class NoDecomp(DecompBase):
                 value, mask = constraint[step]
                 if value.ndim > 0:
                     value = value[:current_bsz]
+                value = semiring.convert(value)
                 mask = mask[:current_bsz]
-                x = torch.where(mask, value, x)
+                x = torch.where(mask.unsqueeze(0).expand([bsz] + list(mask.shape)), value, x)
 
             if add_scores is not None:
                 x = x + add_scores[step]
