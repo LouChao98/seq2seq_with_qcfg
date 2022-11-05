@@ -5,7 +5,7 @@ defaults:
   - decoder: nodecomp
   - test_metric: bleu1234
 
-_target_: src.models.general_seq2seq_raml.GeneralSeq2SeqModule
+_target_: src.models.general_seq2seq_end2end.GeneralSeq2SeqEnd2EndModule
 _recursive_: false
 
 param_initializer: "xavier_uniform"

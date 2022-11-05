@@ -251,17 +251,28 @@ class TgtParserBase(nn.Module):
             noisy_features.append(torch.cat([node_features[bidx]] + features_item, dim=0))
             noisy_spans.append(node_spans[bidx][:-1] + spans_item + node_spans[bidx][-1:])
         pred = self(noisy_features, noisy_spans)
-        pred = self.observe_x(pred, **observes)  # TODO handle hard constraint
-        marginal = pred.dist.marginal_with_grad  # b n n tgt_nt src_nt
         noisy_nodes = [torch.tensor([span[2] == NO_COPY_SPAN for span in spans]) for spans in pred.nt_nodes]
-        noisy_nodes = pad_sequence(noisy_nodes, batch_first=True, padding_value=False).to(marginal.device)  # b srcnt
-        loss = marginal * noisy_nodes[:, None, None, None].expand_as(marginal)
-        return loss.flatten(1).sum(1)
+        noisy_nodes = pad_sequence(noisy_nodes, batch_first=True, padding_value=False).to(pred.device)  # b srcnt
+        impl = 2
+        if impl == 1:
+            pred = self.observe_x(pred, **observes)  # TODO handle hard constraint
+            marginal = pred.dist.marginal_with_grad  # b n n tgt_nt src_nt
+            loss = marginal * noisy_nodes[:, None, None, None].expand_as(marginal)
+            loss = loss.flatten(1).sum(1)
+        else:
+            rule = pred.params["rule"]
+            shape = rule.shape
+            rule = rule.view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1)
+            rule = torch.where(noisy_nodes[:, None, :, None].expand_as(rule), -1e9, rule)
+            pred.params["rule"] = rule.view(shape)
+            pred = self.observe_x(pred, **observes)
+            loss = pred.dist.nll
+        return loss
 
     def parse(self, pred: TgtParserPrediction):
         assert pred.dist is not None
         out = pred.dist.mbr_decoded
-        # out = pred.dist.viterbi_deocoded
+        # out = pred.dist.viterbi_decoded
         # find alignments
         aligned_spans = []
         for b, (all_span, pt_span, nt_span) in enumerate(zip(out, pred.pt_nodes, pred.nt_nodes)):

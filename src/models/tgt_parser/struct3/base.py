@@ -82,13 +82,25 @@ class DecompBase:
             extra_params = set(params[0].keys()) - set(self.KEYS)
             new_params = {k: semiring.convert(params[0][k], params[1][k]) for k in self.KEYS}
             for key in extra_params:
-                new_params[key] = params[0][key]
+                if key == "constraint" and params[0]["constraint"] is not None:
+                    converted = []
+                    for (value, mask), (value2, mask2) in zip(params[0]["constraint"], params[1]["constraint"]):
+                        converted.append((semiring.convert(value, value2), mask))
+                    new_params[key] = converted
+                else:
+                    assert params[0][key] is None, f"Not implemented for {key}"
             semiring.set_device(params[0][self.KEYS[0]].device)
         else:
             extra_params = set(params.keys()) - set(self.KEYS)
             new_params = {k: semiring.convert(params[k]) for k in self.KEYS}
             for key in extra_params:
-                new_params[key] = params[key]
+                if key == "constraint" and params["constraint"] is not None:
+                    converted = []
+                    for value, mask in params["constraint"]:
+                        converted.append((semiring.convert(value), mask))
+                    new_params[key] = converted
+                else:
+                    assert params[key] is None, f"Not implemented for {key}"
             semiring.set_device(params[self.KEYS[0]].device)
 
         return new_params
@@ -182,7 +194,7 @@ class DecompBase:
         return output
 
     @lazy_property
-    def viterbi_deocoded(self):
+    def viterbi_decoded(self):
         assert self.params["term"].ndim == 3
         params = {}
         for key, value in self.params.items():

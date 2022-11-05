@@ -108,6 +108,11 @@ class SemanticParsingDataModule(_DataModule):
         self.data_test = self.apply_vocab(data_test)
 
     def read_file(self, fpath):
+        # run_geo_pre = False
+        # if 'geo' in fpath:
+        #     logger.warning("Run special preprecossing for geo")
+        #     run_geo_pre = True
+
         with open(fpath) as f:
             data = [json.loads(line) for line in f]
 
@@ -116,10 +121,14 @@ class SemanticParsingDataModule(_DataModule):
             question = item["question"]
             program = item["program"]
 
+            # if run_geo_pre:
+            #     assert program.startswith('answer')
+            #     program = program[7:]
+
             # just drop brackets because in FunQL:
             # 1. we can recover them according to the grammar
             # 2. they do not tell much about spans
-            program, spans = tokenize_program(item["program"])
+            program, spans = tokenize_program(program)
             spans = [[item[0], item[1]] for item in spans if item[1] > item[0] + 1]
 
             question = word_tokenize(question)

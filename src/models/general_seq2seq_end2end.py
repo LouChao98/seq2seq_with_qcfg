@@ -28,14 +28,7 @@ from src.utils.metric import PerplexityMetric
 log = logging.getLogger(__file__)
 
 
-class GeneralSeq2SeqModule(ModelBase):
-    """A module for general seq2seq tasks.
-
-    * support pretrained models
-    * encoders
-    * custom test metric
-    """
-
+class GeneralSeq2SeqEnd2EndModule(ModelBase):
     def __init__(
         self,
         embedding=None,
@@ -84,12 +77,11 @@ class GeneralSeq2SeqModule(ModelBase):
         )
 
         self.parser: SrcParserBase = instantiate(self.hparams.parser, vocab=len(self.datamodule.src_vocab))
-        self.tree_encoder: TreeEncoderBase = instantiate(self.hparams.tree_encoder, dim=self.encoder.get_output_dim())
         self.decoder: TgtParserBase = instantiate(
             self.hparams.decoder,
             vocab=len(self.datamodule.tgt_vocab),
             datamodule=self.datamodule,
-            src_dim=self.tree_encoder.get_output_dim(),
+            src_dim=self.encoder.get_output_dim(),
         )
         self.threshold = torch.nn.Threshold(0.1, 0)
 
@@ -143,7 +135,20 @@ class GeneralSeq2SeqModule(ModelBase):
             out = out[:, 1:]
             x.append(out)
         x = torch.cat(x, dim=-1) if len(x) > 1 else x[0]
-        x = self.encoder(x, src_lens)
+        hidden_size = x.shape[-1]
+        x = torch.cat(
+            [src_ids.new_zeros(len(src_ids), 1, hidden_size), x, src_ids.new_zeros(len(src_ids), 1, hidden_size)],
+            dim=1,
+        )
+        x[torch.arange(len(src_ids)), torch.tensor(src_lens) + 1] = 0.0
+        x = self.encoder(x, [item + 2 for item in src_lens])
+        x = torch.cat(
+            [
+                x[:, :-1, : hidden_size // 2],
+                x[:, 1:, hidden_size // 2 :],
+            ],
+            -1,
+        )
         return x
 
     @report_ids_when_err
@@ -162,14 +167,21 @@ class GeneralSeq2SeqModule(ModelBase):
         with self.profiler.profile("compute_src_nll_and_marginal"):
             dist = self.parser(src_ids, src_lens)
             src_nll = -dist.partition
-            marginal = dist.marginal
+            marginal = dist.marginals[-1].sum(-1)
 
         with self.profiler.profile("src_encoding"):
             x = self.encode(batch)
-            node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
+            x = (torch.unsqueeze(x, 1) - torch.unsqueeze(x, 2))[:, :-1, 1:]
+            node_features, node_spans, weight = [], [], []
+            for bidx in range(len(x)):
+                index_list = [(j, j + w) for w in range(src_lens[bidx]) for j in range(0, src_lens[bidx] - w)]
+                index = torch.tensor(index_list)
+                node_features.append(x[bidx][index[0], index[1]])
+                node_spans.append(index_list)
+                weight.append(marginal[bidx][index[0], index[1]])
 
         with self.profiler.profile("compute_tgt_nll"):
-            tgt_pred = self.decoder(node_features, node_spans)
+            tgt_pred = self.decoder(node_features, node_spans, weight)
             tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
             tgt_nll = tgt_pred.dist.nll
 
@@ -197,7 +209,6 @@ class GeneralSeq2SeqModule(ModelBase):
             "runtime": {"seq_encoded": x},
             "src_runtime": {
                 "dist": dist,
-                "event": src_event,
             },
             "tgt_runtime": {"pred": tgt_pred},
             "log": logging_vals,

@@ -82,7 +82,7 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         nn.init.xavier_uniform_(self.src_nt_emb.data)
         nn.init.xavier_uniform_(self.src_pt_emb.data)
 
-    def forward(self, node_features, spans, **kwargs):
+    def forward(self, node_features, spans, weight=None, **kwargs):
         batch_size = len(spans)
         device = node_features[0].device
 

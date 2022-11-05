@@ -130,7 +130,7 @@ class FPPenaltyDepth(RuleConstraintBase):
     # k log p(m) > log p(mk)
 
     def __init__(
-        self, upwards_score=0.2, stay_score=0.2, down1_score=1, down2_score=0.7, down3_score=0.5, down_score=0.2
+        self, upwards_score=0.2, stay_score=0.8, down1_score=1, down2_score=0.7, down3_score=0.5, down_score=0.2
     ) -> None:
         super().__init__()
         self.upwards_score = np.log(upwards_score)

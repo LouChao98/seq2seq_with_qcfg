@@ -99,10 +99,9 @@ class Decomp1(DecompBase):
             if constraint is not None:
                 value, mask = constraint[step]
                 if value.ndim > 0:
-                    value = value[:current_bsz]
-                value = semiring.convert(value)
+                    value = value[:, :current_bsz]
                 mask = mask[:current_bsz]
-                x = torch.where(mask.unsqueeze(0).expand([bsz] + list(mask.shape)), value, x)
+                x = torch.where(mask.unsqueeze(0).expand([semiring.size] + list(mask.shape)), value, x)
 
             if trace:
                 indicator = span_indicator_running.diagonal(w, 2, 3).movedim(-1, 2)
