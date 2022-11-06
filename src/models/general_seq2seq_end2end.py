@@ -167,18 +167,24 @@ class GeneralSeq2SeqEnd2EndModule(ModelBase):
         with self.profiler.profile("compute_src_nll_and_marginal"):
             dist = self.parser(src_ids, src_lens)
             src_nll = -dist.partition
-            marginal = dist.marginals[-1].sum(-1)
+            term_m, *_, span_m = dist.marginals
+            term_m = term_m.sum(-1)
+            span_m = span_m.sum(-1)
 
         with self.profiler.profile("src_encoding"):
             x = self.encode(batch)
             x = (torch.unsqueeze(x, 1) - torch.unsqueeze(x, 2))[:, :-1, 1:]
             node_features, node_spans, weight = [], [], []
             for bidx in range(len(x)):
-                index_list = [(j, j + w) for w in range(src_lens[bidx]) for j in range(0, src_lens[bidx] - w)]
+                index_list = [(j, j + w, -1) for w in range(src_lens[bidx]) for j in range(0, src_lens[bidx] - w)]
                 index = torch.tensor(index_list)
-                node_features.append(x[bidx][index[0], index[1]])
+                node_features.append(x[bidx][index[:, 0], index[:, 1]])
                 node_spans.append(index_list)
-                weight.append(marginal[bidx][index[0], index[1]])
+                index2_list = [(w, j) for w in range(src_lens[bidx] - 1) for j in range(0, src_lens[bidx] - w - 1)]
+                index2 = torch.tensor(index2_list)
+                weight.append(
+                    torch.cat([term_m[bidx, : src_lens[bidx]], span_m[bidx][index2[:, 0], index2[:, 1]]], dim=0)
+                )
 
         with self.profiler.profile("compute_tgt_nll"):
             tgt_pred = self.decoder(node_features, node_spans, weight)
@@ -227,17 +233,30 @@ class GeneralSeq2SeqEnd2EndModule(ModelBase):
         }
 
         parse = self.parser.sample if sample else self.parser.argmax
-        src_spans = parse(src_ids, src_lens)[0][-1]
-        src_spans, src_trees = extract_parses(src_spans, src_lens, inc=1)
+        term_m, *_, span_m = parse(src_ids, src_lens)[0]
+        src_spans, src_trees = extract_parses(span_m, src_lens, inc=1)
         src_actions, src_annotated = [], []
         for snt, tree in zip(batch["src"], src_trees):
             src_actions.append(get_actions(tree))
             src_annotated.append(get_tree(src_actions[-1], snt))
+        term_m = term_m.sum(-1)
+        span_m = span_m.sum(-1)
 
         x = self.encode(batch)
-        node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
+        x = (torch.unsqueeze(x, 1) - torch.unsqueeze(x, 2))[:, :-1, 1:]
+        node_features, node_spans, weight = [], [], []
+        for bidx in range(len(x)):
+            index_list = [(j, j + w, -1) for w in range(src_lens[bidx]) for j in range(0, src_lens[bidx] - w)]
+            index = torch.tensor(index_list)
+            node_features.append(x[bidx][index[:, 0], index[:, 1]])
+            node_spans.append(index_list)
+            index2_list = [(w, j) for w in range(src_lens[bidx] - 1) for j in range(0, src_lens[bidx] - w - 1)]
+            index2 = torch.tensor(index2_list)
+            weight.append(
+                torch.cat([term_m[bidx, : src_lens[bidx]], span_m[bidx][index2[:, 0], index2[:, 1]]], dim=0)
+            )
 
-        tgt_pred = self.decoder(node_features, node_spans)
+        tgt_pred = self.decoder(node_features, node_spans, weight)
         tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
         tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(tgt_pred)
 
@@ -308,28 +327,41 @@ class GeneralSeq2SeqEnd2EndModule(ModelBase):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
 
         dist = self.parser(src_ids, src_lens)
-        src_spans = self.parser.argmax(src_ids, src_lens, dist=dist)[0]
-        src_spans = extract_parses_span_only(src_spans[-1], src_lens, inc=1)
+        term_m, *_, span_m = dist.marginals
+        # term_m, *_, span_m = self.parser.argmax(src_ids, src_lens, dist=dist)[0]
+        term_m = term_m.sum(-1)
+        span_m = span_m.sum(-1)
 
         x = self.encode(batch)
-        node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
+        x = (torch.unsqueeze(x, 1) - torch.unsqueeze(x, 2))[:, :-1, 1:]
+        node_features, node_spans, weight = [], [], []
+        for bidx in range(len(x)):
+            index_list = [(j, j + w, -1) for w in range(src_lens[bidx]) for j in range(0, src_lens[bidx] - w)]
+            index = torch.tensor(index_list)
+            node_features.append(x[bidx][index[:, 0], index[:, 1]])
+            node_spans.append(index_list)
+            index2_list = [(w, j) for w in range(src_lens[bidx] - 1) for j in range(0, src_lens[bidx] - w - 1)]
+            index2 = torch.tensor(index2_list)
+            weight.append(
+                torch.cat([term_m[bidx, : src_lens[bidx]], span_m[bidx][index2[:, 0], index2[:, 1]]], dim=0)
+            )
 
-        tgt_pred = self.decoder(node_features, node_spans)
+        tgt_pred = self.decoder(node_features, node_spans, weight)
         tgt_pred = self.decoder.prepare_sampler(tgt_pred, batch["src"], src_ids)
         y_preds = self.decoder.generate(tgt_pred)
 
-        import numpy as np
+        # import numpy as np
 
-        observed = {
-            "x": batch["tgt_ids"],
-            "lengths": batch["tgt_lens"],
-            "pt_copy": batch.get("copy_token"),
-            "nt_copy": batch.get("copy_phrase"),
-            "prior_alignment": batch.get("prior_alignment"),
-        }
-        tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-        tgt_nll = tgt_pred.dist.nll
-        tgt_ppl = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"]))
+        # observed = {
+        #     "x": batch["tgt_ids"],
+        #     "lengths": batch["tgt_lens"],
+        #     "pt_copy": batch.get("copy_token"),
+        #     "nt_copy": batch.get("copy_phrase"),
+        #     "prior_alignment": batch.get("prior_alignment"),
+        # }
+        # tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
+        # tgt_nll = tgt_pred.dist.nll
+        # tgt_ppl = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"]))
 
         return {"pred": [item[0] for item in y_preds]}
 

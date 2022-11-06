@@ -3,6 +3,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 
 from ..components.common import MultiResidualLayer
 from .base import TgtParserBase, TgtParserPrediction
@@ -12,48 +13,8 @@ log = logging.getLogger(__file__)
 
 
 class NeuralDecomp1TgtParser(TgtParserBase):
-    def __init__(
-        self,
-        pt_states=1,
-        nt_states=10,
-        pt_span_range=(1, 1),
-        nt_span_range=(2, 1000),
-        cpd_rank=32,
-        use_copy=False,
-        datamodule=None,
-        rule_hard_constraint=None,
-        rule_soft_constraint=None,
-        rule_soft_constraint_solver=None,
-        rule_reweight_constraint=None,
-        generation_criteria="ppl",
-        generation_max_length=40,
-        generation_max_actions=80,
-        generation_num_samples=10,
-        generation_ppl_batch_size=None,
-        generation_strict=False,
-        vocab=100,
-        dim=256,
-        num_layers=3,
-        src_dim=256,
-    ):
-        super().__init__(
-            pt_states,
-            nt_states,
-            pt_span_range,
-            nt_span_range,
-            use_copy,
-            datamodule,
-            rule_hard_constraint,
-            rule_soft_constraint,
-            rule_soft_constraint_solver,
-            rule_reweight_constraint,
-            generation_criteria,
-            generation_max_length,
-            generation_max_actions,
-            generation_num_samples,
-            generation_ppl_batch_size,
-            generation_strict,
-        )
+    def __init__(self, cpd_rank=32, vocab=100, dim=256, num_layers=3, src_dim=256, **kwargs):
+        super().__init__(**kwargs)
 
         assert self.rule_hard_constraint is None, "Do not support any constraint."
         assert self.rule_soft_constraint is None, "Do not support any constraint."
@@ -64,9 +25,9 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         self.num_layers = num_layers
         self.cpd_rank = cpd_rank
 
-        self.src_nt_emb = nn.Parameter(torch.randn(nt_states, dim))
+        self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
-        self.src_pt_emb = nn.Parameter(torch.randn(pt_states, dim))
+        self.src_pt_emb = nn.Parameter(torch.randn(self.pt_states, dim))
         self.src_pt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
 
         self.root_mlp_child = nn.Linear(dim, 1, bias=False)
@@ -82,7 +43,57 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         nn.init.xavier_uniform_(self.src_nt_emb.data)
         nn.init.xavier_uniform_(self.src_pt_emb.data)
 
-    def forward(self, node_features, spans, weight=None, **kwargs):
+    def build_src_features_with_weight(self, spans, node_features, weights):
+        # seperate nt and pt features according to span width
+        pt_node_features, nt_node_features = [], []
+        pt_spans, nt_spans = [], []
+        pt_weights, nt_weights = [], []
+        for spans_item, node_features_item, weights_item in zip(spans, node_features, weights):
+            pt_node_feature = []
+            nt_node_feature = []
+            pt_span = []
+            nt_span = []
+            pt_weight = []
+            nt_weight = []
+            for s, f, w in zip(spans_item, node_features_item, weights_item):
+                s_len = s[1] - s[0] + 1
+                if self.nt_span_range[0] <= s_len <= self.nt_span_range[1]:
+                    nt_node_feature.append(f)
+                    nt_span.append(s)
+                    nt_weight.append(w)
+                if self.pt_span_range[0] <= s_len <= self.pt_span_range[1]:
+                    pt_node_feature.append(f)
+                    pt_span.append(s)
+                    pt_weight.append(w)
+            self.sanity_check_spans(nt_span, pt_span)
+            pt_node_features.append(torch.stack(pt_node_feature))
+            nt_node_features.append(torch.stack(nt_node_feature))
+            pt_spans.append(pt_span)
+            nt_spans.append(nt_span)
+            pt_weights.append(torch.stack(pt_weight))
+            nt_weights.append(torch.stack(nt_weight))
+        nt_num_nodes_list = [len(item) for item in nt_node_features]
+        pt_num_nodes_list = [len(item) for item in pt_node_features]
+        nt_node_features = pad_sequence(nt_node_features, batch_first=True, padding_value=0.0)
+        pt_node_features = pad_sequence(pt_node_features, batch_first=True, padding_value=0.0)
+        nt_weights = pad_sequence(nt_weights, batch_first=True, padding_value=0.0).clamp(1e-32).log()
+        pt_weights = pad_sequence(pt_weights, batch_first=True, padding_value=0.0).clamp(1e-32).log()
+        pt_num_nodes = pt_node_features.size(1)
+        nt_num_nodes = nt_node_features.size(1)
+        return (
+            nt_spans,
+            nt_num_nodes_list,
+            nt_num_nodes,
+            nt_node_features,
+            nt_weights,
+            pt_spans,
+            pt_num_nodes_list,
+            pt_num_nodes,
+            pt_node_features,
+            pt_weights,
+        )
+
+    def forward(self, node_features, spans, weights, **kwargs):
         batch_size = len(spans)
         device = node_features[0].device
 
@@ -91,11 +102,13 @@ class NeuralDecomp1TgtParser(TgtParserBase):
             nt_num_nodes_list,
             nt_num_nodes,
             nt_node_features,
+            nt_weights,
             pt_spans,
             pt_num_nodes_list,
             pt_num_nodes,
             pt_node_features,
-        ) = self.build_src_features(spans, node_features)
+            pt_weights,
+        ) = self.build_src_features_with_weight(spans, node_features, weights)
 
         nt = self.nt_states * nt_num_nodes
         pt = self.pt_states * pt_num_nodes
@@ -114,6 +127,7 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         # S->A
         roots = self.root_mlp_child(nt_emb)
         roots = roots.view(batch_size, self.nt_states, nt_num_nodes)
+        roots = F.log_softmax(roots, 1) + nt_weights.unsqueeze(1)
         mask = torch.arange(nt_num_nodes, device=device).view(1, 1, -1).expand(batch_size, 1, -1)
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
         roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
@@ -136,6 +150,13 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         pt_mask = pt_mask.unsqueeze(1).expand(-1, self.pt_states, -1).reshape(batch_size, -1)
         # fmt: on
         mask = torch.cat([nt_mask, pt_mask], dim=1)
+
+        ntw = nt_weights.unsqueeze(1).repeat(1, self.nt_states, 1).view(batch_size, -1)
+        ptw = pt_weights.unsqueeze(1).repeat(1, self.pt_states, 1).view(batch_size, -1)
+        w = torch.cat([ntw, ptw], dim=1).unsqueeze(-1)
+        rule_left = rule_left.log_softmax(1) + w
+        rule_right = rule_right.log_softmax(1) + w
+
         rule_left[~mask] = self.neg_huge
         rule_right[~mask] = self.neg_huge
 
@@ -144,7 +165,10 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         rule_right = rule_right.transpose(1, 2).log_softmax(-1)
 
         # A->a
-        terms = F.log_softmax(self.vocab_out(pt_emb), 2)
+        terms = self.vocab_out(pt_emb)
+        # terms = terms.view(batch_size, self.pt_states, pt_num_nodes, -1)
+        # terms = terms + pt_weights[:, None, :, None]
+        terms = F.log_softmax(terms.view(batch_size, pt, -1), 2)
 
         params = {
             "term": terms,

@@ -2,7 +2,7 @@ defaults:
   - encoder: yzhang_lstm
   - parser: pcfg
   - tree_encoder: treelstm
-  - decoder: nodecomp
+  - decoder: decomp1
   - test_metric: bleu1234
 
 _target_: src.models.general_seq2seq_end2end.GeneralSeq2SeqEnd2EndModule
@@ -17,16 +17,6 @@ embedding:
   _target_: torch.nn.Embedding
   embedding_dim: 300
 
-decoder:
-  rule_soft_constraint:
-    _target_: src.models.constraint.fully_parameterized.FPPenaltyDepth2
-    upwards_score: 1e-4
-    stay_score: 0.9
-    nt_temperature: 1.
-    pt_temperature: 1.
-  rule_soft_constraint_solver:
-    _target_: src.models.posterior_regularization.linear.UngroundedPRLineSearchSolver
-    b: 0
 optimizer:
   groups: ~
   args:
