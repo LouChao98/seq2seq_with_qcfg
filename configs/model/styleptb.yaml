@@ -10,6 +10,8 @@ _recursive_: false
 
 param_initializer: "xavier_uniform"
 track_param_norm: false
+parser_entropy_reg: 0.
+decoder_entropy_reg: 0.
 
 embedding:
   _target_: torch.nn.Embedding

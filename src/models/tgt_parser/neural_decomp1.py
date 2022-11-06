@@ -12,48 +12,8 @@ log = logging.getLogger(__file__)
 
 
 class NeuralDecomp1TgtParser(TgtParserBase):
-    def __init__(
-        self,
-        pt_states=1,
-        nt_states=10,
-        pt_span_range=(1, 1),
-        nt_span_range=(2, 1000),
-        cpd_rank=32,
-        use_copy=False,
-        datamodule=None,
-        rule_hard_constraint=None,
-        rule_soft_constraint=None,
-        rule_soft_constraint_solver=None,
-        rule_reweight_constraint=None,
-        generation_criteria="ppl",
-        generation_max_length=40,
-        generation_max_actions=80,
-        generation_num_samples=10,
-        generation_ppl_batch_size=None,
-        generation_strict=False,
-        vocab=100,
-        dim=256,
-        num_layers=3,
-        src_dim=256,
-    ):
-        super().__init__(
-            pt_states,
-            nt_states,
-            pt_span_range,
-            nt_span_range,
-            use_copy,
-            datamodule,
-            rule_hard_constraint,
-            rule_soft_constraint,
-            rule_soft_constraint_solver,
-            rule_reweight_constraint,
-            generation_criteria,
-            generation_max_length,
-            generation_max_actions,
-            generation_num_samples,
-            generation_ppl_batch_size,
-            generation_strict,
-        )
+    def __init__(self, cpd_rank=32, vocab=100, dim=256, num_layers=3, src_dim=256, **kwargs):
+        super().__init__(**kwargs)
 
         assert self.rule_hard_constraint is None, "Do not support any constraint."
         assert self.rule_soft_constraint is None, "Do not support any constraint."
@@ -64,9 +24,9 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         self.num_layers = num_layers
         self.cpd_rank = cpd_rank
 
-        self.src_nt_emb = nn.Parameter(torch.randn(nt_states, dim))
+        self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
-        self.src_pt_emb = nn.Parameter(torch.randn(pt_states, dim))
+        self.src_pt_emb = nn.Parameter(torch.randn(self.pt_states, dim))
         self.src_pt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
 
         self.root_mlp_child = nn.Linear(dim, 1, bias=False)
