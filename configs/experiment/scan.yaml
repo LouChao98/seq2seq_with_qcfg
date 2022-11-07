@@ -24,11 +24,6 @@ datamodule:
   eval_batch_size: 1
   max_src_len: 100
 
-model:
-  # track_param_norm: true
-  decoder:
-    num_samples: 8
-
 trainer:
   max_epochs: 20
   accumulate_grad_batches: 4

@@ -2,7 +2,7 @@ defaults:
   - encoder: empty
   - parser: pcfg
   - tree_encoder: treelstm
-  - decoder: qcfg
+  - decoder: nodecomp
   - test_metric: bleu1234_and_exact
 
 _target_: src.models.general_seq2seq.GeneralSeq2SeqModule
@@ -19,9 +19,7 @@ decoder:
   dim: 256
   nt_states: 10 # src_nt_states in origin impl
   pt_states: 1 # src_pt_states in origin impl
-  rule_constraint_type: 1
   use_copy: false
-  num_samples: 8
 
 optimizer:
   groups: ~
