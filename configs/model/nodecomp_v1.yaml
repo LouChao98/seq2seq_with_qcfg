@@ -1,5 +1,5 @@
 defaults:
-  - encoder: empty
+  - encoder: yzhang_lstm
   - parser: pcfg
   - tree_encoder: treelstm
   - decoder: nodecomp
@@ -7,19 +7,15 @@ defaults:
 
 _target_: src.models.general_seq2seq.GeneralSeq2SeqModule
 _recursive_: false
+parser_entropy_reg: 0.
+decoder_entropy_reg: 0.
 
 param_initializer: "xavier_uniform"
 track_param_norm: false
 
 embedding:
   _target_: torch.nn.Embedding
-  embedding_dim: 256
-
-decoder:
-  dim: 256
-  nt_states: 10 # src_nt_states in origin impl
-  pt_states: 1 # src_pt_states in origin impl
-  use_copy: false
+  embedding_dim: 300
 
 optimizer:
   groups: ~
@@ -30,4 +26,11 @@ optimizer:
     weight_decay: 1.0e-5
     eps: 1.0e-8
 
-scheduler: ~
+scheduler:
+  ~
+  # interval: step
+  # frequency: 1
+  # monitor: val/ppl
+  # args:
+  #   _target_: src.utils.scheduler.get_exponential_lr_scheduler
+  #   gamma: 0.75**(1/10000)

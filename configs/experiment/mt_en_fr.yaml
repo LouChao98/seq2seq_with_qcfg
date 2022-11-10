@@ -4,49 +4,37 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: scan
-  - override /model: nodecomp_v1
-  - override /model/encoder: empty
+  - override /datamodule: mt_en_fr
+  - override /model: styleptb
+  - override /model/tree_encoder: treelstm
   - override /model/decoder: nodecomp
   - override /model/decoder/constraint: fp_hard_sh
   - override /callbacks: default
-  - override /logger: tensorboard
+  - override /logger: wandb
   - override /trainer: default
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "scan"
-
-datamodule:
-  # batch_size: 1
-  # eval_batch_size: 1
-  batch_size: 4
-  eval_batch_size: 4
-  max_src_len: 100
-
-model:
-  loss_threshold: 0.
-  embedding:
-    _target_: torch.nn.Embedding
-    embedding_dim: 256
-
-  decoder:
-    dim: 256
-    nt_states: 10 # src_nt_states in origin impl
-    pt_states: 1 # src_pt_states in origin impl
-    use_copy: false
-    generation_max_length: 60
+name: "mt_en_fr_${hydra:runtime.choices.model/decoder}"
 
 trainer:
-  max_epochs: 20
+  max_epochs: 15
   accumulate_grad_batches: 4
   gradient_clip_val: 3
 
+model:
+  decoder:
+    nt_states: 14
+    pt_states: 14
+    use_copy: false
+    generation_max_length: 30
+    generation_num_samples: 100
+
 logger:
   wandb:
-    project: scan
+    project: "mt_en_fr"
     tags:
       - "${hydra:runtime.choices.model/parser}"
       - "${hydra:runtime.choices.model/tree_encoder}"

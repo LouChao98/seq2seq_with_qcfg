@@ -94,7 +94,7 @@ class GeneralSeq2SeqModule(ModelBase):
             datamodule=self.datamodule,
             src_dim=self.tree_encoder.get_output_dim(),
         )
-
+        assert self.decoder.rule_reweight_constraint is None and self.decoder.rule_soft_constraint is not None
         self.threshold = torch.nn.Threshold(self.hparams.loss_threshold, 0)
 
         self.train_metric = PerplexityMetric()

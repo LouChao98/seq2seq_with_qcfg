@@ -31,6 +31,7 @@ class TSVDataModule(_DataModule):
         copy_mode: str = "none",
         transformer_tokenizer_name: str = None,
         batch_size: int = 64,
+        vocab_min_freq: int = 3,
         eval_batch_size: int = 64,
         num_workers: int = 0,
         pin_memory: bool = False,
@@ -197,8 +198,8 @@ class TSVDataModule(_DataModule):
             logger.warning("I set src tokens in tgt vocab due to copy mode.")
             for inst in data:
                 tgt_vocab_cnt.update(inst["src"])
-        src_vocab = Vocabulary(src_vocab_cnt, threshold=3)
-        tgt_vocab = Vocabulary(tgt_vocab_cnt, threshold=3)
+        src_vocab = Vocabulary(src_vocab_cnt, threshold=self.hparams.vocab_min_freq)
+        tgt_vocab = Vocabulary(tgt_vocab_cnt, threshold=self.hparams.vocab_min_freq)
         return src_vocab, tgt_vocab
 
     def apply_vocab(self, data):

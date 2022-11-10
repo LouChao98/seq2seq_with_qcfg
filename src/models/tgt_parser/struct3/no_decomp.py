@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from numba import jit
 from torch import Tensor
+from torch.distributions.utils import lazy_property
 
 from ._fn import diagonal_copy_, stripe
 from ._utils import (
@@ -148,6 +149,10 @@ class NoDecomp(DecompBase):
             .view(bsz, nt, nt + pt, nt + pt)
             .requires_grad_(True),
         }
+
+    @lazy_property
+    def mbr_decoded(self):
+        return self.viterbi_decoded
 
 
 class NoDecompSampler(DecompSamplerBase):

@@ -78,14 +78,17 @@ class SCANDataModule(_DataModule):
             data.append({"src": src, "tgt": tgt, "id": i})
         return data
 
+    def process_all_copy(self, data):
+        return data
+
     def build_vocab(self, data):
         src_vocab_cnt = Counter()
         tgt_vocab_cnt = Counter()
         for inst in data:
             src_vocab_cnt.update(inst["src"])
             tgt_vocab_cnt.update(inst["tgt"])
-        src_vocab = Vocabulary(src_vocab_cnt, add_unk=False, add_pad=False)
-        tgt_vocab = Vocabulary(tgt_vocab_cnt, add_unk=False, add_pad=False)
+        src_vocab = Vocabulary(src_vocab_cnt)
+        tgt_vocab = Vocabulary(tgt_vocab_cnt)
         return src_vocab, tgt_vocab
 
     def apply_vocab(self, data):

@@ -43,6 +43,7 @@ class SemanticParsingDataModule(_DataModule):
         eval_batch_size: int = 64,
         num_workers: int = 0,
         pin_memory: bool = False,
+        inv_task: bool = False,
         **kwargs,
     ):
         assert copy_mode in ("none", "token", "phrase")
@@ -134,13 +135,16 @@ class SemanticParsingDataModule(_DataModule):
             question = word_tokenize(question)
             assert len(program) > 1 and len(question) > 1
 
-            inst = {
-                "id": di,
-                "src": question,
-                "tgt": program,
-                "tgt_spans": spans,
-                "tgt_mask": self.gen_impossible_span_mask(spans, len(program)),
-            }
+            if self.hparams.inv_task:
+                inst = {"id": di, "src": program, "tgt": question}
+            else:
+                inst = {
+                    "id": di,
+                    "src": question,
+                    "tgt": program,
+                    "tgt_spans": spans,
+                    "tgt_mask": self.gen_impossible_span_mask(spans, len(program)),
+                }
             converted.append(inst)
         return converted
 

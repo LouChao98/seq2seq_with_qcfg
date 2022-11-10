@@ -2,13 +2,14 @@ _target_: src.datamodules.tsv_datamodule.TSVDataModule
 
 train_file: ${data_dir}/MT/train_en-fr.txt
 dev_file: ${data_dir}/MT/dev_en-fr.txt
-test_file: ${data_dir}/test_en-fr.txt
+test_file: ${data_dir}/MT/test_en-fr.txt
 
 copy_mode: "none"
 max_src_len: 60
+vocab_min_freq: 1
 
-batch_size: ${in_debugger:2,4}
-eval_batch_size: 4 # ${in_debugger:2,6}
+batch_size: 8
+eval_batch_size: 8 # ${in_debugger:2,6}
 num_workers: ${in_debugger:0,4}
 pin_memory: false
 

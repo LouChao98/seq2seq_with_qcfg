@@ -34,16 +34,9 @@ class Vocabulary:
         threshold = threshold if threshold is not None else self.threshold
         assert isinstance(tokens, (list, str)), f"Bad input: {tokens}"
         if isinstance(tokens, str):
-            return (
-                self.unk_token_id
-                if self.count.get(tokens, 0) < threshold
-                else self.word2id[tokens]
-            )
+            return self.unk_token_id if self.count.get(tokens, -1) < threshold else self.word2id[tokens]
         return [
-            self.unk_token_id
-            if self.count.get(token, 0) < threshold
-            else self.word2id[token]
-            for token in tokens
+            self.unk_token_id if self.count.get(token, 0) < threshold else self.word2id[token] for token in tokens
         ]
 
     @classmethod

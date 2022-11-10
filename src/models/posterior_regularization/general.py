@@ -4,13 +4,10 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from ..tgt_parser.neural_decomp3 import NeuralDecomp3TgtParser
-from ..tgt_parser.neural_nodecomp import NeuralNoDecompTgtParser
 from .pr import PrTask
 
 if TYPE_CHECKING:
     from src.models.tgt_parser.base import TgtParserPrediction
-    from src.models.tgt_parser.struct.decomp_base import DecompBase
 
 
 class NeqPT(PrTask):
