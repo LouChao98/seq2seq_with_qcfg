@@ -5,7 +5,7 @@ from enum import IntEnum
 
 import numpy as np
 
-from src.datamodules.components.vocab import Vocabulary, VocabularyPair
+from src.datamodules.components.vocab import Vocabulary
 
 from .tsv_datamodule import TSVDataModule
 
@@ -18,18 +18,6 @@ class TSV2DirDataModuleMode(IntEnum):
 
 
 class TSV2DirDataModule(TSVDataModule):
-    def __init__(
-        self,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.save_hyperparameters(logger=False)
-        # vocab_pair is not traced because I overwrite __setattr__
-        with self.trace_persistent_variables():
-            self.vocab_pair_normal = None
-            self.vocab_pair_inverse = None
-        self._runtime_mode = TSV2DirDataModuleMode.NORMAL
-
     def process_all_copy(self, data):
         # none = do nothing
         # token = token
@@ -118,8 +106,8 @@ class TSV2DirDataModule(TSVDataModule):
             for inst in data:
                 tgt_vocab_cnt.update(inst["src"])
                 src_vocab_cnt.update(inst["tgt"])
-        src_vocab = Vocabulary(src_vocab_cnt)
-        tgt_vocab = Vocabulary(tgt_vocab_cnt)
+        src_vocab = Vocabulary(src_vocab_cnt, threshold=self.hparams.vocab_min_freq)
+        tgt_vocab = Vocabulary(tgt_vocab_cnt, threshold=self.hparams.vocab_min_freq)
         return src_vocab, tgt_vocab
 
     def collator(self, data):
@@ -155,28 +143,10 @@ class TSV2DirDataModule(TSVDataModule):
 
     @contextmanager
     def normal_mode(self):
-        self._runtime_mode = TSV2DirDataModuleMode.NORMAL
         yield
 
     @contextmanager
     def inverse_mode(self):
-        self._runtime_mode = TSV2DirDataModuleMode.INVERSE
+        self.src_vocab, self.tgt_vocab = self.tgt_vocab, self.src_vocab
         yield
-        self._runtime_mode = TSV2DirDataModuleMode.NORMAL
-
-    def __setattr__(self, key, value):
-        if key == "vocab_pair":
-            if value is None:
-                return
-            assert isinstance(value, VocabularyPair)
-            self.__dict__["vocab_pair_normal"] = value
-            self.__dict__["vocab_pair_inverse"] = value.swap()
-        else:
-            super().__setattr__(key, value)
-
-    @property
-    def vocab_pair(self):
-        if self._runtime_mode == TSV2DirDataModuleMode.NORMAL:
-            return self.vocab_pair_normal
-        else:
-            return self.vocab_pair_inverse
+        self.src_vocab, self.tgt_vocab = self.tgt_vocab, self.src_vocab

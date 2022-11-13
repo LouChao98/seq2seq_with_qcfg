@@ -5,7 +5,8 @@
 
 defaults:
   - override /datamodule: geoquery_len
-  - override /model: geoquery
+  - override /model: pcfg_pcfg_reinforce
+  - override /model/test_metric: geoquery
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -20,11 +21,23 @@ datamodule:
   copy_mode: "phrase"
   batch_size: 4
   dev_file: ${.test_file}
-model:
-  decoder:
-    use_copy: true
 #   copy_mode: "phrase"
 #   transformer_tokenizer_name: bert-base-cased
+
+model:
+  real_val_every_n_epochs: 10
+
+  embedding:
+    embedding_dim: 100
+  encoder:
+    hidden_size: 128
+    dropout: 0.2
+  decoder:
+    nt_states: 8
+    pt_states: 8
+    use_copy: true
+    # use_observed: true
+    generation_num_samples: 40
 
 # model:
 #   transformer_pretrained_model: bert-base-cased

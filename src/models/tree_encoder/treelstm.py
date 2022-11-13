@@ -29,11 +29,7 @@ class BinaryTreeLSTMLayer(nn.Module):
         concat = torch.cat([h1, h2], 1)
         all_sum = self.linear(concat)
         i, f1, f2, o, g = all_sum.split(self.dim, 1)
-        c = (
-            torch.sigmoid(f1) * c1
-            + torch.sigmoid(f2) * c2
-            + torch.sigmoid(i) * torch.tanh(g)
-        )
+        c = torch.sigmoid(f1) * c1 + torch.sigmoid(f2) * c2 + torch.sigmoid(i) * torch.tanh(g)
         h = torch.sigmoid(o) * torch.tanh(c)
         return h, c
 
@@ -75,6 +71,8 @@ class BinaryTreeLSTM(TreeEncoderBase):
         return actions
 
     def forward(self, x, lengths, spans):
+        spans = [[(item[0], item[1] - 1, -1) for item in spans_item] for spans_item in spans]
+
         x = x.unsqueeze(2)
         node_features = []
         all_spans = []
@@ -103,7 +101,7 @@ class BinaryTreeLSTM(TreeEncoderBase):
                     stack.append([new, new_span])
             node_features.append(torch.cat(node_features_b, 0))
             all_spans.append(spans_b)
-        return node_features, all_spans
+        return node_features, [[(item[0], item[1] + 1, -1) for item in spans_item] for spans_item in all_spans]
 
     def get_output_dim(self):
         return self.dim

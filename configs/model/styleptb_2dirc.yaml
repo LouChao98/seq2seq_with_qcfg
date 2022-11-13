@@ -62,7 +62,7 @@ model1:
   _target_: src.models.general_seq2seq.GeneralSeq2SeqModule
   _recursive_: false
   param_initializer: xavier_uniform
-  track_param_norm: false
+
   embedding:
     _target_: torch.nn.Embedding
     embedding_dim: 300
@@ -123,7 +123,7 @@ model2:
   _target_: src.models.general_seq2seq.GeneralSeq2SeqModule
   _recursive_: false
   param_initializer: xavier_uniform
-  track_param_norm: false
+
   embedding:
     _target_: torch.nn.Embedding
     embedding_dim: 300

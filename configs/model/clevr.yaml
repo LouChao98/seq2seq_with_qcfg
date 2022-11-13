@@ -9,7 +9,7 @@ _target_: src.models.general_seq2seq.GeneralSeq2SeqModule
 _recursive_: false
 
 param_initializer: "xavier_uniform"
-track_param_norm: false
+
 decoder_entropy_reg: 0.05
 parser_entropy_reg: 0.05
 

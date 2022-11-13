@@ -9,34 +9,55 @@ import torch.distributed as dist
 import torch.nn as nn
 from hydra.utils import instantiate
 
+from .components.dynamic_hp import DynamicHyperParameter
+
 log = logging.getLogger(__file__)
 
 
 class ModelBase(pl.LightningModule):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self._dynamic_cfg = {}
+
+    def on_train_epoch_start(self) -> None:
+        self.apply_dynamic_cfg()
+        return super().on_train_epoch_start()
+
+    def add_dynamic_cfg(self, name, command):
+        """name: <obj nevigation>|<cfg nevigation>"""
+        if name in self._dynamic_cfg:
+            log.warning(f"Overwriting {name} with {command}")
+        self._dynamic_cfg[name] = DynamicHyperParameter(command, idx_getter=lambda: self.current_epoch)
+
+    def apply_dynamic_cfg(self):
+        params = {key: next(value) for key, value in self._dynamic_cfg.items()}
+        for key, value in params.items():
+            obj_nev, cfg_nev = key.split("|")
+            o = self.hparams
+            for attr_name in obj_nev.split("."):
+                o = getattr(o, attr_name)
+            s = o
+            cfg_nev = cfg_nev.split(".")
+            for k in cfg_nev[:-1]:
+                s = s[k]
+            s[cfg_nev[-1]] = value
+        return params
 
     def configure_optimizers(self):
         optimizer_cfg = self.hparams.optimizer
         if optimizer_cfg.groups is None or len(optimizer_cfg.groups) == 0:
-            params = self.parameters()
+            params = [item for item in self.parameters() if item.requires_grad]
         else:
             params = [[] for _ in optimizer_cfg.groups]
             default_group = []
             for name, p in self.named_parameters():
-                matches = [
-                    i
-                    for i, g in enumerate(optimizer_cfg.groups)
-                    if re.match(g.pattern, name)
-                ]
+                if not p.requires_grad:
+                    continue
+                matches = [i for i, g in enumerate(optimizer_cfg.groups) if re.match(g.pattern, name)]
                 if len(matches) > 1:
-                    log.warning(
-                        f"{name} is ambiguous: {[optimizer_cfg.groups[m].pattern for m in matches]}"
-                    )
+                    log.warning(f"{name} is ambiguous: {[optimizer_cfg.groups[m].pattern for m in matches]}")
                 if len(matches) > 0:
-                    log.debug(
-                        f"{name} match {optimizer_cfg.groups[matches[0]].pattern}."
-                    )
+                    log.debug(f"{name} match {optimizer_cfg.groups[matches[0]].pattern}.")
                     params[matches[0]].append(p)
                 else:
                     log.debug(f"{name} match defaults.")
@@ -44,11 +65,7 @@ class ModelBase(pl.LightningModule):
             for i in range(len(params)):
                 if len(params[i]) == 0:
                     log.warning(f"Nothing matches {optimizer_cfg.groups[i].pattern}")
-            params = [
-                {"params": p, **optimizer_cfg.groups[i]}
-                for i, p in enumerate(params)
-                if len(p) > 0
-            ]
+            params = [{"params": p, **optimizer_cfg.groups[i]} for i, p in enumerate(params) if len(p) > 0]
             params.append({"params": default_group})
 
         optimizer = instantiate(optimizer_cfg.args, params=params, _convert_="all")

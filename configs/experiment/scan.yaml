@@ -5,10 +5,11 @@
 
 defaults:
   - override /datamodule: scan
-  - override /model: nodecomp_v1
+  - override /model: pcfg_pcfg_reinforce
   - override /model/encoder: empty
   - override /model/decoder: nodecomp
   - override /model/decoder/constraint: fp_hard_sh
+  - override /model/test_metric: bleu1234_and_exact
   - override /callbacks: default
   - override /logger: tensorboard
   - override /trainer: default
@@ -27,7 +28,6 @@ datamodule:
   max_src_len: 100
 
 model:
-  loss_threshold: 0.
   embedding:
     _target_: torch.nn.Embedding
     embedding_dim: 256

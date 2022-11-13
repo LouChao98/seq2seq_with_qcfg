@@ -1,26 +1,13 @@
-import logging
-from collections import Counter
-from copy import copy
 from functools import partial
 from typing import Dict, List
 
 import numpy as np
 import torch
-from numba import jit
 from torch import Tensor
 
-from ._fn import diagonal_copy_, stripe, stripe2
-from ._utils import (
-    check_full_marginal,
-    checkpoint,
-    compare_marginal,
-    compute_unnormalized_prob,
-    enumerate_seq,
-    weighted_random_v2,
-)
+from ._fn import stripe, stripe2
+from ._utils import checkpoint, weighted_random_v2
 from .base import _COPY_NT, _COPY_PT, _OK, _REACHLIMIT, _SONMASK, _VOCAB, DecompBase, DecompSamplerBase
-
-log = logging.getLogger(__file__)
 
 
 class Decomp1(DecompBase):

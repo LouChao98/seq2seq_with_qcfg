@@ -2,22 +2,17 @@ defaults:
   - encoder: yzhang_lstm
   - parser: pcfg
   - tree_encoder: treelstm
-  - decoder: qcfg
+  - decoder: nodecomp
   - test_metric: bleu1234
 
-_target_: src.models.gseq2seq_l0_fixedsrctree.GSeq2SeqL0WithFixedSrcParserModule
+_target_: src.models.general_seq2seq.GeneralSeq2SeqModule
 _recursive_: false
 
 param_initializer: "xavier_uniform"
-track_param_norm: false
 
 embedding:
   _target_: torch.nn.Embedding
   embedding_dim: 300
-
-node_filter:
-  _target_: src.models.node_filter.v1.NodeFilterV1
-  hidden: 64
 
 optimizer:
   groups: ~
@@ -29,9 +24,10 @@ optimizer:
     eps: 1.0e-8
 
 scheduler:
-  interval: step
-  frequency: 1
-  monitor: val/ppl
-  args:
-    _target_: src.utils.scheduler.get_exponential_lr_scheduler
-    gamma: 0.75**(1/10000)
+  ~
+  # interval: step
+  # frequency: 1
+  # monitor: val/ppl
+  # args:
+  #   _target_: src.utils.scheduler.get_exponential_lr_scheduler
+  #   gamma: 0.75**(1/10000)

@@ -1,11 +1,8 @@
-import dataclasses
 import logging
 import math
 import random
 from copy import copy
 from dataclasses import dataclass
-from functools import partial
-from tkinter.messagebox import NO
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -19,7 +16,7 @@ from src.datamodules.datamodule import _DataModule
 from src.utils.fn import apply_to_nested_tensor
 
 from ..constraint.base import RuleConstraintBase
-from .struct3.base import DecompBase, DecompSamplerBase, TokenType
+from ..struct.base import DecompBase, DecompSamplerBase, TokenType
 
 logger = logging.getLogger(__file__)
 
@@ -169,7 +166,7 @@ class TgtParserBase(nn.Module):
         generation_max_actions: int = 80,
         generation_num_samples: int = 10,
         generation_ppl_batch_size: int = 1,
-        generation_ppl_strict: bool = False,
+        generation_strict: bool = False,
     ):
         super().__init__()
 
@@ -186,9 +183,6 @@ class TgtParserBase(nn.Module):
         self.rule_soft_constraint_solver = instantiate(rule_soft_constraint_solver)
         self.rule_reweight_constraint: Optional[RuleConstraintBase] = instantiate(rule_reweight_constraint)
 
-        assert (
-            self.rule_soft_constraint is None or self.rule_soft_constraint_solver is not None
-        ), "A solver is required."
         assert generation_criteria in ("ppl", "likelihood", "contrastive")
 
         self.generation_criteria = generation_criteria
@@ -196,7 +190,7 @@ class TgtParserBase(nn.Module):
         self.generation_max_actions = generation_max_actions
         self.generation_num_samples = generation_num_samples
         self.generation_ppl_batch_size = generation_ppl_batch_size
-        self.generation_ppl_strict = generation_ppl_strict
+        self.generation_strict = generation_strict
 
         self.neg_huge = -1e9
 
@@ -228,12 +222,22 @@ class TgtParserBase(nn.Module):
         pred.src_ids = src_ids
         return pred
 
-    def get_soft_constraint_loss(self, pred):
-        if self.rule_soft_constraint_solver is None:
-            return 0
-
+    def get_soft_constraint_loss(self, pred: TgtParserPrediction):
         constraint_feature = self.rule_soft_constraint.get_feature_from_pred(pred)
         return self.rule_soft_constraint_solver(pred, constraint_feature)
+
+    def get_raml_loss(self, pred: TgtParserPrediction):
+        # NOTE: this is not the complete raml loss.
+        # I omit a term "nll" because this term is always added by other code.
+        reward = self.rule_soft_constraint.get_weight_from_pred(pred)
+        dist = pred.dist.spawn(
+            params={
+                "term": torch.where(pred.dist.params["term"] > -1e8, 0, -1e9),
+                "rule": torch.where(pred.dist.params["rule"] > -1e8, reward, -1e9),
+                "root": torch.where(pred.dist.params["root"] > -1e8, 0.0, -1e9),
+            }
+        )
+        return dist.cross_entropy(pred.dist, fix_left=True)
 
     def get_noisy_span_loss(self, node_features, node_spans, num_or_ratio, observes):
         noisy_features, noisy_spans = [], []
@@ -271,33 +275,23 @@ class TgtParserBase(nn.Module):
 
     def parse(self, pred: TgtParserPrediction):
         assert pred.dist is not None
-        out = pred.dist.mbr_decoded
-        # out = pred.dist.viterbi_decoded
+        out = pred.dist.decoded
+
         # find alignments
         aligned_spans = []
         for b, (all_span, pt_span, nt_span) in enumerate(zip(out, pred.pt_nodes, pred.nt_nodes)):
             aligned_spans_item = []
-            if len(all_span) > 0 and len(all_span[0]) == 5:
-                try:
-                    for l, r, t, state, node in all_span:
-                        if t == "p":
-                            aligned_spans_item.append(pt_span[node])
-                        else:
-                            if node is None:
-                                aligned_spans_item.append(None)
-                            else:
-                                aligned_spans_item.append(nt_span[node])
-                except IndexError:
-                    print("bad alignment")
-            else:
-                for l, r, label in all_span:
-                    # try:
-                    if l == r:
-                        aligned_spans_item.append(pt_span[label % pred.pt_num_nodes])
+            try:
+                for l, r, t, state, node in all_span:
+                    if t == "p":
+                        aligned_spans_item.append(pt_span[node])
                     else:
-                        aligned_spans_item.append(nt_span[label % pred.nt_num_nodes])
-            # except IndexError:
-            #     breakpoint()
+                        if node is None:
+                            aligned_spans_item.append(None)
+                        else:
+                            aligned_spans_item.append(nt_span[node])
+            except IndexError:
+                print("bad alignment")
             aligned_spans.append(aligned_spans_item)
         return out, aligned_spans, pred.pt_nodes, pred.nt_nodes
 
@@ -339,13 +333,13 @@ class TgtParserBase(nn.Module):
                         expanded.append(vocab.convert_ids_to_tokens(v))
                     elif t == TokenType.COPY_PT:
                         span = pt_spans_item[v]
-                        tokens = src_item[span[0] : span[1] + 1]
+                        tokens = src_item[span[0] : span[1]]
                         if len(expanded) + len(tokens) > max_len:
                             break
                         expanded.extend(tokens)
                     elif t == TokenType.COPY_NT:
                         span = nt_spans_item[v]
-                        tokens = src_item[span[0] : span[1] + 1]
+                        tokens = src_item[span[0] : span[1]]
                         if len(expanded) + len(tokens) > max_len:
                             break
                         expanded.extend(tokens)
@@ -483,7 +477,7 @@ class TgtParserBase(nn.Module):
         return new_preds
 
     def to_str_tokens(self, preds, src):
-        tgt_vocab = self.vocab_pair.tgt
+        tgt_vocab = self.datamodule.tar
         pred_strings = []
         for pred, src_sent in zip(preds, src):
             snt, score, copy_unk = pred
@@ -508,7 +502,7 @@ class TgtParserBase(nn.Module):
             pt_span = []
             nt_span = []
             for s, f in zip(spans_item, node_features_item):
-                s_len = s[1] - s[0] + 1
+                s_len = s[1] - s[0]
                 if self.nt_span_range[0] <= s_len <= self.nt_span_range[1]:
                     nt_node_feature.append(f)
                     nt_span.append(s)
@@ -539,14 +533,14 @@ class TgtParserBase(nn.Module):
 
     @staticmethod
     def sanity_check_spans(nt_spans, pt_spans):
-        num_terms = sum(item[0] == item[1] for item in pt_spans)
+        num_terms = sum(item[0] + 1 == item[1] for item in pt_spans)
         # there must be something in nt_spans
         assert len(nt_spans) > 0
         # root must be the last of nt_spans
-        assert nt_spans[-1][0] == 0 and nt_spans[-1][1] == num_terms - 1
+        assert nt_spans[-1][0] == 0 and nt_spans[-1][1] == num_terms
         # singles must be ordered and placed at the begining of pt_spans
         for i, item in zip(range(num_terms), pt_spans):
-            assert item[0] == item[1] == i
+            assert item[0] == item[1] - 1 == i
 
     def build_rules_give_tgt(
         self,
@@ -645,7 +639,7 @@ class TgtParserBase(nn.Module):
             for i, (l, r, tag) in enumerate(nt_spans_inst):
                 if tag == NO_COPY_SPAN:
                     continue
-                w = r - l - 1
+                w = r - l - 2
                 t = None
                 if w >= len(possible_copy) or w < 0:
                     continue
@@ -700,6 +694,6 @@ class TgtParserBase(nn.Module):
             "num_samples": self.generation_num_samples,
             "max_length": self.generation_max_length,
             "max_actions": self.generation_max_actions,
-            "strict": self.generation_ppl_strict,
+            "strict": self.generation_strict,
             "unk": 1,
         }

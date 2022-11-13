@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..components.common import MultiResidualLayer
+from ..struct.decomp1 import Decomp1, Decomp1Sampler
 from .base import TgtParserBase, TgtParserPrediction
-from .struct3.decomp1 import Decomp1, Decomp1Sampler
 
 log = logging.getLogger(__file__)
 

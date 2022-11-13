@@ -10,6 +10,10 @@ if TYPE_CHECKING:
 
 
 class RuleConstraintBase:
+    # mask: 0 = masked
+    # feature: cost, larger is worse
+    # reward: reward, larger is better
+
     def get_mask(
         self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device
     ) -> Tensor:

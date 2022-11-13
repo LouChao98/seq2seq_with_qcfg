@@ -8,18 +8,13 @@ import numpy as np
 import torch
 from numba import jit
 from torch import Tensor
+from torch.autograd import grad
 from torch.distributions.utils import lazy_property
 
 from ._fn import diagonal_copy_, stripe
-from ._utils import (
-    check_full_marginal,
-    checkpoint,
-    compare_marginal,
-    compute_unnormalized_prob,
-    enumerate_seq,
-    weighted_random_v2,
-)
+from ._utils import check_full_marginal, checkpoint, compare_marginal, weighted_random_v2
 from .base import _COPY_NT, _COPY_PT, _OK, _REACHLIMIT, _SONMASK, _VOCAB, DecompBase, DecompSamplerBase
+from .semiring import GumbelCRFSemiring, MaxSemiring
 
 log = logging.getLogger(__file__)
 
@@ -33,6 +28,7 @@ class NoDecomp(DecompBase):
 
     KEYS = ("term", "rule", "root")
     LOGSPACE = (True, True, True)
+    FORCE_ORDERED = False
 
     def inside(self, params, semiring, trace=False, use_reentrant=True):
         params = self.preprocess(params, semiring)
@@ -69,16 +65,10 @@ class NoDecomp(DecompBase):
 
         s = semiring.new_zeros((bsz, N, N, NT))
 
-        # prepare length, same as the batch_size in PackedSequence
-        n_at_position = (torch.arange(2, N + 1).unsqueeze(1) <= self.lens.cpu().unsqueeze(0)).sum(1)
-
         # w: span width
-        final = []
         for step, w in enumerate(range(2, N)):
             # n: the number of spans of width w.
             n = N - w
-            unfinished = n_at_position[step + 1]
-            current_bsz = n_at_position[step]
 
             # s, b, n, 1, pt
             y_term = term[:, :, : N - w].unsqueeze(3)
@@ -87,8 +77,8 @@ class NoDecomp(DecompBase):
             if w == 2:
                 x = merge(y_term, z_term, PTPT)
             else:
-                y = stripe(s, current_bsz, n, w - 2, (0, 2)).clone()
-                z = stripe(s, current_bsz, n, w - 2, (1, w), 0).clone()
+                y = stripe(s, self.batch_size, n, w - 2, (0, 2)).clone()
+                z = stripe(s, self.batch_size, n, w - 2, (1, w), 0).clone()
                 if w == 3:
                     x = merge2(y, z, y_term, z_term, PTNT, NTPT)
                 else:
@@ -96,9 +86,6 @@ class NoDecomp(DecompBase):
 
             if constraint is not None:
                 value, mask = constraint[step]
-                if value.ndim > 0:
-                    value = value[:, :current_bsz]
-                mask = mask[:current_bsz]
                 x = torch.where(mask.unsqueeze(0).expand([semiring.size] + list(mask.shape)), value, x)
 
             if add_scores is not None:
@@ -111,29 +98,113 @@ class NoDecomp(DecompBase):
                 indicator = span_indicator_running.diagonal(w, 2, 3).movedim(-1, 2)
                 x = x + indicator
 
-            if current_bsz - unfinished > 0:
-                final.insert(0, x[:, unfinished:current_bsz, :1])
+            diagonal_copy_(s, x, self.batch_size, w)
 
-            if unfinished > 0:
-                if current_bsz > unfinished:
-                    x = x[:, :unfinished]
-                    term = term[:, :unfinished]
-                    PTPT = PTPT[:, :unfinished]
-                    PTNT = PTNT[:, :unfinished]
-                    NTPT = NTPT[:, :unfinished]
-                    NTNT = NTNT[:, :unfinished]
-                    if trace:
-                        span_indicator_running = span_indicator_running[:, :unfinished]
-                diagonal_copy_(s, x, unfinished, w)
-
-            if unfinished == 0:
-                break
-
-        final = torch.cat(final, dim=1)
-        final = semiring.mul(final.squeeze(2), root)
+        final = s[:, :, 0][:, torch.arange(self.batch_size), self.lens]  # semiring x bsz x hidden
+        final = semiring.mul(final, root)
         logZ = semiring.sum(final, dim=-1)
         logZ = semiring.unconvert(logZ)
         return logZ, _span_indicator
+
+    def inside_tracing_span_id(self, params, semiring, trace=False, use_reentrant=True):
+        params = self.preprocess(params, semiring)
+        merge = checkpoint(partial(g_merge_tracing_span_id, semiring=semiring), use_reentrant=use_reentrant)
+        merge2 = checkpoint(partial(g_merge2_tracing_span_id, semiring=semiring), use_reentrant=use_reentrant)
+        merge3 = checkpoint(partial(g_merge3_tracing_span_id, semiring=semiring), use_reentrant=use_reentrant)
+
+        term: Tensor = params["term"]
+        rule: Tensor = params["rule"]
+        root: Tensor = params["root"]
+        constraint = params.get("constraint")
+        lse_scores = params.get("lse")
+        add_scores = params.get("add")
+
+        bsz = self.batch_size
+        N = term.shape[2] + 1
+        NT = self.nt_states * self.nt_num_nodes
+
+        NTNT = rule[..., :NT, :NT]
+        NTPT = rule[..., :NT, NT:]
+        PTNT = rule[..., NT:, :NT]
+        PTPT = rule[..., NT:, NT:]
+
+        term = term.view(term.shape[0], bsz, term.shape[2], 1, self.pt_states * self.pt_num_nodes)
+
+        _span_indicator = term.new_zeros(bsz, N, N, term.shape[2], requires_grad=True)
+        span_indicator = _span_indicator.view(1, bsz, N, N, term.shape[2])
+        span_indicator_running = span_indicator
+
+        s = semiring.new_zeros((bsz, N, N, term.shape[2], NT))
+
+        # w: span width
+        for step, w in enumerate(range(2, N)):
+            # n: the number of spans of width w.
+            n = N - w
+
+            # s, b, n, 1, n, pt
+            y_term = term[:, :, : N - w].unsqueeze(3)
+            z_term = term[:, :, w - 1 :].unsqueeze(3)
+
+            if w == 2:
+                x = merge(y_term, z_term, PTPT)
+            else:
+                y = stripe_left(s, self.batch_size, n, w - 2, w, (0, 2)).clone()
+                z = stripe_right(s, self.batch_size, n, w - 2, w, (1, w)).clone()
+                if w == 3:
+                    x = merge2(y, z, y_term, z_term, PTNT, NTPT)
+                else:
+                    x = merge3(y, z, y_term, z_term, PTNT, NTPT, NTNT)
+
+            if constraint is not None:
+                value, mask = constraint[step]
+                x = torch.where(mask.unsqueeze(0).expand([semiring.size] + list(mask.shape)), value, x)
+
+            if add_scores is not None:
+                x = x + add_scores[step]
+
+            if lse_scores is not None:
+                x = torch.logaddexp(x, lse_scores[step])
+
+            if trace:
+                indicator = span_indicator_running[:, :, :, :, w - 1 :].diagonal(w, 2, 3).movedim(-1, 2)
+                x = x + indicator.unsqueeze(-1)
+
+            diagonal_copy_with_id_(s, x, self.batch_size, w)
+
+        final = s[:, :, 0][:, torch.arange(self.batch_size), self.lens, self.lens - 1]  # semiring x bsz x hidden
+        final = semiring.mul(final, root)
+        logZ = semiring.sum(final, dim=-1)
+        logZ = semiring.unconvert(logZ)
+        return logZ, _span_indicator
+
+    @lazy_property
+    def viterbi_decoded(self):
+        assert self.params["term"].ndim == 3
+        params = {}
+        for key, value in self.params.items():
+            if key in self.KEYS:
+                params[key] = value.detach().requires_grad_()
+            else:
+                params[key] = value
+        logZ, trace = self.inside(params, MaxSemiring, trace=True)
+        logZ.sum().backward()
+        terms = [torch.nonzero(i).tolist() for i in params["term"].grad]
+        spans = [torch.nonzero(i).tolist() for i in trace.grad]
+        spans_ = []
+        for terms_item, spans_item in zip(terms, spans):
+            spans_.append(
+                [(i, i + 1, "p", *divmod(t, self.pt_num_nodes)) for i, t in terms_item]
+                + [(l, r, "n", tt, st) for l, r, tt, st in spans_item]
+            )
+        return spans_
+
+    @torch.enable_grad()
+    def gumbel_sample_one(self, temperature):
+        logZ, trace = self.inside_tracing_span_id(
+            self.params, GumbelCRFSemiring(temperature), True, use_reentrant=False
+        )
+        mtrace = grad(logZ.sum(), [trace], create_graph=True)[0]
+        return mtrace[..., 1:]
 
     @staticmethod
     def random(bsz, max_len, tgt_pt, src_pt, tgt_nt, src_nt, r):
@@ -149,10 +220,6 @@ class NoDecomp(DecompBase):
             .view(bsz, nt, nt + pt, nt + pt)
             .requires_grad_(True),
         }
-
-    @lazy_property
-    def mbr_decoded(self):
-        return self.viterbi_decoded
 
 
 class NoDecompSampler(DecompSamplerBase):
@@ -191,7 +258,7 @@ class NoDecompSampler(DecompSamplerBase):
         for i in range(num_samples):
             nonterminals: List[int] = []
             preterminals: List[int] = []
-            is_copy_pt: List[bool] = []
+            is_copy_nt: List[bool] = []
             actions = 0
             try:
                 sample = weighted_random_v2(roots)
@@ -205,7 +272,7 @@ class NoDecompSampler(DecompSamplerBase):
                             if nt_state == COPY_NT:
                                 nt_node = s % nt_num_nodes
                                 preterminals.append(nt_node)
-                                is_copy_pt.append(True)
+                                is_copy_nt.append(True)
                                 continue
                         actions += 1
                         sample = weighted_random_v2(rules[s])
@@ -213,7 +280,7 @@ class NoDecompSampler(DecompSamplerBase):
                         nonterminals.extend([right, left])
                     else:
                         preterminals.append(s - NT)
-                        is_copy_pt.append(False)
+                        is_copy_nt.append(False)
 
             except Exception:
                 status[i] = _SONMASK
@@ -224,7 +291,7 @@ class NoDecompSampler(DecompSamplerBase):
             terminals: List[int] = []
             terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
             try:
-                for s, flag in zip(preterminals, is_copy_pt):
+                for s, flag in zip(preterminals, is_copy_nt):
                     if flag:
                         terminals.append(s)
                         terminal_type.append(_COPY_NT)
@@ -308,9 +375,112 @@ def g_merge3(y, z, y_term, z_term, ptnt, ntpt, ntnt, semiring):
     return semiring.add(x1, x2, x3)
 
 
+def g_merge_tracing_span_id(y, z, ptpt, semiring):
+    # y: c, bsz, n, 1(w), 1(id), pt
+    # z: c, bsz, n, 1(w), 1(id), pt
+    # ptpt: c, bsz, nt, pt, pt
+
+    # c, bsz, n, 1, pt, NEW * c, bsz, n, 1, NEW, pt -> c, bsz, n, 1(id), pt, pt
+    x = semiring.mul(y.unsqueeze(6), z.unsqueeze(5)).squeeze(3)
+    # c, bsz, n, 1(id), NEW(nt), pt, pt * c, bsz, NEW, NEW, nt, pt, pt -> c, bsz, n, nt, pt, pt
+    x = semiring.mul(x.unsqueeze(4), ptpt[:, :, None, None])
+    # c, bsz, n, nt, 1(id), (pt, pt) -> c, bsz, n, nt
+    x = semiring.sum(x.flatten(5), dim=5)
+    return x
+
+
+def g_merge2_tracing_span_id(y, z, y_term, z_term, ptnt, ntpt, semiring):
+    # y: c, bsz, n, 1(w), 1(id), nt
+    # z: c, bsz, n, 1(w), 1(id), nt
+    # y_term: c, bsz, n, 1(w), 1(id), pt
+    # z_term: c, bsz, n, 1(w), 1(id), pt
+    # ptnt: c, bsz, nt, pt, nt
+    # ntpt: c, bsz, nt, nt, pt
+
+    x1 = semiring.mul(y.unsqueeze(6), z_term.unsqueeze(5)).squeeze(3)
+    x1 = semiring.mul(x1.unsqueeze(4), ntpt[:, :, None, None])
+    x1 = semiring.sum(x1.flatten(5), dim=5)
+
+    x3 = semiring.mul(y_term.unsqueeze(6), z.unsqueeze(5)).squeeze(3)
+    x3 = semiring.mul(x3.unsqueeze(4), ptnt[:, :, None, None])
+    x3 = semiring.sum(x3.flatten(5), dim=5)
+
+    return semiring.add(x1, x3)
+
+
+def g_merge3_tracing_span_id(y, z, y_term, z_term, ptnt, ntpt, ntnt, semiring):
+    # y: c, bsz, n, 1, nt
+    # z: c, bsz, n, 1, nt
+    # y_term: c, bsz, n, 1, pt
+    # z_term: c, bsz, n, 1, pt
+    # ptnt: c, bsz, nt, pt, nt
+    # ntpt: c, bsz, nt, nt, pt
+    # ntnt: c, bsz, nt, nt, nt
+    x1 = semiring.mul(y[:, :, :, -1:].unsqueeze(6), z_term.unsqueeze(5)).squeeze(3)
+    x1 = semiring.mul(x1.unsqueeze(4), ntpt[:, :, None, None])
+    x1 = semiring.sum(x1.flatten(5), dim=5)
+
+    x2 = semiring.mul(y[:, :, :, :-1].unsqueeze(6), z[:, :, :, 1:].unsqueeze(5))
+    x2 = semiring.sum(x2, dim=3)
+    x2 = semiring.mul(x2.unsqueeze(4), ntnt[:, :, None, None])
+    x2 = semiring.sum(x2.flatten(5), dim=5)
+
+    x3 = semiring.mul(y_term.unsqueeze(6), z[:, :, :, :1].unsqueeze(5)).squeeze(3)
+    x3 = semiring.mul(x3.unsqueeze(4), ptnt[:, :, None, None])
+    x3 = semiring.sum(x3.flatten(5), dim=5)
+    return semiring.add(x1, x2, x3)
+
+
+def diagonal_copy_with_id_(x: torch.Tensor, y: torch.Tensor, b: int, w: int):
+    assert x.is_contiguous()
+    seq_len, n_pos = x.size(3), x.size(4)
+    stride = list(x.stride())
+    new_stride = [stride[0], stride[1]]
+    new_stride.append(stride[2] + stride[3])
+    new_stride.extend(stride[4:])
+    num = n_pos - w + 1
+    x.as_strided(
+        size=(x.shape[0], b, seq_len - w, num, *list(x.shape[5:])),
+        stride=new_stride,
+        storage_offset=w * stride[3] + (w - 1) * stride[4],
+    ).copy_(y)
+
+
+def stripe_left(x: torch.Tensor, b: int, n: int, w: int, tgt_w: int, offset=(0, 1)):
+    # x: semiring, batch, n, n, n, ...
+    assert x.is_contiguous()
+    seq_len, n_pos = x.size(3), x.size(4)
+    stride = list(x.stride())
+    numel, numel2 = stride[3], stride[4]
+    stride[2] = (seq_len + 1) * numel
+    stride[3] = numel + numel2
+    num = n_pos - tgt_w + 1
+    return x.as_strided(
+        size=(x.shape[0], b, n, w, num, *list(x.shape[5:])),
+        stride=stride,
+        storage_offset=(offset[0] * seq_len + offset[1]) * numel + numel2 * (offset[1] - 1),
+    )
+
+
+def stripe_right(x: torch.Tensor, b: int, n: int, w: int, tgt_w: int, offset=(0, 0)):
+    assert x.is_contiguous()
+    seq_len, n_pos = x.size(3), x.size(4)
+    stride = list(x.stride())
+    numel, numel2 = stride[3], stride[4]
+    stride[2] = (seq_len + 1) * numel
+    stride[3] = seq_len * numel
+    num = n_pos - tgt_w + 1
+    return x.as_strided(
+        size=(x.shape[0], b, n, w, num, *list(x.shape[5:])),
+        stride=stride,
+        storage_offset=(offset[0] * seq_len + offset[1]) * numel + numel2 * (tgt_w - 2),
+    )
+
+
 if __name__ == "__main__":
+    from torch_struct import SentCFG
+
     from src.models.tgt_parser.neural_nodecomp import NeuralNoDecompTgtParser
-    from src.models.tgt_parser.struct.pcfg import PCFG
 
     B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT = 2, 4, 2, 5, 3, 7
     NT = TGT_NT * SRC_NT
@@ -331,20 +501,26 @@ if __name__ == "__main__":
     }
 
     pcfg = NoDecomp(params, lens, **meta)
-    pcfg_ref = PCFG()
+    pcfg_ref = SentCFG((params["term"], params["rule"], params["root"]), lens)
 
     print("test nll")
     nll = pcfg.nll
-    nll_ref = pcfg_ref(params, lens)
+    nll_ref = -pcfg_ref.partition
     assert torch.allclose(nll, nll_ref), (nll, nll_ref)
 
     print("test marginal")
     m1 = pcfg.marginal
     check_full_marginal(m1["term"], m1["trace"], lens)
 
-    m2 = pcfg_ref(params, lens, marginal=True)[-1]
+    m2 = pcfg_ref.marginals[-1]
     compare_marginal(m1["trace"], m2)
 
+    print("test gumbel")
+    mtrace = pcfg.gumbel_sample_one(1.0)
+    mtrace = mtrace.sum((1, 2))
+    assert torch.allclose(mtrace, (torch.arange(N - 1).unsqueeze(0) < torch.tensor(lens).unsqueeze(1) - 1).float())
+    logZ, trace = pcfg.inside(pcfg.params, GumbelCRFSemiring(1.0), True, use_reentrant=False)
+    assert torch.allclose(logZ, pcfg.partition)
     # print('test mbr decoding')
     # decoded = pcfg.mbr_decoded
     # decoded_ref = pcfg_ref(params, lens, decode=True)
@@ -370,13 +546,13 @@ if __name__ == "__main__":
     pcfg = NoDecomp(params, lens, **meta)
 
     print("test sample tree")
-    output = pcfg.sample_one(dtype="full")
-    prob = (pcfg.score(output) - pcfg.partition).exp()
+    output = pcfg.sample_one(need_span=True, need_event=True)
+    prob = (pcfg.score(output["event"]) - pcfg.partition).exp()
     target = output["span"]
 
     cnt = [0 for i in range(B)]
     for _ in range(1000):
-        output = pcfg.sample_one(dtype="tuple")
+        output = pcfg.sample_one(need_span=True)["span"]
         for b in range(B):
             t = target[b]
             p = output[b]
@@ -387,51 +563,51 @@ if __name__ == "__main__":
     print(prob, cnt)
     assert torch.allclose(cnt, prob, rtol=0.01, atol=10), (prob, cnt)
 
-    print("test sample seq")
-    spans = [[(i, i, 0) for i in range(l)] + [(0, i, 0) for i in range(1, l)] for l in lens]
-    node_features = [torch.randn(l * 2 - 1, 8) for l in lens]
-    parser = NeuralNoDecompTgtParser(
-        TGT_PT,
-        TGT_NT,
-        dim=8,
-        src_dim=8,
-        num_layers=1,
-        vocab=VOCAB,
-        use_copy=False,
-        generation_max_length=MAX_LENGTH,
-        generation_num_samples=NUM_SAMPLE,
-        generation_strict=True,
-    )
-    pred = parser(node_features, spans)
-    pred = parser.prepare_sampler(pred, None, None)
-    samples = pred.sampler()
-    samples = parser.expand_preds_not_using_copy(samples)[0]
-    for bidx in range(B):
-        count = Counter(tuple(item) for item in samples[bidx])
-        total = len(samples[bidx])
+    # print("test sample seq")
+    # spans = [[(i, i, 0) for i in range(l)] + [(0, i, 0) for i in range(1, l)] for l in lens]
+    # node_features = [torch.randn(l * 2 - 1, 8) for l in lens]
+    # parser = NeuralNoDecompTgtParser(
+    #     pt_states=TGT_PT,
+    #     nt_states=TGT_NT,
+    #     dim=8,
+    #     src_dim=8,
+    #     num_layers=1,
+    #     vocab=VOCAB,
+    #     use_copy=False,
+    #     generation_max_length=MAX_LENGTH,
+    #     generation_num_samples=NUM_SAMPLE,
+    #     generation_strict=True,
+    # )
+    # pred = parser(node_features, spans)
+    # pred = parser.prepare_sampler(pred, [["<unk>", "<unk>"]] * B, torch.zeros(B, 2, dtype=torch.long))
+    # samples = pred.sampler()
+    # samples = parser.expand_preds_not_using_copy(pred.src, samples)[0]
+    # for bidx in range(B):
+    #     count = Counter(tuple(item) for item in samples[bidx])
+    #     total = len(samples[bidx])
 
-        sub_pred = copy(pred)
-        params = pred.params
-        params = {key: value[bidx, None] for key, value in params.items()}
-        sub_pred.params = params
-        sub_pred.batch_size = 1
+    #     sub_pred = copy(pred)
+    #     params = pred.params
+    #     params = {key: value[bidx, None] for key, value in params.items()}
+    #     sub_pred.params = params
+    #     sub_pred.batch_size = 1
 
-        probs_with_seq = []
-        for seq in enumerate_seq(MAX_LENGTH, VOCAB):
-            prob = compute_unnormalized_prob(seq, parser, sub_pred)
-            probs_with_seq.append((prob, seq))
+    #     probs_with_seq = []
+    #     for seq in enumerate_seq(MAX_LENGTH, VOCAB):
+    #         prob = compute_unnormalized_prob(seq, parser, sub_pred)
+    #         probs_with_seq.append((prob, seq))
 
-        partition = sum(item[0] for item in probs_with_seq)
-        probs_with_seq.sort(reverse=True)
+    #     partition = sum(item[0] for item in probs_with_seq)
+    #     probs_with_seq.sort(reverse=True)
 
-        errors = []
-        empirical_cdf = 0
-        theoratical_cdf = 0
-        for prob, seq in probs_with_seq[:5]:
-            empirical_cdf += count[tuple(seq)] / total
-            theoratical_cdf += prob / partition
-            errors.append(abs(empirical_cdf - theoratical_cdf) / theoratical_cdf)
+    #     errors = []
+    #     empirical_cdf = 0
+    #     theoratical_cdf = 0
+    #     for prob, seq in probs_with_seq[:5]:
+    #         empirical_cdf += count[tuple(seq)] / total
+    #         theoratical_cdf += prob / partition
+    #         errors.append(abs(empirical_cdf - theoratical_cdf) / theoratical_cdf)
 
-        assert max(errors) < 0.1, errors
-        print(empirical_cdf, theoratical_cdf, errors)
-    print("pass")
+    #     assert max(errors) < 0.1, errors
+    #     print(empirical_cdf, theoratical_cdf, errors)
+    # print("pass")

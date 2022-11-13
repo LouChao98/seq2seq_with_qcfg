@@ -9,7 +9,6 @@ _target_: src.models.gseq2seq_fixedsrctree.GeneralSeq2SeqWithFixedSrcParserModul
 _recursive_: false
 
 param_initializer: "xavier_uniform"
-track_param_norm: false
 
 embedding:
   _target_: torch.nn.Embedding

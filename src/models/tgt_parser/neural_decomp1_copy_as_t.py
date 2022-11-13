@@ -1,16 +1,11 @@
 import logging
 from typing import List, Tuple
 
-import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
-from ..components.common import MultiResidualLayer
+from ..struct.decomp1_copy_as_t import Decomp1, Decomp1Sampler
 from .base import NO_COPY_SPAN, TgtParserBase, TgtParserPrediction
 from .neural_decomp1 import NeuralDecomp1TgtParser as _BaseModel
-from .struct3.base import TokenType
-from .struct3.decomp1_copy_as_t import Decomp1, Decomp1Sampler
 
 log = logging.getLogger(__file__)
 
@@ -87,7 +82,7 @@ class NeuralDecomp1TgtParser(_BaseModel):
             for i, (l, r, tag) in enumerate(pt_spans_inst):
                 if tag == NO_COPY_SPAN:
                     continue
-                w = r - l - 1
+                w = r - l - 2
                 t = None
                 if w >= len(possible_copy) or w < 0 or (w + 1) >= self.max_copy_width:
                     continue

@@ -9,7 +9,6 @@ _target_: src.models.amr_v1.AMRV1Module
 _recursive_: false
 
 param_initializer: "xavier_uniform"
-track_param_norm: false
 
 embedding:
   _target_: torch.nn.Embedding

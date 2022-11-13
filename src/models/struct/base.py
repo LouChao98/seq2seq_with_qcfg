@@ -29,6 +29,7 @@ class TokenType(IntEnum):
 class DecompBase:
     KEYS: Optional[List[str]] = None
     LOGSPACE: Optional[List[bool]] = None
+    FORCE_ORDERED: bool = True
 
     def __init__(
         self,
@@ -52,7 +53,9 @@ class DecompBase:
         self.pt_num_nodes = pt_num_nodes
         self.max_states = max(nt_states, pt_states)
         self.no_trace = no_trace
-        assert (lens[1:] <= lens[:-1]).all(), "Expect lengths in descending."
+
+        self.is_ordered = (lens[1:] <= lens[:-1]).all()
+        assert not self.FORCE_ORDERED or self.is_ordered, "Expect lengths in descending."
 
         self._traced_cache = None
         self._untraced_cache = None
@@ -113,9 +116,15 @@ class DecompBase:
     @property
     def nll(self):
         # do not use lazy_property. I have cached the result.
-        # if not torch.all(self.partition <= 0):
-        #     breakpoint()
         return -self.partition
+
+    def score(self, event):
+        # event: dict containing 0/1 indicator of rules
+        output = 0
+        for k, p in self.log_params.items():
+            e = event[k]
+            output += (p * e).flatten(1).sum(1)
+        return output
 
     @lazy_property
     def marginal(self):
@@ -157,81 +166,49 @@ class DecompBase:
     def kl(self, other):
         ...
 
-    def sample_one(self, dtype="pt"):
+    def sample_one(self, need_event=False, need_span=True):
         params = {
             k: v.detach().requires_grad_() if isinstance(v, torch.Tensor) else v for k, v in self.params.items()
         }
         logZ, trace = self.inside(params, SampledSemiring, True)
         logZ.sum().backward()
-        if dtype == "pt":
-            return (trace.grad[0], params["term"].grad)
-        elif dtype == "tuple":
-            output = [[] for _ in range(self.batch_size)]
-            for b, i, j, state, node in trace.grad.nonzero().tolist():
-                output[b].append((i, j - 1, state, node))
-            for b, i, state_node in params["term"].grad.nonzero().tolist():
-                state, node = divmod(state_node, self.pt_num_nodes)
-                output[b].append((i, i, state, node))
-            return output
-        elif dtype == "full":
-            output = [[] for _ in range(self.batch_size)]
-            for b, i, j, state, node in trace.grad.nonzero().tolist():
-                output[b].append((i, j - 1, state, node))
-            for b, i, state_node in params["term"].grad.nonzero().tolist():
-                state, node = divmod(state_node, self.pt_num_nodes)
-                output[b].append((i, i, state, node))
-            output = {"span": output} | {k: params[k].grad for k in self.KEYS}
-            output["trace"] = trace.grad[0]
-            return output
-        else:
-            raise ArgumentError()
 
-    def score(self, event):
-        output = 0
-        for k, p in self.log_params.items():
-            e = event[k]
-            output += (p * e).flatten(1).sum(1)
+        output = {"logZ": logZ}
+
+        if need_span:
+            spans = [[] for _ in range(self.batch_size)]
+            for b, i, j, state, node in trace.grad.nonzero().tolist():
+                spans[b].append((i, j, state, node))
+            for b, i, state_node in params["term"].grad.nonzero().tolist():
+                state, node = divmod(state_node, self.pt_num_nodes)
+                spans[b].append((i, i + 1, state, node))
+            output["span"] = spans
+
+        if need_event:
+            output["event"] = {k: params[k].grad for k in self.KEYS} | {"trace": trace.grad[0]}
+
         return output
+
+    def gumbel_sample_one(self, temperature):
+        raise NotImplementedError
+
+    @property
+    def decoded(self):
+        try:
+            return self.viterbi_decoded
+        except NotImplementedError:
+            return self.mbr_decoded
 
     @lazy_property
     def viterbi_decoded(self):
-        assert self.params["term"].ndim == 3
-        params = {}
-        for key, value in self.params.items():
-            if key in self.KEYS:
-                params[key] = value.detach().requires_grad_()
-            else:
-                params[key] = value
-        logZ, trace = self.inside(params, MaxSemiring, trace=True)
-        logZ.sum().backward()
-        terms = [torch.nonzero(i).tolist() for i in params["term"].grad]
-        spans = [torch.nonzero(i).tolist() for i in trace.grad]
-        spans_ = []
-        for terms_item, spans_item in zip(terms, spans):
-            spans_.append(
-                [(i, i, "p", *divmod(t, self.pt_num_nodes)) for i, t in terms_item]
-                + [(l, r - 1, "n", tt, st) for l, r, tt, st in spans_item]
-            )
-        return spans_
-
-    @lazy_property
-    def viterbi_decoded_event(self):
-        assert self.params["term"].ndim == 3
-        params = {}
-        for key, value in self.params.items():
-            if key in self.KEYS:
-                params[key] = value.detach().requires_grad_()
-            else:
-                params[key] = value
-        logZ, _ = self.inside(params, MaxSemiring)
-        logZ.sum().backward()
-        return {k: v.grad for k, v in params.items()}
+        raise NotImplementedError
 
     @lazy_property
     def mbr_decoded(self):
         if self.params["term"].ndim == 3:
             return self.mbr_decoding_1gram_pt()
-        return self.mbr_decoding_ngram_pt()
+        else:
+            return self.mbr_decoding_ngram_pt()
 
     def mbr_decoding_1gram_pt(self):
         # term: b, n, tgt_pt, src_pt
@@ -265,7 +242,7 @@ class DecompBase:
                     labels_spans_item.append(
                         (
                             span[0],
-                            span[1] - 1,
+                            span[1],
                             "p",
                             pt_label_tgt[i, span[0]],
                             pt_label_src[i, span[0]],
@@ -275,7 +252,7 @@ class DecompBase:
                     labels_spans_item.append(
                         (
                             span[0],
-                            span[1] - 1,
+                            span[1],
                             "n",
                             nt_label_tgt[i, span[0], span[1]],
                             nt_label_src[i, span[0], span[1]],
@@ -309,14 +286,14 @@ class DecompBase:
                     labels_spans_item.append(
                         (
                             span[0],
-                            span[1] - 1,
+                            span[1],
                             "p",
                             pt_label_tgt[i, span[0], span[1] - span[0] - 1],
                             pt_label_src[i, span[0], span[1] - span[0] - 1],
                         )
                     )
                 else:
-                    labels_spans_item.append((span[0], span[1] - 1, "n", None, None))
+                    labels_spans_item.append((span[0], span[1], "n", None, None))
             spans_.append(labels_spans_item)
         return spans_
 
@@ -333,16 +310,6 @@ class DecompBase:
                 pk = (pk + 1e-9).log()
             output[k] = pk
         return output
-
-    @staticmethod
-    def convert_to_tree(spans, length):
-        tree = [(i, str(i)) for i in range(length)]
-        tree = dict(tree)
-        for l, r, _ in spans:
-            if l != r:
-                span = "({} {})".format(tree[l], tree[r])
-                tree[r] = tree[l] = span
-        return tree[0]
 
     def spawn(self, **kwargs):
         # generate new decomp obj with some new args. this will call __init__

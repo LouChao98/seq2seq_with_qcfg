@@ -1,6 +1,6 @@
 import logging
 import operator
-from typing import Any, List, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -12,62 +12,26 @@ from torch_scatter import scatter_mean
 from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
 
-from src.models.base import ModelBase
 from src.models.posterior_regularization.general import NeqNTImpl2, NeqPT, NeqPTImpl2
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.src_parser.base import SrcParserBase
 from src.models.struct.semiring import LogSemiring
 from src.models.tgt_parser.base import TgtParserBase
-from src.models.tree_encoder.base import TreeEncoderBase
 from src.utils.fn import annotate_snt_with_brackets, report_ids_when_err
 from src.utils.metric import PerplexityMetric
+
+from .general_seq2seq import GeneralSeq2SeqModule
 
 log = logging.getLogger(__file__)
 
 
-class GeneralSeq2SeqModule(ModelBase):
-    """A module for general seq2seq tasks.
-
-    * support pretrained models
-    * encoders
-    * custom test metric
-    """
-
-    def __init__(
-        self,
-        embedding=None,
-        transformer_pretrained_model=None,
-        fix_pretrained=True,
-        encoder=None,
-        tree_encoder=None,
-        decoder=None,
-        parser=None,
-        optimizer=None,
-        scheduler=None,
-        test_metric=None,
-        load_from_checkpoint=None,
-        load_src_parser_from_checkpoint=None,
-        load_tgt_parser_from_checkpoint=None,
-        param_initializer="xavier_uniform",
-        real_val_every_n_epochs=5,
-        # extension
-        pr_pt_neq_reg=0.0,
-        pr_pt_neq_reg_type=0,
-        pr_nt_neq_reg=0,
-        pr_nt_neq_reg_type=1,
-        noisy_spans_reg=0.0,
-        noisy_spans_num=0.0,
-        parser_entropy_reg=0.0,
-        decoder_entropy_reg=0.0,
-        soft_constraint_loss_rl=0.0,
-        soft_constraint_loss_raml=0.0,
-    ):
-        super().__init__()
+class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.save_hyperparameters(logger=False)
+        assert self.hparams.tree_encoder is None
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
-        super().setup(stage)
-
         self.profiler = self.trainer.profiler or PassThroughProfiler()
         if not isinstance(self.profiler, PassThroughProfiler):
             log.warning("Profiler is enabled.")
@@ -96,12 +60,11 @@ class GeneralSeq2SeqModule(ModelBase):
         )
 
         self.parser: SrcParserBase = instantiate(self.hparams.parser, vocab=len(self.datamodule.src_vocab))
-        self.tree_encoder: TreeEncoderBase = instantiate(self.hparams.tree_encoder, dim=self.encoder.get_output_dim())
         self.decoder: TgtParserBase = instantiate(
             self.hparams.decoder,
             vocab=len(self.datamodule.tgt_vocab),
             datamodule=self.datamodule,
-            src_dim=self.tree_encoder.get_output_dim(),
+            src_dim=self.encoder.get_output_dim(),
         )
 
         self.train_metric = PerplexityMetric()
@@ -130,16 +93,6 @@ class GeneralSeq2SeqModule(ModelBase):
                 elif "norm" not in name:
                     nn.init.zeros_(param)
 
-        if self.hparams.load_src_parser_from_checkpoint is not None:
-            ...
-
-        if self.hparams.load_tgt_parser_from_checkpoint is not None:
-            ...
-
-    def setup_patch(self, stage: Optional[str] = None, datamodule=None):
-        # allow submodule changing submodules before loading checkpoint
-        ...
-
     def encode(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         x = []
@@ -160,15 +113,29 @@ class GeneralSeq2SeqModule(ModelBase):
             out = out[:, 1:]
             x.append(out)
         x = torch.cat(x, dim=-1) if len(x) > 1 else x[0]
-        x = self.encoder(x, src_lens)
-        return x
+        hidden_size = x.shape[-1]
+        x = torch.cat(
+            [src_ids.new_zeros(len(src_ids), 1, hidden_size), x, src_ids.new_zeros(len(src_ids), 1, hidden_size)],
+            dim=1,
+        )
+        x[torch.arange(len(src_ids)), torch.tensor(src_lens) + 1] = 0.0
+        x = self.encoder(x, [item + 2 for item in src_lens])
+        seq_h = x[:, 1:-1]
+        x = torch.cat(
+            [
+                x[:, :-1, : hidden_size // 2],
+                x[:, 1:, hidden_size // 2 :],
+            ],
+            -1,
+        )
+        span_h = torch.unsqueeze(x, 1) - torch.unsqueeze(x, 2)
+        return seq_h, span_h
 
     @report_ids_when_err
     @profile_every(5, enable=False)
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         tgt_ids, tgt_lens = batch["tgt_ids"], batch["tgt_lens"]
-        extra_scores = {"observed_mask": batch.get("src_masks")}
         observed = {
             "x": tgt_ids,
             "lengths": tgt_lens,
@@ -179,31 +146,17 @@ class GeneralSeq2SeqModule(ModelBase):
         logging_vals = {}
 
         with self.profiler.profile("compute_src_nll_and_sampling"):
-            dist = self.parser(src_ids, src_lens, extra_scores=extra_scores)
+            dist = self.parser(src_ids, src_lens)
+            span_indicator = dist.gumbel_sample_one(1.0)
             src_nll = dist.nll
-            src_event, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
-            src_spans = src_event["span"]
 
         with self.profiler.profile("src_encoding"):
-            x = self.encode(batch)
-            # span labels are discarded (set to -1)
-            node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
+            seq_h, span_h = self.encode(batch)
 
         with self.profiler.profile("compute_tgt_nll"):
-            tgt_pred = self.decoder(node_features, node_spans)
+            tgt_pred = self.decoder(seq_h, span_h, span_indicator, src_lens)
             tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
             tgt_nll = tgt_pred.dist.nll
-
-        with self.profiler.profile("reward"), torch.no_grad():
-            src_spans_argmax = self.parser.argmax(src_ids, src_lens, dist=dist)
-            node_features_argmax, node_spans_argmax = self.tree_encoder(x, src_lens, spans=src_spans_argmax)
-            tgt_argmax_pred = self.decoder(node_features_argmax, node_spans_argmax)
-            tgt_argmax_pred = self.decoder.observe_x(tgt_argmax_pred, **observed)
-            tgt_nll_argmax = tgt_argmax_pred.dist.nll
-            neg_reward = (tgt_nll - tgt_nll_argmax).detach()
-            logging_vals["reward"] = -neg_reward
-
-        objective = src_logprob * neg_reward
 
         soft_constraint_loss = 0
         raml_loss = 0
@@ -230,12 +183,6 @@ class GeneralSeq2SeqModule(ModelBase):
                 entropy = tgt_pred.dist.entropy
                 tgt_entropy_reg = -e * entropy
                 logging_vals["tgt_entropy"] = entropy
-            if (e := self.hparams.noisy_spans_reg) > 0:
-                l = self.decoder.get_noisy_span_loss(
-                    node_features, node_spans, self.hparams.noisy_spans_num, observed
-                )
-                logging_vals["noisy_spans"] = l
-                noisy_span_loss = e * l
             if (e := self.hparams.pr_pt_neq_reg) > 0:
                 if self.hparams.pr_pt_neq_reg_type == 0:
                     pr_neq_pt_reg = compute_pr(tgt_pred, None, NeqPT(e))
@@ -270,13 +217,12 @@ class GeneralSeq2SeqModule(ModelBase):
             + noisy_span_loss
             + pr_neq_pt_reg
             + pt_prior_loss,
-            "encoder": src_nll + objective + src_entropy_reg,
+            "encoder": src_nll + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
-            "runtime": {"seq_encoded": x},
+            "runtime": {"seq_encoded": seq_h, "span_encoded": span_h},
             "src_runtime": {
                 "dist": dist,
-                "event": src_event,
             },
             "tgt_runtime": {"pred": tgt_pred},
             "log": logging_vals,
@@ -286,26 +232,33 @@ class GeneralSeq2SeqModule(ModelBase):
     def forward_visualize(self, batch):
         # parse and annotate brackets on src and tgt
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        extra_scores = {"observed_mask": batch.get("src_masks")}
         observed = {
             "x": batch["tgt_ids"],
             "lengths": batch["tgt_lens"],
             "pt_copy": batch.get("copy_token"),
             "nt_copy": batch.get("copy_phrase"),
             # "prior_alignment": batch.get("prior_alignment"),
-            "observed_mask": batch.get("tgt_masks"),
+            # "observed_mask": batch.get('tgt_masks')
         }
 
-        src_spans = self.parser.argmax(src_ids, src_lens, extra_scores=extra_scores)
+        src_spans = self.parser.argmax(src_ids, src_lens)
         src_annotated = []
         for snt, src_span_inst in zip(batch["src"], src_spans):
             tree = annotate_snt_with_brackets(snt, src_span_inst)
             src_annotated.append(tree)
 
-        x = self.encode(batch)
-        node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
+        seq_h, span_h = self.encode(batch)
+        span_indicator = torch.zeros(list(span_h.shape[:-1]) + [span_h.shape[1] - 2])
+        for bidx, spans in enumerate(src_spans):
+            spans.sort(key=lambda x: x[1] - x[0])
+            span_idx = 0
+            for i, (l, r, *_) in enumerate(spans):
+                if l + 1 < r:
+                    span_indicator[bidx, l, r, span_idx] = 1.0
+                    span_idx += 1
+        span_indicator = span_indicator.to(span_h.device)
 
-        tgt_pred = self.decoder(node_features, node_spans)
+        tgt_pred = self.decoder(seq_h, span_h, span_indicator, src_lens)
         tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
         tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(tgt_pred)
         tgt_annotated = []
@@ -377,10 +330,18 @@ class GeneralSeq2SeqModule(ModelBase):
         dist = self.parser(src_ids, src_lens)
         src_spans = self.parser.argmax(src_ids, src_lens, dist=dist)
 
-        x = self.encode(batch)
-        node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
+        seq_h, span_h = self.encode(batch)
+        span_indicator = torch.zeros(list(span_h.shape[:-1]) + [span_h.shape[1] - 2])
+        for bidx, spans in enumerate(src_spans):
+            spans.sort(key=lambda x: x[1] - x[0])
+            span_idx = 0
+            for i, (l, r, *_) in enumerate(spans):
+                if l + 1 < r:
+                    span_indicator[bidx, l, r, span_idx] = 1.0
+                    span_idx += 1
+        span_indicator = span_indicator.to(span_h.device)
 
-        tgt_pred = self.decoder(node_features, node_spans)
+        tgt_pred = self.decoder(seq_h, span_h, span_indicator, src_lens)
         tgt_pred = self.decoder.prepare_sampler(tgt_pred, batch["src"], src_ids)
         y_preds = self.decoder.generate(tgt_pred)
 
@@ -398,110 +359,3 @@ class GeneralSeq2SeqModule(ModelBase):
         # tgt_ppl = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"]))
 
         return {"pred": [item[0] for item in y_preds]}
-
-    def print_prediction(self, batch):
-        training_state = self.training
-        self.train(False)
-        single_inst = make_subbatch(batch, 1)
-        trees = self.forward_visualize(single_inst)
-        self.print("=" * 79)
-        for src, tgt, alg in zip(trees["src_tree"], trees["tgt_tree"], trees["alignment"]):
-            self.print("Src:  ", src)
-            self.print("Tgt:  ", tgt)
-            self.print("Alignment:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
-        self.train(training_state)
-
-    def training_step(self, batch: Any, batch_idx: int, *, forward_prediction=None):
-        output = forward_prediction if forward_prediction is not None else self(batch)
-        loss_decoder = output["decoder"].mean()
-        loss_encoder = output["encoder"].mean()
-        loss = loss_encoder + loss_decoder
-        ppl = self.train_metric(output["tgt_nll"], batch["tgt_lens"])
-        self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
-        self.log("train/ppl", ppl, prog_bar=True)
-        self.log("train/src", loss_encoder, prog_bar=True)
-        self.log("train/tgt", loss_decoder, prog_bar=True)
-
-        if "log" in output:
-            self.log_dict({"train/" + k: v.mean() for k, v in output["log"].items()})
-
-        if batch_idx == 0:
-            self.print_prediction(batch)
-
-        return {"loss": loss}
-
-    def on_validation_epoch_start(self) -> None:
-        super().on_validation_epoch_start()
-        self.val_metric.reset()
-        self.test_metric.reset()
-
-    def validation_step(self, batch: Any, batch_idx: int):
-        output = self(batch)
-        loss_decoder = output["decoder"].mean()
-        loss_encoder = output["encoder"].mean()
-        loss = loss_encoder + loss_decoder
-        self.val_metric(output["tgt_nll"], batch["tgt_lens"])
-
-        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0:
-            self.test_step(batch, batch_idx=None)
-
-        # if batch_idx == 0:
-        #     self.print_prediction(batch)
-
-        return {"loss": loss}
-
-    def validation_epoch_end(self, outputs: List[Any]):
-        ppl = self.val_metric.compute()  # get val accuracy from current epoch
-        self.val_best_metric.update(ppl)
-        best_ppl = self.val_best_metric.compute()
-        self.log("val/ppl", ppl, on_epoch=True, prog_bar=True)
-        self.log("val/ppl_best", best_ppl, on_epoch=True, prog_bar=True)
-        self.print("val/epoch", str(self.current_epoch + 1))
-        self.print("val/ppl", str(ppl.item()))
-
-        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0:
-            acc = self.test_metric.compute()
-            self.log_dict({"val/" + k: v for k, v in acc.items()})
-            self.print(acc)
-
-    def on_test_epoch_start(self) -> None:
-        self.test_metric.reset()
-        return super().on_test_epoch_start()
-
-    @torch.inference_mode(False)
-    @torch.no_grad()
-    def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = None):
-        # patch for inference_mode
-        batch["src_ids"] = batch["src_ids"].clone()
-        batch["tgt_ids"] = batch["tgt_ids"].clone()
-
-        preds = self.forward_generate(batch)["pred"]
-        targets = batch["tgt"]
-        self.test_metric(preds, targets)
-
-        # if batch_idx == 0:
-        #     self.print_prediction(batch)
-
-        return {"preds": preds, "targets": targets, "id": batch["id"]}
-
-    def test_epoch_end(self, outputs) -> None:
-        acc = self.test_metric.compute()
-        d = {"test/" + k: v for k, v in acc.items()}
-        d["step"] = self.global_step
-        self.log_dict(d)
-        self.print(acc)
-        self.save_predictions(outputs)
-
-
-def make_subbatch(batch, size):
-    output = {}
-    for key, value in batch.items():
-        if key == "transformer_inputs":
-            output[key] = value
-        elif key == "tgt_masks":
-            output[key] = [item[:size] for item in value]
-        elif key == "src_masks":
-            output[key] = [item[:size] for item in value]
-        else:
-            output[key] = value[:size]
-    return output

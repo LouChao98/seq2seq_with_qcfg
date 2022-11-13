@@ -350,13 +350,13 @@ if __name__ == "__main__":
     # decoded_ref = pcfg_ref(params, lens, decode=True)
 
     print("test sample tree")
-    output = pcfg.sample_one(dtype="full")
+    output = pcfg.sample_one(return_type="full")
     prob = (pcfg.score(output) - pcfg.partition).exp()
     target = output["span"]
 
     cnt = [0 for i in range(B)]
     for _ in range(1000):
-        output = pcfg.sample_one(dtype="tuple")
+        output = pcfg.sample_one(return_type="tuple")
         for b in range(B):
             t = target[b]
             p = output[b]

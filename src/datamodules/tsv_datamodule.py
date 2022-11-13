@@ -44,7 +44,6 @@ class TSVDataModule(_DataModule):
         with self.trace_persistent_variables():
             self.src_vocab: Optional[Vocabulary] = None
             self.tgt_vocab: Optional[Vocabulary] = None
-            self.vocab_pair: Optional[VocabularyPair] = None
             self.use_transformer_tokenizer = transformer_tokenizer_name is not None
             if transformer_tokenizer_name is not None:
                 extra_args = {}
@@ -62,10 +61,12 @@ class TSVDataModule(_DataModule):
         data_train = self.read_file(self.hparams.train_file)
         data_val = self.read_file(self.hparams.dev_file)
         data_test = self.read_file(self.hparams.test_file)
+
         if self.hparams.load_gold_tree:
             data_train = self.load_gold_tree(data_train, self.hparams.train_file)
             data_val = self.load_gold_tree(data_val, self.hparams.dev_file)
             data_test = self.load_gold_tree(data_test, self.hparams.test_file)
+
         if self.hparams.prior_alignment_file:
             data_train = self.load_prior_alignment(data_train, self.hparams.prior_alignment_file)
 
@@ -91,7 +92,6 @@ class TSVDataModule(_DataModule):
         data_test = self.process_all_copy(data_test)
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
-        self.vocab_pair = VocabularyPair(self.src_vocab, self.tgt_vocab)
 
         self.data_train = self.apply_vocab(data_train)
         self.data_val = self.apply_vocab(data_val)

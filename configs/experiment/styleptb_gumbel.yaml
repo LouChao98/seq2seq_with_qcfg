@@ -5,7 +5,7 @@
 
 defaults:
   - override /datamodule: styleptb
-  - override /model: styleptb_gumbel
+  - override /model: pcfg_pcfg_gumbel
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -14,12 +14,11 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb_gumbel"
+name: "styleptb"
 
 model:
-  decoder:
-    num_samples: 100
-    check_ppl_batch_size: 1
+  encoder:
+    num_layers: 2
 
 trainer:
   max_epochs: 50
@@ -29,5 +28,8 @@ trainer:
 logger:
   wandb:
     project: "styleptb"
-    tags: ["gumbel"]
+    tags:
+      - "${hydra:runtime.choices.model/parser}"
+      - "${hydra:runtime.choices.model/decoder}"
+      - "gumbel"
     offline: ${in_cluster:}

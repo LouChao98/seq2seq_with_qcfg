@@ -31,7 +31,6 @@ class SCANDataModule(_DataModule):
         with self.trace_persistent_variables():
             self.src_vocab: Optional[Vocabulary] = None
             self.tgt_vocab: Optional[Vocabulary] = None
-            self.vocab_pair: Optional[VocabularyPair] = None
 
             self.data_train: Optional[Dataset] = None
             self.data_val: Optional[Dataset] = None
@@ -60,7 +59,6 @@ class SCANDataModule(_DataModule):
             logger.warning(f"Dropping {d} samples in ValSet.")
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
-        self.vocab_pair = VocabularyPair(self.src_vocab, self.tgt_vocab)
 
         self.data_train = self.apply_vocab(data_train)
         self.data_val = self.apply_vocab(data_val)

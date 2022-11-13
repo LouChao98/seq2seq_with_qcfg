@@ -54,7 +54,6 @@ class SemanticParsingDataModule(_DataModule):
         with self.trace_persistent_variables():
             self.src_vocab: Optional[Vocabulary] = None
             self.tgt_vocab: Optional[Vocabulary] = None
-            self.vocab_pair: Optional[VocabularyPair] = None
             self.use_transformer_tokenizer = transformer_tokenizer_name is not None
             if transformer_tokenizer_name is not None:
                 extra_args = {}
@@ -102,7 +101,6 @@ class SemanticParsingDataModule(_DataModule):
             data_test = self.add_eos(data_test)
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
-        self.vocab_pair = VocabularyPair(self.src_vocab, self.tgt_vocab)
 
         self.data_train = self.apply_vocab(data_train)
         self.data_val = self.apply_vocab(data_val)
@@ -120,6 +118,8 @@ class SemanticParsingDataModule(_DataModule):
         converted = []
         for di, item in enumerate(data):
             question = item["question"]
+            question = word_tokenize(question)
+
             program = item["program"]
 
             # if run_geo_pre:
@@ -130,10 +130,22 @@ class SemanticParsingDataModule(_DataModule):
             # 1. we can recover them according to the grammar
             # 2. they do not tell much about spans
             program, spans = tokenize_program(program)
-            spans = [[item[0], item[1]] for item in spans if item[1] > item[0] + 1]
-
-            question = word_tokenize(question)
             assert len(program) > 1 and len(question) > 1
+
+            nouns = [item for item in spans if item[2] == "noun"]
+            src_nouns = []
+            for noun in nouns:
+                noun = program[noun[0] : noun[1]]
+                for i in range(len(question) - len(noun)):
+                    if noun == question[i : i + len(noun)]:
+                        src_nouns.append((i, i + len(noun)))
+
+            # from src.utils.executor import ProgramExecutorGeo
+            # r = ProgramExecutorGeo.recovery(program)
+            # assert r.replace(" , ", ",")==item['program'].replace(" ,", ",").replace(", ", ","), (r, item['program'])
+            # print('pass')
+
+            spans = [[item[0], item[1]] for item in spans if item[1] > item[0] + 1]
 
             if self.hparams.inv_task:
                 inst = {"id": di, "src": program, "tgt": question}
@@ -142,8 +154,10 @@ class SemanticParsingDataModule(_DataModule):
                     "id": di,
                     "src": question,
                     "tgt": program,
-                    "tgt_spans": spans,
+                    "tgt_spans": [[item[0], item[1]] for item in spans if item[1] > item[0] + 1],
                     "tgt_mask": self.gen_impossible_span_mask(spans, len(program)),
+                    "src_spans": src_nouns,
+                    "src_mask": self.gen_impossible_span_mask(src_nouns, len(question)),
                 }
             converted.append(inst)
         return converted
@@ -401,6 +415,23 @@ class SemanticParsingDataModule(_DataModule):
                     mask[bidx, : len(m)] = m
                 tgt_masks.append(mask)
             batched["tgt_masks"] = tgt_masks
+
+        if "src_spans" in data[0]:
+            batched["src_spans"] = [inst["src_spans"] for inst in data]
+
+        if "src_mask" in data[0]:
+            src_masks = []
+            max_src_len = max(src_lens)
+            for wi, w in enumerate(range(1, max_src_len)):
+                mask = torch.zeros(batch_size, max_src_len - w, dtype=torch.bool)
+                for bidx, inst in enumerate(data):
+                    m = inst["src_mask"]
+                    if wi >= len(m):
+                        continue
+                    m = m[wi]
+                    mask[bidx, : len(m)] = m
+                src_masks.append(mask)
+            batched["src_masks"] = src_masks
         return batched
 
 

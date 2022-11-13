@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence
 
-from src.utils.fn import spans2tree
+from src.utils.tree import spans2tree
 
 # Based on https://github.com/GreyChou98/HTNN/blob/cbbf51551f1bb6ce7aa9d8e49496e8b8f4c1b6d2/srl_biaffine/treelstm_new.py
 
@@ -84,12 +84,8 @@ class TreeLSTM(nn.Module):
         span_rel_repr_h = torch.stack([new_ph, new_lh, new_rh], dim=1)
         span_rel_repr_c = torch.stack([new_pc, new_lc, new_rc], dim=1)
 
-        rearrange_repr_h = self.rearrage(
-            span_rel_repr_h, child_rel, span_repr_h.size(1)
-        )
-        rearrange_repr_c = self.rearrage(
-            span_rel_repr_c, child_rel, span_repr_h.size(1)
-        )
+        rearrange_repr_h = self.rearrage(span_rel_repr_h, child_rel, span_repr_h.size(1))
+        rearrange_repr_c = self.rearrage(span_rel_repr_c, child_rel, span_repr_h.size(1))
         if self.comb_method == "attn":
             span_repr_h = self.combine_feature_attn(rearrange_repr_h, span_repr_h)
             span_repr_c = self.combine_feature_attn(rearrange_repr_c, span_repr_c)
@@ -118,16 +114,8 @@ class TreeLSTM(nn.Module):
         o = self.dropout(F.sigmoid(o))
         u = self.dropout(F.tanh(u))
 
-        fl = self.dropout(
-            F.sigmoid(
-                self.w_fl(batch_ph) + self.u_fl_l(batch_lh) + self.u_fl_r(batch_rh)
-            )
-        )
-        fr = self.dropout(
-            F.sigmoid(
-                self.w_fl(batch_ph) + self.u_fr_l(batch_lh) + self.u_fr_r(batch_rh)
-            )
-        )
+        fl = self.dropout(F.sigmoid(self.w_fl(batch_ph) + self.u_fl_l(batch_lh) + self.u_fl_r(batch_rh)))
+        fr = self.dropout(F.sigmoid(self.w_fl(batch_ph) + self.u_fr_l(batch_lh) + self.u_fr_r(batch_rh)))
 
         # check = int((fl != fl).sum())
         # if (check > 0):
@@ -141,9 +129,7 @@ class TreeLSTM(nn.Module):
         # else:
         #     logging.info("tree layer fr does not contain Nan, it might be other problem")
 
-        new_c = self.layernorm3(
-            torch.mul(i, u) + torch.mul(fl, batch_lc) + torch.mul(fr, batch_rc)
-        )
+        new_c = self.layernorm3(torch.mul(i, u) + torch.mul(fl, batch_lc) + torch.mul(fr, batch_rc))
         new_h = torch.mul(o, F.leaky_relu_(new_c))
 
         return new_h, new_c
@@ -164,20 +150,10 @@ class TreeLSTM(nn.Module):
         o = self.dropout(F.sigmoid(o))
         u = self.dropout(F.tanh(u))
 
-        fl = self.dropout(
-            F.sigmoid(
-                self.w_fl(batch_rh) + self.u_fl_l(batch_lh) + self.u_fl_p(batch_ph)
-            )
-        )
-        fp = self.dropout(
-            F.sigmoid(
-                self.w_fp(batch_rh) + self.u_fp_l(batch_lh) + self.u_fp_p(batch_ph)
-            )
-        )
+        fl = self.dropout(F.sigmoid(self.w_fl(batch_rh) + self.u_fl_l(batch_lh) + self.u_fl_p(batch_ph)))
+        fp = self.dropout(F.sigmoid(self.w_fp(batch_rh) + self.u_fp_l(batch_lh) + self.u_fp_p(batch_ph)))
 
-        new_c = self.layernorm4(
-            torch.mul(i, u) + torch.mul(fl, batch_lc) + torch.mul(fp, batch_pc)
-        )
+        new_c = self.layernorm4(torch.mul(i, u) + torch.mul(fl, batch_lc) + torch.mul(fp, batch_pc))
         new_h = torch.mul(o, F.leaky_relu_(new_c))
 
         return new_h, new_c
@@ -198,20 +174,10 @@ class TreeLSTM(nn.Module):
         o = self.dropout(F.sigmoid(o))
         u = self.dropout(F.tanh(u))
 
-        fr = self.dropout(
-            F.sigmoid(
-                self.w_fr(batch_lh) + self.u_fr_r(batch_rh) + self.u_fr_p(batch_ph)
-            )
-        )
-        fp = self.dropout(
-            F.sigmoid(
-                self.w_fp(batch_lh) + self.u_fp_r(batch_rh) + self.u_fp_p(batch_ph)
-            )
-        )
+        fr = self.dropout(F.sigmoid(self.w_fr(batch_lh) + self.u_fr_r(batch_rh) + self.u_fr_p(batch_ph)))
+        fp = self.dropout(F.sigmoid(self.w_fp(batch_lh) + self.u_fp_r(batch_rh) + self.u_fp_p(batch_ph)))
 
-        new_c = self.layernorm5(
-            torch.mul(i, u) + torch.mul(fr, batch_rc) + torch.mul(fp, batch_pc)
-        )
+        new_c = self.layernorm5(torch.mul(i, u) + torch.mul(fr, batch_rc) + torch.mul(fp, batch_pc))
         new_h = torch.mul(o, F.leaky_relu_(new_c))
 
         return new_h, new_c
@@ -371,19 +337,12 @@ class LayerwiseTreeLSTM_new(nn.Module):
         hyperedges = []
         spans_processed = []
         spans_list = []
-        for bidx, spans_inst in enumerate(spans):
-            spans_inst += [(i, i, -1) for i in range(max(x[1] for x in spans_inst) + 1)]
-
-            s, p = spans2tree(spans_inst)
-            index = list(range(len(s)))
-            index.sort(key=lambda x: (s[x][1] - s[x][0], s[x][0]))
-            inv_index = list(range(len(s)))
-            inv_index.sort(key=lambda x: index[x])
-            s = [s[i] for i in index]
-            p = [inv_index[p[i]] if p[i] >= 0 else -1 for i in index]
+        for bidx, spans_item in enumerate(spans):
+            spans_item = [(i, i + 1, -1) for i in range(max(x[1] for x in spans_item))] + spans_item
+            parents_item = spans2tree(spans_item)
 
             parent2children = defaultdict(list)
-            for i, pj in enumerate(p):
+            for i, pj in enumerate(parents_item):
                 if pj >= 0:
                     parent2children[pj].append(i)
 
@@ -391,16 +350,14 @@ class LayerwiseTreeLSTM_new(nn.Module):
             for pj, children in parent2children.items():
                 assert len(children) == 2
                 a, b = children
-                if s[a][0] < s[b][0]:
+                if spans_item[a][0] < spans_item[b][0]:
                     hyperedges_inst.append((pj, a, b))
                 else:
                     hyperedges_inst.append((pj, b, a))
 
             hyperedges.append(torch.tensor(hyperedges_inst, device=x.device))
-            spans_processed.append(
-                torch.tensor([(l, r) for l, r, t, in s], device=x.device)
-            )
-            spans_list.append(s)
+            spans_processed.append(torch.tensor([(l, r) for l, r, t, in spans_item], device=x.device))
+            spans_list.append(spans_item)
 
         spans = pad_sequence(spans_processed, batch_first=True).flatten(1)
         rel = pad_sequence(hyperedges, batch_first=True).flatten(1)
@@ -421,9 +378,7 @@ class LayerwiseTreeLSTM_new(nn.Module):
 
         span_repr_h, span_repr_c = self.tree_layer_first(span_repr, child_rel)
         for i in range(self.num_layers - 1):
-            span_repr_h, span_repr_c = self.tree_layers[i](
-                span_repr_h, child_rel, span_repr_c
-            )
+            span_repr_h, span_repr_c = self.tree_layers[i](span_repr_h, child_rel, span_repr_c)
 
         #
         # span_rel_repr = self.get_child_rel_repr(child_rel, span_repr)
@@ -445,13 +400,9 @@ class LayerwiseTreeLSTM_new(nn.Module):
         batch_size, num_spans = spans.size()
         num_spans = int(num_spans / 2)
         encoder_size = encoded_input.size(-1)
-        encoded_input_expand = (
-            encoded_input.unsqueeze(1).expand(-1, num_spans, -1, -1).contiguous()
-        )
+        encoded_input_expand = encoded_input.unsqueeze(1).expand(-1, num_spans, -1, -1).contiguous()
         spans = spans.view(-1, 2)
-        encoded_input_expand = encoded_input_expand.view(
-            spans.size(0), -1, encoder_size
-        )
+        encoded_input_expand = encoded_input_expand.view(spans.size(0), -1, encoder_size)
 
         span_start, span_end = spans[:, 0], spans[:, 1]
         span_repr = self.span_net(encoded_input_expand, span_start, span_end)

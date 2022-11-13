@@ -3,9 +3,10 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_struct
+from torch_struct import GumbelCRFSemiring, SentCFG
 
 from ..components.common import MultiResidualLayer
-from ..struct.no_decomp import NoDecomp
 from .base import SrcParserBase
 
 
@@ -18,6 +19,7 @@ class NeuralPCFGSrcParser(SrcParserBase):
         nt_states=20,
         num_layers=2,
         vocab_out=None,
+        impl_version=1,
     ):
         super(NeuralPCFGSrcParser, self).__init__()
         self.neg_huge = -1e5
@@ -48,8 +50,8 @@ class NeuralPCFGSrcParser(SrcParserBase):
         roots = F.log_softmax(roots, 1)
         nt_emb = self.nt_emb.unsqueeze(0).expand(batch_size, -1, -1)
         pt_emb = self.pt_emb.unsqueeze(0).expand(batch_size, -1, -1)
-        nt = self.nt_states
-        pt = self.pt_states
+        nt = nt_emb.size(1)
+        pt = pt_emb.size(1)
         rules = self.rule_mlp(nt_emb)
         rules = F.log_softmax(rules, 2)
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
@@ -61,57 +63,76 @@ class NeuralPCFGSrcParser(SrcParserBase):
 
     def forward(self, x, lengths, extra_scores=None):
         params = self.get_rules(x)
-        params = {"term": params[0], "rule": params[1], "root": params[2]}
-        if extra_scores is not None:
-            if (constraint := extra_scores.get("observed_mask")) is not None:
-                params["constraint"] = [
-                    (
-                        torch.full(list(mask.shape) + [self.nt_states], -1e9, device=mask.device),
-                        mask.unsqueeze(-1).expand(-1, -1, self.nt_states),
-                    )
-                    for mask in constraint
-                ]
-        dist = NoDecomp(
-            params,
-            lengths,
-            self.nt_states,
-            1,
-            self.pt_states,
-            1,
-            len(lengths),
-        )
+        params = self.process_extra_scores(params, extra_scores)
+        dist = SentCFG(params, lengths)
         return dist
 
-    def marginals(self, x, lengths, dist: Optional[NoDecomp] = None, extra_scores=None):
-        raise NotImplementedError
+    def marginals(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
+        if dist is None:
+            dist = self(x, lengths, extra_scores)
+        log_Z = dist.partition
+        marginals = dist.marginals[-1]
+        return -log_Z, marginals.sum(-1)
 
     @torch.enable_grad()
-    def sample(self, x, lengths, dist: Optional[NoDecomp] = None, extra_scores=None):
+    def sample(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
+        if dist is None:
+            dist = self(x, lengths, extra_scores)
+        samples = dist._struct(torch_struct.SampledSemiring).marginals(dist.log_potentials, lengths=dist.lengths)
+        log_Z = dist.partition
+        logprobs = dist._struct().score(dist.log_potentials, samples) - log_Z
+        return samples, logprobs
+
+    @torch.enable_grad()
+    def gumbel_sample(
+        self,
+        x,
+        lengths,
+        dist: Optional[SentCFG] = None,
+        extra_scores=None,
+        temperature=1,
+    ):
+        if dist is None:
+            dist = self(x, lengths, extra_scores)
+        semiring = GumbelCRFSemiring(temperature)
+        with torch.enable_grad():
+            samples = dist._struct(semiring).marginals(dist.log_potentials, dist.lengths, inside_func="trace")
+        # log_Z = dist.partition
+        # logprobs = dist._struct().score(dist.log_potentials, samples) - log_Z
+        logprobs = 0
+
+        trace = dist.struct.trace
+        buffer = semiring.get_buffer()
+        return samples, logprobs, trace, buffer
+
+    @torch.enable_grad()
+    def argmax(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
         if dist is None:
             dist = self(x, lengths, extra_scores)
 
-        output = dist.sample_one(need_span=True, need_event=True)
-        logprobs = dist.score(output["event"])
-        return output, logprobs - dist.partition
+        spans_onehot = dist.argmax
+        log_Z = dist.partition
+        logprobs = dist._struct().score(dist.log_potentials, spans_onehot) - log_Z
+        return spans_onehot, logprobs
 
     @torch.enable_grad()
-    def gumbel_sample(self, x, lengths, temperature, dist: Optional[NoDecomp] = None, extra_scores=None):
+    def entropy(self, x, lengths, dist: Optional[SentCFG] = None, extra_scores=None):
         if dist is None:
             dist = self(x, lengths, extra_scores)
-
-        mtrace = dist.gumbel_sample_one(temperature)
-        return mtrace
-
-    @torch.enable_grad()
-    def argmax(self, x, lengths, dist: Optional[NoDecomp] = None, extra_scores=None):
-        if dist is None:
-            dist = self(x, lengths, extra_scores)
-
-        return dist.viterbi_decoded
-
-    @torch.enable_grad()
-    def entropy(self, x, lengths, dist: Optional[NoDecomp] = None, extra_scores=None):
-        if dist is None:
-            dist = self(x, lengths, extra_scores)
-
         return dist.entropy
+        # margin = dist.marginals
+        # return (
+        #     dist.partition
+        #     - (margin[0] * dist.log_potentials[0]).flatten(1).sum(1)
+        #     - (margin[1] * dist.log_potentials[1]).flatten(1).sum(1)
+        #     - (margin[2] * dist.log_potentials[2]).flatten(1).sum(1)
+        # )
+
+    def process_extra_scores(self, params, extra_scores):
+        # constraint_scores, lse_scores, add_scores = None, None, None
+        if extra_scores is None:
+            return params
+        constraint_scores = extra_scores.get("constraint")
+        lse_scores = extra_scores.get("lse")
+        add_scores = extra_scores.get("add")
+        return *params, constraint_scores, lse_scores, add_scores

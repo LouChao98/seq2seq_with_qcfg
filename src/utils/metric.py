@@ -1,6 +1,14 @@
+import gc
+import logging
+from typing import Any, List
+
 import torch
 import torchmetrics
 from torchmetrics import Metric
+
+from src.utils.executor import Executor
+
+logger = logging.getLogger(__file__)
 
 
 class PerplexityMetric(Metric):
@@ -78,6 +86,99 @@ class MultiMetric(Metric):
             if isinstance(output, torch.Tensor):
                 outputs[n] = output.item()
             else:
-                for k, v in output:
+                for k, v in output.items():
                     outputs[n + "/" + k] = v
         return outputs
+
+
+class DenotionMetric(Metric):
+    # mainly from `span-based-sp`
+    def __init__(self, executor: Executor, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.add_state("correct_counts", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total_counts", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("correct_nonempty_counts", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total_nonempty_counts", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.batch_counts = 0.0  # not used to compute metric. no need to sync.
+        self.executor = executor
+
+    def update(
+        self,
+        predictions: List[List[str]],
+        gold_targets: List[List[str]],
+        scenes: List[str],
+        answers: List[str],
+        questions: List[List[str]],
+    ):
+        self.total_counts += len(predictions)
+        self.batch_counts += 1
+        if self.batch_counts % 1000 == 0:  # collect garbage once in a while
+            gc.collect()
+
+        is_should_print = False
+        is_printed = False
+        for i, (predicted_tokens, scene, answer, question) in enumerate(zip(predictions, scenes, answers, questions)):
+
+            gold_tokens = gold_targets[i] if gold_targets is not None else ["no_targets"]
+
+            for predicted in predicted_tokens:
+                denotation = self.executor.execute(" ".join(predicted), scene)
+                if not denotation.startswith("error_parse:"):
+                    break
+
+            gold_answer = answer if answer is not None else self.executor.execute(" ".join(gold_tokens))
+            if gold_answer != "[]":
+                self.total_nonempty_counts += 1
+            if gold_answer == denotation:
+                self.correct_counts += 1
+                if gold_answer != "[]":
+                    self.correct_nonempty_counts += 1
+            elif not is_printed and is_should_print:  # print errors but not too much
+                logger.info("ques: {}".format(" ".join(question)))
+                logger.info("pred: {}".format(" ".join(predicted)))
+                logger.info("gold: {}".format(" ".join(gold_tokens)))
+                logger.info("deno: {}".format(denotation))
+                logger.info("answ: {}".format(gold_answer))
+                logger.info()
+                is_printed = True
+
+    def compute(self):
+        return {
+            "den_acc": (self.correct_counts / (self.total_counts + 1e-6)).item(),
+            "den_ne_acc": (self.correct_nonempty_counts / (self.total_nonempty_counts + 1e-6)).item(),
+        }
+
+
+class GeoDenotionMetric(DenotionMetric):
+    def update(
+        self,
+        predictions: List[List[str]],
+        gold_targets: List[List[str]],
+    ):
+        self.total_counts += len(predictions)
+        self.batch_counts += 1
+        if self.batch_counts % 1000 == 0:  # collect garbage once in a while
+            gc.collect()
+
+        is_should_print = False
+        is_printed = False
+
+        for prediction, target in zip(predictions, gold_targets):
+            prediction = self.executor.recovery(prediction)
+            target = self.executor.recovery(target)
+            denotation = self.executor.execute(prediction)
+            gold_answer = self.executor.execute(target)
+
+            if gold_answer != "[]":
+                self.total_nonempty_counts += 1
+            if gold_answer == denotation:
+                self.correct_counts += 1
+                if gold_answer != "[]":
+                    self.correct_nonempty_counts += 1
+            elif not is_printed and is_should_print:  # print errors but not too much
+                logger.info("ques: {}".format(target))
+                logger.info("pred: {}".format(prediction))
+                logger.info("deno: {}".format(denotation))
+                logger.info("answ: {}".format(gold_answer))
+                logger.info()
+                is_printed = True

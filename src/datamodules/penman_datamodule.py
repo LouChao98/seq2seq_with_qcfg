@@ -3,9 +3,7 @@ import math
 import random
 import re
 from collections import Counter, defaultdict
-from email.policy import default
-from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Optional
 
 import numpy as np
 import torch
@@ -16,7 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from src import is_under_debugger
-from src.datamodules.components.vocab import Vocabulary, VocabularyPair
+from src.datamodules.components.vocab import Vocabulary
 from src.datamodules.datamodule import _DataModule
 from vendor.amrlib.amrlib.models.parse_xfm.penman_serializer import load_and_serialize
 
@@ -50,7 +48,7 @@ class PenmanDataModule(_DataModule):
         with self.trace_persistent_variables():
             self.src_vocab: Optional[Vocabulary] = None
             self.tgt_vocab: Optional[Vocabulary] = None
-            self.vocab_pair: Optional[VocabularyPair] = None
+
             self.use_transformer_tokenizer = transformer_tokenizer_name is not None
             if transformer_tokenizer_name is not None:
                 self.transformer_tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
@@ -88,7 +86,6 @@ class PenmanDataModule(_DataModule):
         data_test = self.process_all_copy(data_test)
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
-        self.vocab_pair = VocabularyPair(self.src_vocab, self.tgt_vocab)
 
         self.data_train = self.apply_vocab(data_train)
         self.data_val = self.apply_vocab(data_val)
