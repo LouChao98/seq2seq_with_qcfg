@@ -406,13 +406,14 @@ class GeneralSeq2SeqModule(ModelBase):
 
         return {"pred": [item[0] for item in y_preds], "score": [item[1] for item in y_preds], "baseline": baseline}
 
-    def print_prediction(self, batch, handler=None):
+    def print_prediction(self, batch, handler=None, batch_size=1):
         training_state = self.training
         self.train(False)
         if handler is None:
             handler = self.print
-        single_inst = make_subbatch(batch, 1)
-        trees = self.forward_visualize(single_inst)
+        if isinstance(batch_size, int):
+            batch = make_subbatch(batch, batch_size)
+        trees = self.forward_visualize(batch)
         for src, tgt, alg in zip(trees["src_tree"], trees["tgt_tree"], trees["alignment"]):
             handler("Src:  ", src)
             handler("Tgt:  ", tgt)
@@ -472,6 +473,9 @@ class GeneralSeq2SeqModule(ModelBase):
             acc = self.test_metric.compute()
             self.log_dict({"val/" + k: v for k, v in acc.items()})
             self.print(acc)
+            self.save_predictions(outputs, f"predict_on_val_epoch{self.current_epoch}")
+            if outputs[0].get("detailed") is not None:
+                self.save_detailed_predictions(outputs, f"detailed_predict_on_val_epoch{self.current_epoch}")
 
     def on_test_epoch_start(self) -> None:
         self.test_metric.reset()
@@ -506,7 +510,7 @@ class GeneralSeq2SeqModule(ModelBase):
         if self.hparams.export_detailed_prediction:
             device = batch["src_ids"].device
             str_io = StringIO()
-            self.print_prediction(batch, handler=partial(print, file=str_io))
+            self.print_prediction(batch, handler=partial(print, file=str_io), batch_size=None)
             parses_on_given = split_prediction_string(str_io.getvalue())
             scores_on_given = preds["baseline"]
             parses_on_predicted = []
@@ -519,7 +523,7 @@ class GeneralSeq2SeqModule(ModelBase):
             scores_on_predicted = preds["score"]
             assert (
                 len(parses_on_given) == len(scores_on_given) == len(parses_on_predicted) == len(scores_on_predicted)
-            )
+            ), (len(parses_on_given), len(scores_on_given), len(parses_on_predicted), len(scores_on_predicted))
             detailed = list(zip(parses_on_given, scores_on_given, parses_on_predicted, scores_on_predicted))
         else:
             detailed = None

@@ -1,3 +1,5 @@
+# from https://github.com/harvardnlp/urnng/blob/master/models.py
+
 import numpy as np
 import torch
 import torch.nn.functional as F
