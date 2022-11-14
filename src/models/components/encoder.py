@@ -53,13 +53,9 @@ class VariationalLSTM(nn.Module):
         if bidirectional:
             self.b_cells = nn.ModuleList()
         for _ in range(self.num_layers):
-            self.f_cells.append(
-                nn.LSTMCell(input_size=input_size, hidden_size=hidden_size)
-            )
+            self.f_cells.append(nn.LSTMCell(input_size=input_size, hidden_size=hidden_size))
             if bidirectional:
-                self.b_cells.append(
-                    nn.LSTMCell(input_size=input_size, hidden_size=hidden_size)
-                )
+                self.b_cells.append(nn.LSTMCell(input_size=input_size, hidden_size=hidden_size))
             input_size = hidden_size * self.num_directions
 
         self.reset_parameters()
@@ -110,10 +106,7 @@ class VariationalLSTM(nn.Module):
         for t in steps:
             last_batch_size, batch_size = len(hx_i[0]), batch_sizes[t]
             if last_batch_size < batch_size:
-                hx_i = [
-                    torch.cat((h, ih[last_batch_size:batch_size]))
-                    for h, ih in zip(hx_i, hx_0)
-                ]
+                hx_i = [torch.cat((h, ih[last_batch_size:batch_size])) for h, ih in zip(hx_i, hx_0)]
             else:
                 hx_n.append([h[batch_size:] for h in hx_i])
                 hx_i = [h[:batch_size] for h in hx_i]
@@ -162,9 +155,7 @@ class VariationalLSTM(nn.Module):
         h_n, c_n = [], []
 
         if hx is None:
-            ih = x.new_zeros(
-                self.num_layers * self.num_directions, batch_size, self.hidden_size
-            )
+            ih = x.new_zeros(self.num_layers * self.num_directions, batch_size, self.hidden_size)
             h, c = ih, ih
         else:
             h, c = self.permute_hidden(hx, sequence.sorted_indices)
@@ -176,13 +167,9 @@ class VariationalLSTM(nn.Module):
             if self.training:
                 mask = SharedDropout.get_mask(x[0], self.dropout)
                 x = [i * mask[: len(i)] for i in x]
-            x_i, (h_i, c_i) = self.layer_forward(
-                x, (h[i, 0], c[i, 0]), self.f_cells[i], batch_sizes
-            )
+            x_i, (h_i, c_i) = self.layer_forward(x, (h[i, 0], c[i, 0]), self.f_cells[i], batch_sizes)
             if self.bidirectional:
-                x_b, (h_b, c_b) = self.layer_forward(
-                    x, (h[i, 1], c[i, 1]), self.b_cells[i], batch_sizes, True
-                )
+                x_b, (h_b, c_b) = self.layer_forward(x, (h[i, 1], c[i, 1]), self.b_cells[i], batch_sizes, True)
                 x_i = torch.cat((x_i, x_b), -1)
                 h_i = torch.stack((h_i, h_b))
                 c_i = torch.stack((c_i, c_b))
@@ -190,9 +177,7 @@ class VariationalLSTM(nn.Module):
             h_n.append(h_i)
             c_n.append(c_i)
 
-        x = PackedSequence(
-            x, sequence.batch_sizes, sequence.sorted_indices, sequence.unsorted_indices
-        )
+        x = PackedSequence(x, sequence.batch_sizes, sequence.sorted_indices, sequence.unsorted_indices)
         hx = torch.cat(h_n, 0), torch.cat(c_n, 0)
         hx = self.permute_hidden(hx, sequence.unsorted_indices)
 
@@ -200,13 +185,48 @@ class VariationalLSTM(nn.Module):
 
     def forward(self, hidden, seq_len):
         total_length = hidden.shape[1]
-        hidden = pack_padded_sequence(
-            hidden, seq_len, batch_first=True, enforce_sorted=False
-        )
+        hidden = pack_padded_sequence(hidden, seq_len, batch_first=True, enforce_sorted=False)
         hidden = self.forward_orig(hidden)[0]
-        hidden = pad_packed_sequence(
-            hidden, batch_first=True, total_length=total_length
-        )[0]
+        hidden = pad_packed_sequence(hidden, batch_first=True, total_length=total_length)[0]
+        hidden = hidden.contiguous()
+        return hidden
+
+    def get_output_dim(self):
+        return 2 * self.hidden_size if self.bidirectional else self.hidden_size
+
+
+class StandardLSTM(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,  # for compatibility
+        hidden_size: int,
+        num_layers: int = 1,
+        bidirectional: bool = False,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+
+        self.input_size = input_dim
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bidirectional = bidirectional
+        self.dropout = dropout
+        self.num_directions = 1 + self.bidirectional
+
+        self.nn = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout,
+            bidirectional=bidirectional,
+        )
+
+    def forward(self, hidden, seq_len):
+        total_length = hidden.shape[1]
+        hidden = pack_padded_sequence(hidden, seq_len, batch_first=True, enforce_sorted=False)
+        hidden = self.nn(hidden)[0]
+        hidden = pad_packed_sequence(hidden, batch_first=True, total_length=total_length)[0]
         hidden = hidden.contiguous()
         return hidden
 

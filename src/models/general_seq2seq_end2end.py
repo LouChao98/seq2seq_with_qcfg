@@ -2,6 +2,7 @@ import logging
 import operator
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
@@ -26,7 +27,8 @@ log = logging.getLogger(__file__)
 
 
 class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
-    def __init__(self, **kwargs):
+    def __init__(self, method="gumbel", no_src_nll=False, **kwargs):
+        assert method in ("gumbel", "marginal")
         super().__init__(**kwargs)
         self.save_hyperparameters(logger=False)
         assert self.hparams.tree_encoder is None
@@ -88,6 +90,8 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
             }
             init_func = init_func[self.hparams.param_initializer]
             for name, param in self.named_parameters():
+                if name.startswith("pretrained."):
+                    continue
                 if param.dim() > 1:
                     init_func(param)
                 elif "norm" not in name:
@@ -217,7 +221,7 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
             + noisy_span_loss
             + pr_neq_pt_reg
             + pt_prior_loss,
-            "encoder": src_nll + src_entropy_reg,
+            "encoder": (torch.zeros_like(src_nll) if self.hparams.no_src_nll else src_nll) + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
             "runtime": {"seq_encoded": seq_h, "span_encoded": span_h},
@@ -323,7 +327,7 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
         }
 
     @report_ids_when_err
-    def forward_generate(self, batch):
+    def forward_generate(self, batch, get_baseline=False):
         # actually predict the target sequence
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
 
@@ -345,17 +349,17 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
         tgt_pred = self.decoder.prepare_sampler(tgt_pred, batch["src"], src_ids)
         y_preds = self.decoder.generate(tgt_pred)
 
-        # import numpy as np
+        if get_baseline:
+            # TODO this always be ppl. but scores_on_predicted can be others
+            observed = {
+                "x": batch["tgt_ids"],
+                "lengths": batch["tgt_lens"],
+                "pt_copy": batch.get("copy_token"),
+                "nt_copy": batch.get("copy_phrase"),
+            }
+            tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
+            baseline = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"])).tolist()
+        else:
+            baseline = None
 
-        # observed = {
-        #     "x": batch["tgt_ids"],
-        #     "lengths": batch["tgt_lens"],
-        #     "pt_copy": batch.get("copy_token"),
-        #     "nt_copy": batch.get("copy_phrase"),
-        #     "prior_alignment": batch.get("prior_alignment"),
-        # }
-        # tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-        # tgt_nll = tgt_pred.dist.nll
-        # tgt_ppl = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"]))
-
-        return {"pred": [item[0] for item in y_preds]}
+        return {"pred": [item[0] for item in y_preds], "score": [item[1] for item in y_preds], "baseline": baseline}

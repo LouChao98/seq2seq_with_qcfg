@@ -215,9 +215,9 @@ def convert_annotated_str_to_nltk_str(annotated, prefix="x"):
 
 
 def report_ids_when_err(func):
-    def wrapper(self, batch):
+    def wrapper(self, batch, *args, **kwargs):
         try:
-            return func(self, batch)
+            return func(self, batch, *args, **kwargs)
         except Exception as e:
             log.exception(f"Error at {batch['id']}")
             raise e

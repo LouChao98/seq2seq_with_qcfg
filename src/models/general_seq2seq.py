@@ -1,7 +1,11 @@
 import logging
 import operator
+from functools import partial
+from io import StringIO
+from itertools import chain
 from typing import Any, List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
@@ -50,6 +54,7 @@ class GeneralSeq2SeqModule(ModelBase):
         load_tgt_parser_from_checkpoint=None,
         param_initializer="xavier_uniform",
         real_val_every_n_epochs=5,
+        export_detailed_prediction=True,
         # extension
         pr_pt_neq_reg=0.0,
         pr_pt_neq_reg_type=0,
@@ -125,6 +130,8 @@ class GeneralSeq2SeqModule(ModelBase):
             }
             init_func = init_func[self.hparams.param_initializer]
             for name, param in self.named_parameters():
+                if name.startswith("pretrained."):
+                    continue
                 if param.dim() > 1:
                     init_func(param)
                 elif "norm" not in name:
@@ -293,7 +300,7 @@ class GeneralSeq2SeqModule(ModelBase):
             "pt_copy": batch.get("copy_token"),
             "nt_copy": batch.get("copy_phrase"),
             # "prior_alignment": batch.get("prior_alignment"),
-            "observed_mask": batch.get("tgt_masks"),
+            # "observed_mask": batch.get("tgt_masks"),
         }
 
         src_spans = self.parser.argmax(src_ids, src_lens, extra_scores=extra_scores)
@@ -370,7 +377,7 @@ class GeneralSeq2SeqModule(ModelBase):
         }
 
     @report_ids_when_err
-    def forward_generate(self, batch):
+    def forward_generate(self, batch, get_baseline=False):
         # actually predict the target sequence
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
 
@@ -384,31 +391,33 @@ class GeneralSeq2SeqModule(ModelBase):
         tgt_pred = self.decoder.prepare_sampler(tgt_pred, batch["src"], src_ids)
         y_preds = self.decoder.generate(tgt_pred)
 
-        # import numpy as np
+        if get_baseline:
+            # TODO this always be ppl. but scores_on_predicted can be others
+            observed = {
+                "x": batch["tgt_ids"],
+                "lengths": batch["tgt_lens"],
+                "pt_copy": batch.get("copy_token"),
+                "nt_copy": batch.get("copy_phrase"),
+            }
+            tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
+            baseline = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"])).tolist()
+        else:
+            baseline = None
 
-        # observed = {
-        #     "x": batch["tgt_ids"],
-        #     "lengths": batch["tgt_lens"],
-        #     "pt_copy": batch.get("copy_token"),
-        #     "nt_copy": batch.get("copy_phrase"),
-        #     "prior_alignment": batch.get("prior_alignment"),
-        # }
-        # tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-        # tgt_nll = tgt_pred.dist.nll
-        # tgt_ppl = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"]))
+        return {"pred": [item[0] for item in y_preds], "score": [item[1] for item in y_preds], "baseline": baseline}
 
-        return {"pred": [item[0] for item in y_preds]}
-
-    def print_prediction(self, batch):
+    def print_prediction(self, batch, handler=None):
         training_state = self.training
         self.train(False)
+        if handler is None:
+            handler = self.print
         single_inst = make_subbatch(batch, 1)
         trees = self.forward_visualize(single_inst)
-        self.print("=" * 79)
         for src, tgt, alg in zip(trees["src_tree"], trees["tgt_tree"], trees["alignment"]):
-            self.print("Src:  ", src)
-            self.print("Tgt:  ", tgt)
-            self.print("Alignment:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
+            handler("Src:  ", src)
+            handler("Tgt:  ", tgt)
+            handler("Alignment:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
+            handler("=" * 79)
         self.train(training_state)
 
     def training_step(self, batch: Any, batch_idx: int, *, forward_prediction=None):
@@ -475,14 +484,52 @@ class GeneralSeq2SeqModule(ModelBase):
         batch["src_ids"] = batch["src_ids"].clone()
         batch["tgt_ids"] = batch["tgt_ids"].clone()
 
-        preds = self.forward_generate(batch)["pred"]
+        preds = self.forward_generate(batch, get_baseline=self.hparams.export_detailed_prediction)
         targets = batch["tgt"]
-        self.test_metric(preds, targets)
+        self.test_metric(preds["pred"], targets)
 
         # if batch_idx == 0:
         #     self.print_prediction(batch)
 
-        return {"preds": preds, "targets": targets, "id": batch["id"]}
+        def split_prediction_string(s: str):
+            buffer = []
+            output = []
+            for line in chain(s.split("\n"), ["==="]):
+                if line.startswith("==="):
+                    if len(buffer) > 0:
+                        output.append("\n".join(buffer))
+                        buffer.clear()
+                elif len(line.strip()) > 0:
+                    buffer.append(line)
+            return output
+
+        if self.hparams.export_detailed_prediction:
+            device = batch["src_ids"].device
+            str_io = StringIO()
+            self.print_prediction(batch, handler=partial(print, file=str_io))
+            parses_on_given = split_prediction_string(str_io.getvalue())
+            scores_on_given = preds["baseline"]
+            parses_on_predicted = []
+            for pred in preds["pred"]:
+                _batch = self.datamodule.collator([pred])
+                _batch = self.datamodule.transfer_batch_to_device(_batch, device, 0)
+                str_io = StringIO()
+                self.print_prediction(_batch, handler=partial(print, file=str_io))
+                parses_on_predicted.extend(split_prediction_string(str_io.getvalue()))
+            scores_on_predicted = preds["score"]
+            assert (
+                len(parses_on_given) == len(scores_on_given) == len(parses_on_predicted) == len(scores_on_predicted)
+            )
+            detailed = list(zip(parses_on_given, scores_on_given, parses_on_predicted, scores_on_predicted))
+        else:
+            detailed = None
+
+        return {
+            "preds": [item["tgt"] for item in preds["pred"]],
+            "detailed": detailed,
+            "targets": targets,
+            "id": batch["id"],
+        }
 
     def test_epoch_end(self, outputs) -> None:
         acc = self.test_metric.compute()
@@ -491,6 +538,8 @@ class GeneralSeq2SeqModule(ModelBase):
         self.log_dict(d)
         self.print(acc)
         self.save_predictions(outputs)
+        if outputs[0].get("detailed") is not None:
+            self.save_detailed_predictions(outputs)
 
 
 def make_subbatch(batch, size):

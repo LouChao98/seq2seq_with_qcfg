@@ -375,11 +375,7 @@ class TgtParserBase(nn.Module):
             ppl = np.full((len(preds_batch),), 1e9)
 
             for batch in loader:
-                batch = {
-                    key: value.to(pred.device) if isinstance(value, torch.Tensor) else value
-                    for key, value in batch.items()
-                }
-
+                batch = self.datamodule.transfer_batch_to_device(batch, pred.device, 0)
                 observed = {
                     "x": batch["tgt_ids"],
                     "lengths": batch["tgt_lens"],
@@ -397,7 +393,7 @@ class TgtParserBase(nn.Module):
             chosen = np.argmin(ppl)
             if ppl[chosen] > 1e6:
                 logger.warning(f"The minimum ppl is {ppl[chosen]}")
-            new_preds.append((preds_batch[chosen]["tgt"], ppl[chosen]))
+            new_preds.append((preds_batch[chosen], ppl[chosen]))
         return new_preds
 
     @torch.no_grad()
@@ -410,10 +406,7 @@ class TgtParserBase(nn.Module):
             nll = np.full((len(preds_batch),), 1e9)
 
             for batch in loader:
-                batch = {
-                    key: value.to(pred.device) if isinstance(value, torch.Tensor) else value
-                    for key, value in batch.items()
-                }
+                batch = self.datamodule.transfer_batch_to_device(batch, pred.device, 0)
 
                 observed = {
                     "x": batch["tgt_ids"],
@@ -432,7 +425,7 @@ class TgtParserBase(nn.Module):
             chosen = np.argmin(nll)
             if nll[chosen] > 1e6:
                 logger.warning(f"The minimum nll is {nll[chosen]}")
-            new_preds.append((preds_batch[chosen]["tgt"], nll[chosen]))
+            new_preds.append((preds_batch[chosen], nll[chosen]))
         return new_preds
 
     @torch.no_grad()
@@ -445,10 +438,7 @@ class TgtParserBase(nn.Module):
             criteria = np.full((len(preds_batch),), 1e9)
 
             for batch in loader:
-                batch = {
-                    key: value.to(pred.device) if isinstance(value, torch.Tensor) else value
-                    for key, value in batch.items()
-                }
+                batch = self.datamodule.transfer_batch_to_device(batch, pred.device, 0)
 
                 observed = {
                     "x": batch["tgt_ids"],
@@ -473,7 +463,7 @@ class TgtParserBase(nn.Module):
             chosen = np.argmin(criteria)
             if criteria[chosen] > 1e6:
                 logger.warning(f"The minimum criteria is {criteria[chosen]}")
-            new_preds.append((preds_batch[chosen]["tgt"], criteria[chosen]))
+            new_preds.append((preds_batch[chosen], criteria[chosen]))
         return new_preds
 
     def to_str_tokens(self, preds, src):

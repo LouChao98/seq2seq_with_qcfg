@@ -4,4 +4,4 @@ defaults:
   - none
 
 rule_reweight_constraint:
-  _target_: src.models.constraint.fully_parameterized.FPPenaltyDepth2
+  _target_: src.models.constraint.fully_parameterized.FPPenaltyDepth

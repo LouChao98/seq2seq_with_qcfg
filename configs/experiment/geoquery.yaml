@@ -21,6 +21,7 @@ datamodule:
   copy_mode: "phrase"
   batch_size: 4
   dev_file: ${.test_file}
+  num_workers: 0
 #   copy_mode: "phrase"
 #   transformer_tokenizer_name: bert-base-cased
 
@@ -37,7 +38,7 @@ model:
     pt_states: 8
     use_copy: true
     # use_observed: true
-    generation_num_samples: 40
+    generation_num_samples: 10
 
 # model:
 #   transformer_pretrained_model: bert-base-cased
