@@ -5,7 +5,7 @@ from typing import Optional
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from src.datamodules.components.vocab import Vocabulary, VocabularyPair
+from src.datamodules.components.vocab import Vocabulary
 from src.datamodules.datamodule import _DataModule
 
 logger = logging.getLogger(__file__)
@@ -116,7 +116,7 @@ class SCANDataModule(_DataModule):
     def val_dataloader(self):
         loader = DataLoader(
             dataset=self.data_val,
-            batch_size=self.hparams.eval_batch_size,
+            batch_size=self.hparams.batch_size,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             collate_fn=self.collator,
@@ -141,25 +141,28 @@ class SCANDataModule(_DataModule):
         argsort.sort(key=lambda i: tgt_lens[i], reverse=True)
         data = [data[i] for i in argsort]
 
+        src = [inst["src"] for inst in data]
+        tgt = [inst["tgt"] for inst in data]
         src_lens = [len(inst["src_ids"]) for inst in data]
         tgt_lens = [len(inst["tgt_ids"]) for inst in data]
         max_src_len = max(src_lens)
         max_tgt_len = max(tgt_lens)
-        batched_src_ids = torch.full((len(tgt_lens), max_src_len), 0)
-        batched_tgt_ids = torch.full((len(tgt_lens), max_tgt_len), 0)
-        for i, inst in enumerate(data):
-            s, t = inst["src_ids"], inst["tgt_ids"]
+        batched_src_ids = torch.full((len(tgt_lens), max_src_len), self.src_vocab.pad_token_id)
+        batched_tgt_ids = torch.full((len(tgt_lens), max_tgt_len), self.tgt_vocab.pad_token_id)
+        for i, item in enumerate(data):
+            s, t = item["src_ids"], item["tgt_ids"]
             batched_src_ids[i, : len(s)] = torch.tensor(s)
             batched_tgt_ids[i, : len(t)] = torch.tensor(t)
 
         batched = {}
+        batched["id"] = torch.tensor([inst["id"] for inst in data])
+        batched["src"] = src
+        batched["tgt"] = tgt
         batched["src_ids"] = batched_src_ids
         batched["tgt_ids"] = batched_tgt_ids
         batched["src_lens"] = src_lens
         batched["tgt_lens"] = tgt_lens
-        batched["src"] = [inst["src"] for inst in data]
-        batched["tgt"] = [inst["tgt"] for inst in data]
-        batched["id"] = torch.tensor([inst["id"] for inst in data])
+
         return batched
 
 

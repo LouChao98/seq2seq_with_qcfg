@@ -130,7 +130,8 @@ class ModelBase(pl.LightningModule):
 
             # check missing
             if not (preds[0][0] == 0 and preds[-1][0] == len(preds) - 1):
-                log.warning("There are some missing examples.")
+                # TODO for val, this warning may be raised due to filtering like length limitation.
+                log.warning(f"There are some missing examples. Last id={preds[-1][0]}. Len={len(preds)}")
 
             with open(path, "w") as f:
                 for id_, inst in preds:
@@ -144,7 +145,6 @@ class ModelBase(pl.LightningModule):
         log.info(f"Writing to {os.path.abspath(path)}")
         if dist.is_initialized() and (ws := dist.get_world_size()):
             if len(self.datamodule.data_test) % ws != 0:
-                # TODO should I warn when detect duplicates?
                 log.warning(
                     "Do NOT report the above metrics because you are using"
                     "DDP and the size of the testset is odd, which means"
@@ -175,7 +175,7 @@ class ModelBase(pl.LightningModule):
 
             # check missing
             if not (preds[0][0] == 0 and preds[-1][0] == len(preds) - 1):
-                log.warning("There are some missing examples.")
+                log.warning(f"There are some missing examples. Last id={preds[-1][0]}. Len={len(preds)}")
 
             with open(path, "w") as f:
                 for id_, inst in preds:

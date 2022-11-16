@@ -12,7 +12,14 @@ from torch.autograd import grad
 from torch.distributions.utils import lazy_property
 
 from ._fn import diagonal_copy_, stripe
-from ._utils import check_full_marginal, checkpoint, compare_marginal, weighted_random_v2
+from ._utils import (
+    check_full_marginal,
+    checkpoint,
+    compare_marginal,
+    compute_unnormalized_prob,
+    enumerate_seq,
+    weighted_random_v2,
+)
 from .base import _COPY_NT, _COPY_PT, _OK, _REACHLIMIT, _SONMASK, _VOCAB, DecompBase, DecompSamplerBase
 from .semiring import GumbelCRFSemiring, MaxSemiring
 
@@ -480,7 +487,13 @@ def stripe_right(x: torch.Tensor, b: int, n: int, w: int, tgt_w: int, offset=(0,
 if __name__ == "__main__":
     from torch_struct import SentCFG
 
+    from src.datamodules.scan_datamodule import SCANDataModule
     from src.models.tgt_parser.neural_nodecomp import NeuralNoDecompTgtParser
+
+    datamodule = SCANDataModule(
+        "data/scan_debug.txt", "data/scan_debug.txt", "data/scan_debug.txt", enable_cache=False
+    )
+    datamodule.setup()
 
     B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT = 2, 4, 2, 5, 3, 7
     NT = TGT_NT * SRC_NT
@@ -521,15 +534,12 @@ if __name__ == "__main__":
     assert torch.allclose(mtrace, (torch.arange(N - 1).unsqueeze(0) < torch.tensor(lens).unsqueeze(1) - 1).float())
     logZ, trace = pcfg.inside(pcfg.params, GumbelCRFSemiring(1.0), True, use_reentrant=False)
     assert torch.allclose(logZ, pcfg.partition)
-    # print('test mbr decoding')
-    # decoded = pcfg.mbr_decoded
-    # decoded_ref = pcfg_ref(params, lens, decode=True)
 
     B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT = 2, 4, 1, 1, 1, 1
     NT = TGT_NT * SRC_NT
     PT = TGT_PT * SRC_PT
-    VOCAB = 2
-    NUM_SAMPLE = 10000
+    VOCAB = 4
+    NUM_SAMPLE = 50000
     MAX_LENGTH = 4
     r = 3
     lens = [max(2, N - i) for i in range(B)]
@@ -545,69 +555,74 @@ if __name__ == "__main__":
 
     pcfg = NoDecomp(params, lens, **meta)
 
-    print("test sample tree")
-    output = pcfg.sample_one(need_span=True, need_event=True)
-    prob = (pcfg.score(output["event"]) - pcfg.partition).exp()
-    target = output["span"]
+    # print("test sample tree")
+    # output = pcfg.sample_one(need_span=True, need_event=True)
+    # prob = (pcfg.score(output["event"]) - pcfg.partition).exp()
+    # target = output["span"]
 
-    cnt = [0 for i in range(B)]
-    for _ in range(1000):
-        output = pcfg.sample_one(need_span=True)["span"]
-        for b in range(B):
-            t = target[b]
-            p = output[b]
-            if t == p:
-                cnt[b] += 1
+    # cnt = [0 for i in range(B)]
+    # for _ in range(1000):
+    #     output = pcfg.sample_one(need_span=True)["span"]
+    #     for b in range(B):
+    #         t = target[b]
+    #         p = output[b]
+    #         if t == p:
+    #             cnt[b] += 1
 
-    cnt = torch.tensor(cnt, dtype=torch.float) / 1000
-    print(prob, cnt)
-    assert torch.allclose(cnt, prob, rtol=0.01, atol=10), (prob, cnt)
+    # cnt = torch.tensor(cnt, dtype=torch.float) / 1000
+    # print(prob, cnt)
+    # assert torch.allclose(cnt, prob, rtol=0.01, atol=10), (prob, cnt)
 
-    # print("test sample seq")
-    # spans = [[(i, i, 0) for i in range(l)] + [(0, i, 0) for i in range(1, l)] for l in lens]
-    # node_features = [torch.randn(l * 2 - 1, 8) for l in lens]
-    # parser = NeuralNoDecompTgtParser(
-    #     pt_states=TGT_PT,
-    #     nt_states=TGT_NT,
-    #     dim=8,
-    #     src_dim=8,
-    #     num_layers=1,
-    #     vocab=VOCAB,
-    #     use_copy=False,
-    #     generation_max_length=MAX_LENGTH,
-    #     generation_num_samples=NUM_SAMPLE,
-    #     generation_strict=True,
-    # )
-    # pred = parser(node_features, spans)
-    # pred = parser.prepare_sampler(pred, [["<unk>", "<unk>"]] * B, torch.zeros(B, 2, dtype=torch.long))
-    # samples = pred.sampler()
-    # samples = parser.expand_preds_not_using_copy(pred.src, samples)[0]
-    # for bidx in range(B):
-    #     count = Counter(tuple(item) for item in samples[bidx])
-    #     total = len(samples[bidx])
+    print("test sample seq")
+    batch = next(iter(datamodule.train_dataloader()))
+    MAX_LENGTH = 2
+    B = 1
+    VOCAB = len(datamodule.tgt_vocab)
+    spans = [[(i, i + 1, 0) for i in range(l)] + [(0, i + 1, 0) for i in range(1, l)] for l in batch["src_lens"]]
+    node_features = [torch.randn(len(s), 4) for s in spans]
+    parser = NeuralNoDecompTgtParser(
+        pt_states=TGT_PT,
+        nt_states=TGT_NT,
+        dim=4,
+        src_dim=4,
+        num_layers=1,
+        vocab=VOCAB,
+        datamodule=datamodule,
+        use_copy=False,
+        generation_max_length=MAX_LENGTH,
+        generation_num_samples=NUM_SAMPLE,
+        generation_strict=True,
+        normalize_mode="entmax",
+    )
+    pred = parser(node_features, spans)
+    pred = parser.prepare_sampler(pred, batch["src"], batch["src_ids"])
+    samples = pred.sampler()
+    for bidx in range(B):
+        count = Counter(tuple(item[0]) for item in samples[bidx])
+        total = len(samples[bidx])
 
-    #     sub_pred = copy(pred)
-    #     params = pred.params
-    #     params = {key: value[bidx, None] for key, value in params.items()}
-    #     sub_pred.params = params
-    #     sub_pred.batch_size = 1
+        sub_pred = copy(pred)
+        params = pred.params
+        params = {key: value[bidx, None] for key, value in params.items()}
+        sub_pred.params = params
+        sub_pred.batch_size = 1
 
-    #     probs_with_seq = []
-    #     for seq in enumerate_seq(MAX_LENGTH, VOCAB):
-    #         prob = compute_unnormalized_prob(seq, parser, sub_pred)
-    #         probs_with_seq.append((prob, seq))
+        probs_with_seq = []
+        for seq in enumerate_seq(MAX_LENGTH, VOCAB):
+            prob = compute_unnormalized_prob(seq, parser, sub_pred)
+            probs_with_seq.append((prob, seq))
 
-    #     partition = sum(item[0] for item in probs_with_seq)
-    #     probs_with_seq.sort(reverse=True)
+        partition = sum(item[0] for item in probs_with_seq)
+        probs_with_seq.sort(reverse=True)
 
-    #     errors = []
-    #     empirical_cdf = 0
-    #     theoratical_cdf = 0
-    #     for prob, seq in probs_with_seq[:5]:
-    #         empirical_cdf += count[tuple(seq)] / total
-    #         theoratical_cdf += prob / partition
-    #         errors.append(abs(empirical_cdf - theoratical_cdf) / theoratical_cdf)
+        errors = []
+        empirical_cdf = 0
+        theoratical_cdf = 0
+        for prob, seq in probs_with_seq[:5]:
+            empirical_cdf += count[tuple(seq)] / total
+            theoratical_cdf += prob / partition
+            errors.append(abs(empirical_cdf - theoratical_cdf) / theoratical_cdf)
 
-    #     assert max(errors) < 0.1, errors
-    #     print(empirical_cdf, theoratical_cdf, errors)
-    # print("pass")
+        assert max(errors) < 0.1, errors
+        print(empirical_cdf, theoratical_cdf, errors)
+    print("pass")

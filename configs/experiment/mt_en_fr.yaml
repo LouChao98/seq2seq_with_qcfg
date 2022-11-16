@@ -4,11 +4,9 @@
 # python train.py experiment=example
 
 defaults:
+  - /model/decoder/constraint: fp_hard_sh
   - override /datamodule: mt_en_fr
-  - override /model: styleptb
-  - override /model/tree_encoder: treelstm
-  - override /model/decoder: nodecomp
-  - override /model/decoder/constraint: fp_hard_sh
+  - override /model: pcfg_pcfg_reinforce
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default

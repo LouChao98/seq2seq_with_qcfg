@@ -4,14 +4,14 @@
 # python train.py experiment=example
 
 defaults:
+  - /model/decoder/constraint: fp_hard_sh
   - override /datamodule: scan
   - override /model: pcfg_pcfg_reinforce
   - override /model/encoder: empty
   - override /model/decoder: nodecomp
-  - override /model/decoder/constraint: fp_hard_sh
   - override /model/test_metric: bleu1234_and_exact
   - override /callbacks: default
-  - override /logger: tensorboard
+  - override /logger: wandb
   - override /trainer: default
 
 # all parameters below will be merged with parameters from default configurations set above

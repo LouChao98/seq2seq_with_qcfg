@@ -31,7 +31,7 @@ def covers(parent, child1, child2):
 
 class FPSimpleHierarchy(RuleConstraintBase):
     def get_mask(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
-        pt_spans[0] += [(0, 0, -999)] * (pt_num_nodes - len(pt_spans[0]))
+        pt_spans[0] += [(0, 0, -999)] * (pt_num_nodes - len(pt_spans[0]))  # TODO any issue here?
         nt_spans[0] += [(0, 0, -999)] * (nt_num_nodes - len(nt_spans[0]))
         pt_spans = pad_sequence(
             [torch.tensor([(l, r) for l, r, t in item]) for item in pt_spans],
@@ -148,22 +148,23 @@ class FPPenaltyDepth(RuleConstraintBase):
         nt_ntpt = node_score[:, nt_idx, pt_idx].view(batch_size, nt_states, nt_num_nodes, pt_states, pt_num_nodes)
 
         for b, (nt_spans_inst, pt_spans_inst) in enumerate(zip(nt_spans, pt_spans)):
+
             parents = spans2tree(nt_spans_inst)
 
-            nt_depths = [0]
+            nt_depths = []
             pt_depths = [0] * len(pt_spans_inst)
-            for j in range(1, len(nt_spans_inst)):
-                depth = 1
+            for j in range(len(nt_spans_inst)):
+                depth = 0
                 k = parents[j]
-                while k != 0:
+                while k != -1:
                     k = parents[k]
                     depth += 1
                 nt_depths.append(depth)
 
             for i, span1 in enumerate(nt_spans_inst):
                 nt_ntnt[b, :, i, :, i] = self.stay_score
-                for j, span2 in enumerate(nt_spans_inst[i + 1 :], start=i + 1):
-                    if not (is_parent(span1, span2)):
+                for j, span2 in enumerate(nt_spans_inst):
+                    if not (is_parent(span1, span2)) or i == j:
                         continue
                     distance = nt_depths[j] - nt_depths[i]
                     assert distance > 0
@@ -184,3 +185,8 @@ class FPPenaltyDepth(RuleConstraintBase):
         node_score = node_score.to(device)
         node_score = torch.min(node_score.unsqueeze(2), node_score.unsqueeze(3))
         return node_score
+
+    def get_feature(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+        return -self.get_weight(
+            batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device
+        )

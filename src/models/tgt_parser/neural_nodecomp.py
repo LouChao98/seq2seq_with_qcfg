@@ -6,20 +6,28 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
 from ..components.common import MultiResidualLayer
+from ..components.sparse_activations import entmax15, sparsemax
 from ..struct.no_decomp import NoDecomp, NoDecompSampler
 from .base import TgtParserBase, TgtParserPrediction
 
 log = logging.getLogger(__file__)
 
+normalize_func = {
+    "softmax": torch.log_softmax,
+    "sparsemax": lambda x, dim: sparsemax(x, dim=dim).clamp(1e-32).log(),
+    "entmax": lambda x, dim: entmax15(x, dim=dim).clamp(1e-32).log(),
+}
+
 
 class NeuralNoDecompTgtParser(TgtParserBase):
-    def __init__(self, vocab=100, dim=256, num_layers=3, src_dim=256, **kwargs):
+    def __init__(self, vocab=100, dim=256, num_layers=3, src_dim=256, normalize_mode="softmax", **kwargs):
         super().__init__(**kwargs)
 
         self.vocab = vocab
         self.dim = dim
         self.src_dim = src_dim
         self.num_layers = num_layers
+        self.normalizer = normalize_func[normalize_mode]
 
         self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -79,7 +87,7 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
         roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
         roots = roots.view(batch_size, -1)
-        roots = F.log_softmax(roots, 1)
+        roots = self.normalizer(roots, dim=1)
 
         # A->BC
 
@@ -111,17 +119,17 @@ class NeuralNoDecompTgtParser(TgtParserBase):
             mask = self.rule_hard_constraint.get_mask(*common)
             rules[~mask] = self.neg_huge
 
-        rules = rules.flatten(2).log_softmax(-1).clone()
+        rules = self.normalizer(rules.flatten(2), dim=-1).clone()
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
 
-        if self.rule_reweight_constraint is not None:
+        if self.rule_reweight_constraint is not None and (not self.rule_reweight_test_only or not self.training):
             weight = self.rule_reweight_constraint.get_weight(*common)
             rules = rules + weight
 
         rules[~lhs_mask] = self.neg_huge
 
         # A->a
-        terms = F.log_softmax(self.vocab_out(pt_emb), 2)
+        terms = self.normalizer(self.vocab_out(pt_emb), dim=2)
 
         if filtered_spans is not None:
             roots, rules, nt_num_nodes, nt_num_nodes_list = self.filter_rules(

@@ -87,19 +87,13 @@ class MaxSemiring(LogSemiring):
     def normal_space_sum(a, dim):
         return torch.max(a, dim)[0]
 
-    # # TODO these should be also transparent like SampledSemiring, but this should
-    # # not be used in practice because cpd-ed pcfgs do not support this.
-    # @staticmethod
-    # def to_normal_space(tlist, dims):
-    #     max_val = [t.amax(dims) for t in tlist]
-    #     normalizer = torch.stack(max_val, dim=-1).max(-1)[0]
-    #     shape = list(normalizer.shape) + [1] * len(dims)
-    #     tlist = [(t - normalizer.view(shape)).exp() for t in tlist]
-    #     return tlist, normalizer
+    @staticmethod
+    def to_normal_space(tlist: List[torch.Tensor], dims: List[int]):
+        raise NotImplementedError
 
-    # @staticmethod
-    # def to_log_space(x, xn):
-    #     return (x + 1e-9).log() + xn.view(list(xn.shape) + [1] * (x.ndim - xn.ndim))
+    @staticmethod
+    def to_log_space(x, xn):
+        raise NotImplementedError
 
 
 class EntropySemiring(SemiringBase):

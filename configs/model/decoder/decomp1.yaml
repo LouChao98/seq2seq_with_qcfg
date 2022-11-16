@@ -1,7 +1,3 @@
-defaults:
-  - _self_
-  - constraint: none
-
 _target_: src.models.tgt_parser.neural_decomp1.NeuralDecomp1TgtParser
 _recursive_: false
 

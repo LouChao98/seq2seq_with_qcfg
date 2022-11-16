@@ -161,6 +161,7 @@ class TgtParserBase(nn.Module):
         rule_soft_constraint=None,
         rule_soft_constraint_solver=None,
         rule_reweight_constraint=None,
+        rule_reweight_test_only=False,
         generation_criteria: str = "ppl",
         generation_max_length: int = 40,
         generation_max_actions: int = 80,
@@ -182,6 +183,7 @@ class TgtParserBase(nn.Module):
         self.rule_soft_constraint: Optional[RuleConstraintBase] = instantiate(rule_soft_constraint)
         self.rule_soft_constraint_solver = instantiate(rule_soft_constraint_solver)
         self.rule_reweight_constraint: Optional[RuleConstraintBase] = instantiate(rule_reweight_constraint)
+        self.rule_reweight_test_only = rule_reweight_test_only
 
         assert generation_criteria in ("ppl", "likelihood", "contrastive")
 

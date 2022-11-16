@@ -1,36 +1,17 @@
 import io
 import logging
 import os
-import pprint
-import re
 import sys
-import warnings
-from pathlib import Path
 from typing import Optional
 
-import pytorch_lightning as pl
-from pytorch_lightning import Callback
-from pytorch_lightning.callbacks import (
-    ModelCheckpoint,
-    RichProgressBar,
-    TQDMProgressBar,
-)
+from pytorch_lightning.callbacks import RichProgressBar, TQDMProgressBar
 from pytorch_lightning.loggers.wandb import WandbLogger
-from rich.theme import Theme
 from tqdm import tqdm
 
 import wandb
 from src.utils.log_utils import rich_theme
 
 log = logging.getLogger("callback")
-
-
-def _warn(*args, **kwargs):
-    warnings.warn(*args, **kwargs)
-
-
-def _info(*args, **kwargs):
-    log.info(*args, **kwargs)
 
 
 class CustomProgressBar(TQDMProgressBar):
@@ -98,7 +79,7 @@ class CustomProgressBar(TQDMProgressBar):
         file: Optional[io.TextIOBase] = None,
         nolock: bool = False,
     ):
-        _info(sep.join(map(str, args)))
+        log.info(sep.join(map(str, args)))
         # active_progress_bar = None
         #
         # if self.main_progress_bar is not None and not self.main_progress_bar.disable:
@@ -128,10 +109,15 @@ class CustomRichProgressBar(RichProgressBar):
         file: Optional[io.TextIOBase] = None,
         nolock: bool = False,
     ):
-        _info(sep.join(map(str, args)))
+        log.info(sep.join(map(str, args)))
 
 
 class CustomWandbLogger(WandbLogger):
+    def __init__(self, *args, **kwargs) -> None:
+        if kwargs.get("tags") is not None:
+            kwargs["tags"] = [item for item in kwargs["tags"] if item is not None]
+        super().__init__(*args, **kwargs)
+
     def finalize(self, status: str) -> None:
         for fname in ["predict_on_test.txt", "train.log", "test.log"]:
             if os.path.exists(fname):

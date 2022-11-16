@@ -23,7 +23,7 @@ from src.models.src_parser.base import SrcParserBase
 from src.models.struct.semiring import LogSemiring
 from src.models.tgt_parser.base import TgtParserBase
 from src.models.tree_encoder.base import TreeEncoderBase
-from src.utils.fn import annotate_snt_with_brackets, report_ids_when_err
+from src.utils.fn import annotate_snt_with_brackets, apply_to_nested_tensor, report_ids_when_err
 from src.utils.metric import PerplexityMetric
 
 log = logging.getLogger(__file__)
@@ -67,6 +67,7 @@ class GeneralSeq2SeqModule(ModelBase):
         soft_constraint_loss_rl=0.0,
         soft_constraint_loss_raml=0.0,
     ):
+        real_val_every_n_epochs = 1
         super().__init__()
         self.save_hyperparameters(logger=False)
 
@@ -453,12 +454,12 @@ class GeneralSeq2SeqModule(ModelBase):
         self.val_metric(output["tgt_nll"], batch["tgt_lens"])
 
         if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0:
-            self.test_step(batch, batch_idx=None)
+            output = self.test_step(batch, batch_idx=None)
 
         # if batch_idx == 0:
         #     self.print_prediction(batch)
 
-        return {"loss": loss}
+        return {"loss": loss} | output
 
     def validation_epoch_end(self, outputs: List[Any]):
         ppl = self.val_metric.compute()  # get val accuracy from current epoch
@@ -485,12 +486,11 @@ class GeneralSeq2SeqModule(ModelBase):
     @torch.no_grad()
     def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = None):
         # patch for inference_mode
-        batch["src_ids"] = batch["src_ids"].clone()
-        batch["tgt_ids"] = batch["tgt_ids"].clone()
+        batch = apply_to_nested_tensor(batch, func=lambda x: x.clone())
 
         preds = self.forward_generate(batch, get_baseline=self.hparams.export_detailed_prediction)
         targets = batch["tgt"]
-        self.test_metric(preds["pred"], targets)
+        self.test_metric([item["tgt"] for item in preds["pred"]], targets)
 
         # if batch_idx == 0:
         #     self.print_prediction(batch)

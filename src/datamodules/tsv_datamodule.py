@@ -3,7 +3,7 @@ import pickle
 from collections import Counter
 from functools import partial
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from src import is_under_debugger
-from src.datamodules.components.vocab import Vocabulary, VocabularyPair
+from src.datamodules.components.vocab import Vocabulary
 from src.datamodules.datamodule import _DataModule
 
 logger = logging.getLogger(__file__)

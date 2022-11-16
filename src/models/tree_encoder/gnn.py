@@ -35,7 +35,6 @@ class GeneralGNN(torch.nn.Module):
         graphs = []
         for bidx, spans_item in enumerate(spans_inp):
             vertices, edges = [], []
-            spans_item = [(i, i + 1, -1) for i in range(max(x[1] for x in spans_item))] + spans_item
             parents_item = spans2tree(spans_item)
             spans.append(spans_item)
             parents.append(parents_item)
@@ -46,7 +45,7 @@ class GeneralGNN(torch.nn.Module):
                     edges.append((i, parent))
                     edges.append((parent, i))
             graph = Data(torch.stack(vertices, 0), torch.tensor(edges).T)
-            graph.node_label = torch.tensor([(l, r) for l, r, t in spans_item])
+            graph.node_label = torch.tensor([(l, r) for l, r, *_ in spans_item])
             self.draw_graph(graph)
             graphs.append(graph)
 

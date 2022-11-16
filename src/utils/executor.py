@@ -1,4 +1,4 @@
-# mainly from `span-based-sp`
+# executor mainly from `span-based-sp`
 
 import re
 

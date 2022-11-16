@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence
 
-from src.utils.tree import spans2tree
+from src.utils.fn import spans2tree
 
 # Based on https://github.com/GreyChou98/HTNN/blob/cbbf51551f1bb6ce7aa9d8e49496e8b8f4c1b6d2/srl_biaffine/treelstm_new.py
 
@@ -338,7 +338,6 @@ class LayerwiseTreeLSTM_new(nn.Module):
         spans_processed = []
         spans_list = []
         for bidx, spans_item in enumerate(spans):
-            spans_item = [(i, i + 1, -1) for i in range(max(x[1] for x in spans_item))] + spans_item
             parents_item = spans2tree(spans_item)
 
             parent2children = defaultdict(list)
@@ -356,7 +355,7 @@ class LayerwiseTreeLSTM_new(nn.Module):
                     hyperedges_inst.append((pj, b, a))
 
             hyperedges.append(torch.tensor(hyperedges_inst, device=x.device))
-            spans_processed.append(torch.tensor([(l, r) for l, r, t, in spans_item], device=x.device))
+            spans_processed.append(torch.tensor([(l, r) for l, r, *_ in spans_item], device=x.device))
             spans_list.append(spans_item)
 
         spans = pad_sequence(spans_processed, batch_first=True).flatten(1)
