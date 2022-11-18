@@ -22,7 +22,7 @@ class PerplexityMetric(Metric):
         self.cnt += sum(lens)
 
     def compute(self):
-        return torch.exp(self.nll.float() / self.cnt)
+        return torch.exp(self.nll.float() / self.cnt).item()
 
 
 class WholeSentMatchAccuracy(Metric):
@@ -36,7 +36,7 @@ class WholeSentMatchAccuracy(Metric):
         self.correct += sum(" ".join(p) == " ".join(t) for p, t in zip(preds, targets))
 
     def compute(self):
-        return self.correct.float() / (self.total + 1e-9)
+        return (self.correct.float() / (self.total + 1e-9)).item()
 
 
 class UnlabeledSpanF1Score(Metric):
@@ -48,17 +48,17 @@ class UnlabeledSpanF1Score(Metric):
 
     def update(self, preds, targets):
         for preds_inst, targets_inst in zip(preds, targets):
-            preds_inst = set((i, j) for i, j, _ in preds_inst)
-            targets_inst = set((i, j) for i, j, _ in targets_inst)
+            preds_inst = set((i, j) for i, j, *_ in preds_inst if j > i + 1)
+            targets_inst = set((i, j) for i, j, *_ in targets_inst if j > i + 1)
             self.tp += len(preds_inst.intersection(targets_inst))
             self.gold += len(targets_inst)
             self.pred += len(preds_inst)
 
     def compute(self):
         return {
-            "f1": 200 * self.tp / (self.pred + self.gold + 1e-12),
-            "r": 100 * self.tp / (self.gold + 1e-12),
-            "p": 100 * self.tp / (self.pred + 1e-12),
+            "f1": (200 * self.tp / (self.pred + self.gold + 1e-12)).item(),
+            "r": (100 * self.tp / (self.gold + 1e-12)).item(),
+            "p": (100 * self.tp / (self.pred + 1e-12)).item(),
         }
 
 
@@ -83,15 +83,15 @@ class MultiMetric(Metric):
         outputs = {}
         for n, m in self._metrics.items():
             output = m.compute()
-            if isinstance(output, torch.Tensor):
-                outputs[n] = output.item()
-            else:
+            if isinstance(output, dict):
                 for k, v in output.items():
-                    outputs[n + "/" + k] = v
+                    outputs[n + "/" + k] = v.item() if isinstance(v, torch.Tensor) else v
+            else:
+                outputs[n] = output.item() if isinstance(output, torch.Tensor) else output
         return outputs
 
 
-class DenotionMetric(Metric):
+class DenotationMetric(Metric):
     # mainly from `span-based-sp`
     def __init__(self, executor: Executor, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -149,7 +149,7 @@ class DenotionMetric(Metric):
         }
 
 
-class GeoDenotionMetric(DenotionMetric):
+class GeoDenotationMetric(DenotationMetric):
     def update(
         self,
         predictions: List[List[str]],
@@ -182,3 +182,32 @@ class GeoDenotionMetric(DenotionMetric):
                 logger.info("answ: {}".format(gold_answer))
                 logger.info()
                 is_printed = True
+
+
+class KGeoDenotationMetric(DenotationMetric):
+    def update(
+        self,
+        predictions: List[List[List[str]]],
+        gold_targets: List[List[str]],
+    ):
+        self.total_counts += len(predictions)
+        self.batch_counts += 1
+        if self.batch_counts % 1000 == 0:  # collect garbage once in a while
+            gc.collect()
+
+        for prediction_cands, target in zip(predictions, gold_targets):
+            target = self.executor.recovery(target)
+            gold_answer = self.executor.execute(target)
+
+            if gold_answer != "[]":
+                self.total_nonempty_counts += 1
+
+            for prediction in prediction_cands:
+                prediction = self.executor.recovery(prediction)
+                denotation = self.executor.execute(prediction)
+
+                if gold_answer == denotation:
+                    self.correct_counts += 1
+                    if gold_answer != "[]":
+                        self.correct_nonempty_counts += 1
+                    break

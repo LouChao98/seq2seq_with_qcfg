@@ -96,6 +96,11 @@ class ModelBase(pl.LightningModule):
     def save_predictions(self, outputs, path=None):
         if path is None:
             path = "predict_on_test.txt"
+            if os.path.exists(path):
+                for i in range(2, 1000):
+                    path = f"predict_on_test_{i}.txt"
+                    if not os.path.exists(path):
+                        break
         log.info(f"Writing to {os.path.abspath(path)}")
         if dist.is_initialized() and (ws := dist.get_world_size()):
             if len(self.datamodule.data_test) % ws != 0:
@@ -142,6 +147,11 @@ class ModelBase(pl.LightningModule):
     def save_detailed_predictions(self, outputs, path=None):
         if path is None:
             path = "detailed_predict_on_test.txt"
+            if os.path.exists(path):
+                for i in range(2, 1000):
+                    path = f"detailed_predict_on_test_{i}.txt"
+                    if not os.path.exists(path):
+                        break
         log.info(f"Writing to {os.path.abspath(path)}")
         if dist.is_initialized() and (ws := dist.get_world_size()):
             if len(self.datamodule.data_test) % ws != 0:
@@ -193,4 +203,4 @@ class ModelBase(pl.LightningModule):
                     f.write(inst[2])
                     f.write("\n")
                     f.write("<<< [Parse on predicted sequence] " + "<" * 35)
-                    f.write("\n")
+                    f.write("\n\n")

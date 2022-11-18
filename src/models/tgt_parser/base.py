@@ -185,7 +185,7 @@ class TgtParserBase(nn.Module):
         self.rule_reweight_constraint: Optional[RuleConstraintBase] = instantiate(rule_reweight_constraint)
         self.rule_reweight_test_only = rule_reweight_test_only
 
-        assert generation_criteria in ("ppl", "likelihood", "contrastive")
+        assert generation_criteria in ("ppl", "likelihood", "contrastive", "none")
 
         self.generation_criteria = generation_criteria
         self.generation_max_length = generation_max_length
@@ -262,7 +262,7 @@ class TgtParserBase(nn.Module):
         impl = 2
         if impl == 1:
             pred = self.observe_x(pred, **observes)  # TODO handle hard constraint
-            marginal = pred.dist.marginal_with_grad  # b n n tgt_nt src_nt
+            marginal = pred.dist.marginal_with_grad[1]  # b n n tgt_nt src_nt
             loss = marginal * noisy_nodes[:, None, None, None].expand_as(marginal)
             loss = loss.flatten(1).sum(1)
         else:
@@ -318,6 +318,8 @@ class TgtParserBase(nn.Module):
             preds = self.choose_samples_by_likelihood(preds, pred, **kwargs)
         elif self.generation_criteria == "contrastive":
             preds = self.choose_samples_by_constrastive(preds, pred, **kwargs)
+        elif self.generation_criteria == "none":
+            preds = [({"tgt": [item["tgt"] for item in batch]}, None) for batch in preds]
         return preds
 
     def expand_preds_using_copy(self, src, preds, pt_spans, nt_spans, max_len):
@@ -326,6 +328,7 @@ class TgtParserBase(nn.Module):
         vocab = self.datamodule.tgt_vocab
         for batch, pt_spans_item, nt_spans_item, src_item in zip(preds, pt_spans, nt_spans, src):
             expanded_batch = []
+            added = set()
             for item in batch:
                 expanded = []
                 for v, t in zip(item[0], item[1]):
@@ -346,9 +349,11 @@ class TgtParserBase(nn.Module):
                             break
                         expanded.extend(tokens)
 
-                if len(expanded) > max_len:
-                    assert False
-
+                assert len(expanded) <= max_len, (len(expanded), max_len)
+                if (key := " ".join(expanded)) in added:
+                    continue
+                else:
+                    added.add(key)
                 pair = {"id": len(expanded_batch), "src": src_item, "tgt": expanded}
                 expanded_batch.append(pair)
             expanded_batch = self.datamodule.process_all_copy(expanded_batch)
@@ -361,7 +366,14 @@ class TgtParserBase(nn.Module):
         for batch, src_item in zip(preds, src):
             expanded_batch = [item[0] for item in batch]
             expanded_batch = self.datamodule.tgt_vocab.convert_ids_to_tokens(expanded_batch)
-            expanded_batch = [{"id": i, "src": src_item, "tgt": item} for i, item in enumerate(expanded_batch)]
+            expanded_batch = []
+            added = set()
+            for i, item in enumerate(expanded_batch):
+                if (key := " ".join(item)) in added:
+                    continue
+                else:
+                    added.add(key)
+                expanded_batch.append({"id": i, "src": src_item, "tgt": item})
             expanded_batch = self.datamodule.process_all_copy(expanded_batch)
             expanded_batch = self.datamodule.apply_vocab(expanded_batch)
             preds_.append(expanded_batch)
@@ -369,6 +381,10 @@ class TgtParserBase(nn.Module):
 
     @torch.no_grad()
     def choose_samples_by_ppl(self, preds, pred: TgtParserPrediction, **kwargs):
+
+        # JUST FOR ANALYSIS. REMOVE IF REPORTING FINAL RESULTS
+        tgt_lens = kwargs.get("tgt_lens")
+
         new_preds = []
         pred = copy(pred).clear()
         for bidx, preds_batch in enumerate(preds):
@@ -390,6 +406,11 @@ class TgtParserBase(nn.Module):
                 ppl_batch = np.exp(nll / np.array(batch["tgt_lens"]))
                 for i, ppl_item in zip(batch["id"].tolist(), ppl_batch):
                     ppl[i] = ppl_item
+
+                if tgt_lens is not None:
+                    for i, cl, l in zip(batch["id"].tolist(), batch["tgt_lens"], tgt_lens):
+                        if cl != l:
+                            ppl[i] += 1000
 
             assert not np.any(np.isnan(ppl))
             chosen = np.argmin(ppl)

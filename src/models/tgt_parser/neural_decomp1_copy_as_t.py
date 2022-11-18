@@ -1,6 +1,7 @@
 import logging
 from typing import List, Tuple
 
+import numpy as np
 import torch
 
 from ..struct.decomp1_copy_as_t import Decomp1, Decomp1Sampler
@@ -41,7 +42,7 @@ class NeuralDecomp1TgtParser(_BaseModel):
         observed_mask=None,
         prior_alignment=None,
     ):
-        assert observed_mask is None
+        assert observed_mask is None or not self.use_observed
         assert prior_alignment is None
         batch_size, n = tgt.shape[:2]
         term = term.unsqueeze(1).expand(batch_size, n, pt, term.size(2))
@@ -70,7 +71,7 @@ class NeuralDecomp1TgtParser(_BaseModel):
         if constraint_scores is not None:
             constraint_scores = self.post_process_nt_constraint(constraint_scores, tgt.device)
 
-        if observed_mask is not None:
+        if observed_mask is not None and self.use_observed:
             constraint_scores = self.build_observed_span_constraint(
                 batch_size, n, max_nt_spans, observed_mask, constraint_scores
             )
@@ -93,3 +94,26 @@ class NeuralDecomp1TgtParser(_BaseModel):
                 if t is not None:
                     terms2d[batch_idx, t, w + 1, -1, i] = 0.0
         return terms2d
+
+    def get_init_nt_constraint(self, batch_size, n):
+        return [
+            (
+                np.full(
+                    (batch_size, n - w, self.cpd_rank),
+                    self.neg_huge,
+                    dtype=np.float32,
+                ),
+                np.zeros((batch_size, n - w, self.cpd_rank), dtype=np.bool8),
+            )
+            for w in range(1, n)
+        ]
+
+    def build_observed_span_constraint(self, batch_size, n, max_nt_spans, observed_constraint, constraint=None):
+        if constraint is None:
+            constraint = self.post_process_nt_constraint(
+                self.get_init_nt_constraint(batch_size, n), observed_constraint[0].device
+            )
+        for item, (value, mask) in zip(observed_constraint, constraint):
+            mask |= item.view(list(item.shape) + [1] * (mask.ndim - item.ndim))
+            value[item] = self.neg_huge
+        return constraint

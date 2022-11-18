@@ -21,7 +21,7 @@ from ._utils import (
     weighted_random_v2,
 )
 from .base import _COPY_NT, _COPY_PT, _OK, _REACHLIMIT, _SONMASK, _VOCAB, DecompBase, DecompSamplerBase
-from .semiring import GumbelCRFSemiring, MaxSemiring
+from .semiring import GumbelCRFSemiring, MaxSemiring, MaxSTSemiring
 
 log = logging.getLogger(__file__)
 
@@ -96,7 +96,7 @@ class NoDecomp(DecompBase):
                 x = torch.where(mask.unsqueeze(0).expand([semiring.size] + list(mask.shape)), value, x)
 
             if add_scores is not None:
-                x = x + add_scores[step]
+                x = semiring.mul(x, add_scores[step])
 
             if lse_scores is not None:
                 x = torch.logaddexp(x, lse_scores[step])
@@ -210,6 +210,12 @@ class NoDecomp(DecompBase):
         logZ, trace = self.inside_tracing_span_id(
             self.params, GumbelCRFSemiring(temperature), True, use_reentrant=False
         )
+        mtrace = grad(logZ.sum(), [trace], create_graph=True)[0]
+        return mtrace[..., 1:]
+
+    @torch.enable_grad()
+    def argmax_st(self):
+        logZ, trace = self.inside_tracing_span_id(self.params, MaxSTSemiring, True, use_reentrant=False)
         mtrace = grad(logZ.sum(), [trace], create_graph=True)[0]
         return mtrace[..., 1:]
 
@@ -613,6 +619,12 @@ if __name__ == "__main__":
             probs_with_seq.append((prob, seq))
 
         partition = sum(item[0] for item in probs_with_seq)
+
+        sub_pred = parser.observe_x(sub_pred, batch["tgt_ids"], batch["tgt_lens"])
+        partition_ref = sum(
+            sub_pred.dist.partition_at_length(sub_pred.params, l).exp() for l in range(2, MAX_LENGTH + 1)
+        )
+
         probs_with_seq.sort(reverse=True)
 
         errors = []

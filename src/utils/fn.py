@@ -226,6 +226,8 @@ def report_ids_when_err(func):
 
 
 def apply_to_nested_tensor(nested, func):
+    if isinstance(nested, Tree):
+        return nested
     if isinstance(nested, (list, tuple)):
         return [apply_to_nested_tensor(item, func) for item in nested]
     if isinstance(nested, dict):

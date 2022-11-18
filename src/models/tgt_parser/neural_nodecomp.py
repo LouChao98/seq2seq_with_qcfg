@@ -12,6 +12,7 @@ from .base import TgtParserBase, TgtParserPrediction
 
 log = logging.getLogger(__file__)
 
+# SHOULD ALWAYS USE softmax FOR REAL TRAINING
 normalize_func = {
     "softmax": torch.log_softmax,
     "sparsemax": lambda x, dim: sparsemax(x, dim=dim).clamp(1e-32).log(),
@@ -87,7 +88,7 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
         roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
         roots = roots.view(batch_size, -1)
-        roots = self.normalizer(roots, dim=1)
+        roots = F.log_softmax(roots, dim=1)
 
         # A->BC
 
@@ -129,7 +130,7 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         rules[~lhs_mask] = self.neg_huge
 
         # A->a
-        terms = self.normalizer(self.vocab_out(pt_emb), dim=2)
+        terms = F.log_softmax(self.vocab_out(pt_emb), dim=2)
 
         if filtered_spans is not None:
             roots, rules, nt_num_nodes, nt_num_nodes_list = self.filter_rules(

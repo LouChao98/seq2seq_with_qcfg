@@ -5,7 +5,7 @@
 
 defaults:
   - override /datamodule: styleptb
-  - override /model: styleptb_pretrain
+  - override /model: pretrain
   - override /callbacks: default
   - override /logger: tensorboard
   - override /trainer: default
@@ -21,27 +21,13 @@ datamodule:
   copy_mode: "none"
   batch_size: 16
   eval_batch_size: 16
+  enable_cache: false
 
 trainer:
-  max_epochs: 50
+  max_epochs: 5
   accumulate_grad_batches: 1
   gradient_clip_val: 3
 
 callbacks:
-  # model_checkpoint:
-  #   monitor: "val/f1"
-  #   mode: "max"
-
   early_stopping:
     patience: 10
-    # monitor: "val/f1"
-    # mode: "max"
-
-logger:
-  wandb:
-    project: "styleptb"
-    tags:
-      - "${hydra:runtime.choices.model/parser}"
-      - "${hydra:runtime.choices.model/tree_encoder}"
-      - "${hydra:runtime.choices.model/decoder}"
-    offline: ${in_cluster:}

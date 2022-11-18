@@ -1,7 +1,7 @@
 _target_: src.utils.metric.MultiMetric
 
-denotion:
-  _target_: src.utils.metric.GeoDenotionMetric
+denotation:
+  _target_: src.utils.metric.GeoDenotationMetric
 
   executor:
     _target_: src.utils.executor.ProgramExecutorGeo

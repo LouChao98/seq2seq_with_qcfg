@@ -28,7 +28,7 @@ log = logging.getLogger(__file__)
 
 class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
     def __init__(self, method="gumbel", no_src_nll=False, **kwargs):
-        assert method in ("gumbel", "marginal")
+        assert method in ("gumbel", "argmax")
         super().__init__(**kwargs)
         self.save_hyperparameters(logger=False)
         assert self.hparams.tree_encoder is None
@@ -151,7 +151,10 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
 
         with self.profiler.profile("compute_src_nll_and_sampling"):
             dist = self.parser(src_ids, src_lens)
-            span_indicator = dist.gumbel_sample_one(1.0)
+            if self.hparams.method == "gumbel":
+                span_indicator = dist.gumbel_sample_one(1.0)
+            else:
+                span_indicator = dist.argmax_st()
             src_nll = dist.nll
 
         with self.profiler.profile("src_encoding"):

@@ -1,8 +1,7 @@
 defaults:
   - parser: pcfg
-  - test_metric: unlabeled_span_f1
 
-_target_: src.models.pretrain.SrcParserPretrainModule
+_target_: src.models.pretrain.PretrainPCFGModule
 _recursive_: false
 
 param_initializer: "xavier_uniform"

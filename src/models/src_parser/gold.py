@@ -18,12 +18,15 @@ class GoldTreeProcessor(SrcParserBase):
 
     @property
     def partition(self):
-        # simulate dist
-        return torch.tensor(0.0, requires_grad=True)
+        return torch.tensor(0.0)
 
-    def get_spans(self, batch):
+    @property
+    def nll(self):
+        return torch.tensor(0.0)
+
+    def get_spans(self, trees):
         spans = []
-        for tree in batch["src_tree"]:
+        for tree in trees:
             if self.binarize:
                 tree.chomsky_normal_form()
             tree_str = tree._pformat_flat("", "()", False)
@@ -31,19 +34,10 @@ class GoldTreeProcessor(SrcParserBase):
         return spans
 
     def sample(self, x, lengths, **kwargs):
-        raise NotImplementedError("To event matric")
-        trees = kwargs["src_tree"]
-        samples = []
-        for tree in trees:
-            tree_str = tree._pformat_flat("", "()", False)
-            samples.append(tree2span(tree_str))
-        return [None, None, None, samples], 0
+        raise NotImplementedError
 
     def argmax(self, x, lengths, **kwargs):
-        return self.sample(x, lengths, **kwargs)
-
-    def entropy(self, x, lengths, **kwargs):
-        return x.new_zeros(len(lengths))
+        raise NotImplementedError
 
 
 @njit
@@ -59,5 +53,5 @@ def tree2span(tree_str: str):
                 pos += 1
             start = stack.pop()
             if pos > start + 1:
-                spans.append((start, pos - 1, 0))
+                spans.append((start, pos, 0))
     return spans

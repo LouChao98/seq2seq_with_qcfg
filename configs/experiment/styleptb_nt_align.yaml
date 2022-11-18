@@ -4,9 +4,9 @@
 # python train.py experiment=example
 
 defaults:
-  # - /model/decoder/constraint: fp_hard_sh
-  - override /datamodule: mt_en_fr
-  - override /model: pcfg_pcfg_reinforce
+  - override /datamodule: styleptb
+  - override /model: pcfg_pcfg_nt_align
+  - override /model/decoder: nodecomp
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -15,24 +15,24 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "mt_en_fr_${hydra:runtime.choices.model/decoder}"
+name: "styleptb_${hydra:runtime.choices.model/decoder}"
 
-trainer:
-  max_epochs: 15
-  accumulate_grad_batches: 4
-  gradient_clip_val: 3
+datamodule:
+  transformer_tokenizer_name: bert-base-cased
+  tokenize_tgt: true
 
 model:
-  decoder:
-    nt_states: 14
-    pt_states: 14
-    use_copy: false
-    generation_max_length: 30
-    generation_num_samples: 100
+  transformer_pretrained_model: bert-base-cased
+  embedding: ~
+
+trainer:
+  max_epochs: 50
+  accumulate_grad_batches: 1
+  gradient_clip_val: 3
 
 logger:
   wandb:
-    project: "mt_en_fr"
+    project: "styleptb"
     tags:
       - "${hydra:runtime.choices.model/parser}"
       - "${hydra:runtime.choices.model/tree_encoder}"

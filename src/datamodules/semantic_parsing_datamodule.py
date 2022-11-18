@@ -446,7 +446,10 @@ def tokenize_program(program):
     for i, c in enumerate(program):
         if c in "()', ":
             if len(token_buffer) > 0:
-                tokens.append("".join(token_buffer))
+                if single_quote is not None:
+                    tokens.append("".join(token_buffer))
+                else:
+                    tokens.append("@" + "".join(token_buffer))
                 token_buffer.clear()
             if c == "(":
                 buffer.append(len(tokens))

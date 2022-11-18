@@ -85,11 +85,18 @@ class DecompBase:
             extra_params = set(params[0].keys()) - set(self.KEYS)
             new_params = {k: semiring.convert(params[0][k], params[1][k]) for k in self.KEYS}
             for key in extra_params:
-                if key == "constraint" and params[0]["constraint"] is not None:
-                    converted = []
-                    for (value, mask), (value2, mask2) in zip(params[0]["constraint"], params[1]["constraint"]):
-                        converted.append((semiring.convert(value, value2), mask))
-                    new_params[key] = converted
+                if key == "constraint":
+                    if params[0]["constraint"] is not None:
+                        converted = []
+                        for (value, mask), (value2, mask2) in zip(params[0]["constraint"], params[1]["constraint"]):
+                            converted.append((semiring.convert(value, value2), mask))
+                        new_params[key] = converted
+                elif key in ("add", "lse"):
+                    if params[0][key] is not None:
+                        converted = []
+                        for value1, value2 in zip(params[0][key], params[1][key]):
+                            converted.append(semiring.convert(value1, value2))
+                        new_params[key] = converted
                 else:
                     assert params[0][key] is None, f"Not implemented for {key}"
             semiring.set_device(params[0][self.KEYS[0]].device)
@@ -97,11 +104,18 @@ class DecompBase:
             extra_params = set(params.keys()) - set(self.KEYS)
             new_params = {k: semiring.convert(params[k]) for k in self.KEYS}
             for key in extra_params:
-                if key == "constraint" and params["constraint"] is not None:
-                    converted = []
-                    for value, mask in params["constraint"]:
-                        converted.append((semiring.convert(value), mask))
-                    new_params[key] = converted
+                if key == "constraint":
+                    if params["constraint"] is not None:
+                        converted = []
+                        for value, mask in params["constraint"]:
+                            converted.append((semiring.convert(value), mask))
+                        new_params[key] = converted
+                elif key in ("add", "lse"):
+                    if params[key] is not None:
+                        converted = []
+                        for value in params[key]:
+                            converted.append(semiring.convert(value))
+                        new_params[key] = converted
                 else:
                     assert params[key] is None, f"Not implemented for {key}"
             semiring.set_device(params[self.KEYS[0]].device)
@@ -112,6 +126,15 @@ class DecompBase:
     def partition(self):
         # do not use lazy_property. I have cached the result.
         return self()[0]
+
+    def partition_at_length(self, params, length):
+        # need unprocessed params TODO refactor this
+        # terms: bsz x (tgt pt x src pt) x vocab
+        if isinstance(length, list):
+            length = max(length)
+        term = LogSemiring.sum(params["term"], dim=2).unsqueeze(1).expand(-1, length, -1)
+        params = {**params} | {"term": term}
+        return self.inside(params, LogSemiring)[0]
 
     @property
     def nll(self):
@@ -149,7 +172,7 @@ class DecompBase:
     @lazy_property
     def marginal_with_grad(self):
         logZ, trace = self.inside(self.params, LogSemiring, trace=True, use_reentrant=False)
-        grads = grad(logZ.sum(), [trace], create_graph=True)[0]
+        grads = grad(logZ.sum(), [self.params["term"], trace], create_graph=True)
         return grads
 
     @lazy_property
@@ -192,6 +215,9 @@ class DecompBase:
     def gumbel_sample_one(self, temperature):
         raise NotImplementedError
 
+    def argmax_st(self):
+        raise NotImplementedError
+
     @property
     def decoded(self):
         try:
@@ -212,7 +238,7 @@ class DecompBase:
 
     def mbr_decoding_1gram_pt(self):
         # term: b, n, tgt_pt, src_pt
-        # trace: b, n, n, tgt_nt, src_nt
+        # trace: b, n+1, n+1, tgt_nt, src_nt
         batch, seq_len = self.params["term"].shape[:2]
         marginal = self.marginal
         trace_m: Tensor = marginal["trace"]
@@ -262,11 +288,11 @@ class DecompBase:
         return spans_
 
     def mbr_decoding_ngram_pt(self):
-        # term: b, n, n, tgt_pt, src_pt
-        # trace: b, n, n, tgt_nt, src_nt
+        # term: b, n, max_width, tgt_pt, src_pt
+        # trace: b, n+1, n+1
         batch, seq_len = self.params["term"].shape[:2]
         marginal = self.marginal
-        trace_m: Tensor = marginal["trace"]
+        trace_m: Tensor = marginal["trace"]  # b n+1 n+1 tgtnt srcnt
         term_m: Tensor = marginal["term"].flatten(3)
         # to avoid some trivial corner cases.
         if seq_len >= 3:
@@ -443,11 +469,11 @@ def backtrack(p, i, j):
 
 @torch.no_grad()
 def _cky_zero_order_ngram(pt_marginals, marginals, lens):
-    # pt_marginals: bsz, n+1, n+1
-    # marginals: bsz, n+1, n+1
+    # term: b, n, max_width
+    # trace: b, n+1, n+1
     N = marginals.shape[-1]
     s = marginals.new_full(marginals.shape, -1e9)
-    for w in range(pt_marginals.shape[2]):
+    for w in range(min(pt_marginals.shape[2], N)):
         n = N - w - 1
         diagonal_copy_(s, pt_marginals[:, :n, w], w + 1)
     p = marginals.new_zeros(*marginals.shape, dtype=torch.long)

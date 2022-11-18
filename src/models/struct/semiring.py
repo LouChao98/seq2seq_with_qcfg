@@ -96,6 +96,56 @@ class MaxSemiring(LogSemiring):
         raise NotImplementedError
 
 
+class _ST(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, logits, dim):
+        out = torch.nn.functional.one_hot(logits.max(-1)[1], dim)
+        out = out.type_as(logits)
+        ctx.save_for_backward(logits, out)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        logits, out = ctx.saved_tensors
+        with torch.enable_grad():
+            ret = torch.autograd.grad(logits.softmax(-1), logits, out * grad_output)[0]
+        return ret, None
+
+
+class _MaxST(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, dim):
+        ctx.save_for_backward(input, torch.tensor(dim))
+        return torch.max(input, dim)[0]
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        logits, dim = ctx.saved_tensors
+        grad_input = None
+        if ctx.needs_input_grad[0]:
+
+            def apply(ls):
+                out = _ST.apply(ls, ls.shape[-1])
+                return out
+
+            if dim == -1:
+                s = apply(logits)
+            else:
+                dim = dim if dim >= 0 else logits.dim() + dim
+                perm = [i for i in range(logits.dim()) if i != dim] + [dim]
+                rev_perm = [a for a, b in sorted(enumerate(perm), key=lambda a: a[1])]
+                s = apply(logits.permute(perm)).permute(rev_perm)
+
+            grad_input = grad_output.unsqueeze(dim).mul(s)
+        return grad_input, None
+
+
+class MaxSTSemiring(LogSemiring):
+    @staticmethod
+    def sum(a, dim):
+        return _MaxST.apply(a, dim)
+
+
 class EntropySemiring(SemiringBase):
     zero = torch.tensor([-1e9, 0.0])
     one = torch.tensor([0.0, 0.0])

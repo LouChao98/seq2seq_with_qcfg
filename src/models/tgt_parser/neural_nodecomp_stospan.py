@@ -92,7 +92,7 @@ class NeuralNoDecompStoSpanTgtParser(NeuralNoDecompTgtParser):
             mask = self.rule_hard_constraint.get_mask(*common)
             rules[~mask] = self.neg_huge
 
-        rules = rules.flatten(2).log_softmax(-1).clone()
+        rules = self.normalizer(rules.flatten(2), dim=-1).clone()
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
 
         if self.rule_reweight_constraint is not None:

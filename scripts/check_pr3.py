@@ -9,9 +9,8 @@ from torch_struct.distributions import SentCFG
 
 from src.models.posterior_regularization.general import NeqPTImpl2
 from src.models.posterior_regularization.pr import compute_pr
+from src.models.struct.no_decomp import NoDecomp
 from src.models.tgt_parser.base import TgtParserPrediction
-from src.models.tgt_parser.struct3.no_decomp import NoDecomp
-from src.models.tgt_parser.struct.pcfg import PCFG
 from src.utils.fn import spans2tree
 
 pl.seed_everything(2)
