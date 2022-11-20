@@ -27,8 +27,9 @@ class UngroundedPRLineSearchSolver:
     rbound: float = 1e3
     num_point: int = 16
     num_iter: int = 3
+    ignore_failure: bool = True
 
-    def __call__(self, pred: TgtParserPrediction, constraint_feature):
+    def __call__(self, pred: TgtParserPrediction, constraint_feature, get_dist=False):
         cparams = apply_to_nested_tensor(pred.posterior_params, lambda x: x.detach())
         if cparams[self.field].ndim != constraint_feature.ndim:
             # TODO: REMOVE DANGEROUS ASSUMPTION
@@ -40,12 +41,14 @@ class UngroundedPRLineSearchSolver:
                 cparams[self.field], constraint_feature, lambdas, pred.dist.is_log_param(self.field)
             )
             dist = pred.dist.spawn(params=cparams)
-            ce = dist.cross_entropy(pred.dist, fix_left=True)
         else:
-            cparams[self.field][constraint_feature > 0.1] = -1e9
+            p = cparams[self.field].clone()
+            p[constraint_feature > 0.1] = -1e9
+            cparams[self.field] = p
             dist = pred.dist.spawn(params=cparams)
-            ce = dist.cross_entropy(pred.dist, fix_left=True)
-        return ce
+        if get_dist:
+            return dist
+        return dist.cross_entropy(pred.dist, fix_left=True)
 
     @torch.no_grad()
     def solve(self, pred: TgtParserPrediction, constraint_feature):
@@ -84,7 +87,7 @@ class UngroundedPRLineSearchSolver:
                 target = np.asarray(target)
             argmax_i = np.argmax(target)
             if argmax_i == 0 or argmax_i == len(target) - 1:
-                if itidx == 0 and argmax_i != 0:
+                if itidx == 0 and argmax_i != 0 and not self.ignore_failure:
                     # A very small i (argmax=0) is acceptable as it means
                     # we can satisfy the constraint without effort
                     #

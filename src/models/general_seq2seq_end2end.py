@@ -13,7 +13,7 @@ from torch_scatter import scatter_mean
 from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
 
-from src.models.posterior_regularization.general import NeqNTImpl2, NeqPT, NeqPTImpl2
+from src.models.posterior_regularization.general import NeqNT, NeqPT
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.src_parser.base import SrcParserBase
 from src.models.struct.semiring import LogSemiring
@@ -140,6 +140,7 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
     def forward(self, batch):
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
         tgt_ids, tgt_lens = batch["tgt_ids"], batch["tgt_lens"]
+        extra_scores = {"observed_mask": batch.get("src_masks")}
         observed = {
             "x": tgt_ids,
             "lengths": tgt_lens,
@@ -150,12 +151,12 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
         logging_vals = {}
 
         with self.profiler.profile("compute_src_nll_and_sampling"):
-            dist = self.parser(src_ids, src_lens)
+            dist = self.parser(src_ids, src_lens, extra_scores=extra_scores)
             if self.hparams.method == "gumbel":
                 span_indicator = dist.gumbel_sample_one(1.0)
             else:
                 span_indicator = dist.argmax_st()
-            src_nll = dist.nll
+            src_loss = src_nll = dist.nll
 
         with self.profiler.profile("src_encoding"):
             seq_h, span_h = self.encode(batch)
@@ -163,25 +164,27 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
         with self.profiler.profile("compute_tgt_nll"):
             tgt_pred = self.decoder(seq_h, span_h, span_indicator, src_lens)
             tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-            tgt_nll = tgt_pred.dist.nll
+            tgt_loss = tgt_nll = tgt_pred.dist.nll
 
-        soft_constraint_loss = 0
-        raml_loss = 0
+        soft_constraint_pr_loss = 0
         noisy_span_loss = 0
         pt_prior_loss = 0
         src_entropy_reg = 0
         tgt_entropy_reg = 0
         pr_neq_pt_reg = 0
         pr_neq_nt_reg = 0
+        length_calibrate_term = 0
         if self.training:
-            if (e := self.hparams.soft_constraint_loss_rl) > 0:
-                soft_constraint_loss = self.decoder.get_soft_constraint_loss(tgt_pred)
-                logging_vals["tgt_reg"] = soft_constraint_loss
-                soft_constraint_loss = e * soft_constraint_loss
-            if (e := self.hparams.soft_constraint_loss_raml) > 0:
-                raml_loss = self.decoder.get_raml_loss(tgt_pred)
-                logging_vals["tgt_reg"] = raml_loss
-                raml_loss = e * raml_loss
+            if self.hparams.soft_constraint_loss_rl:
+                tgt_loss = self.decoder.get_rl_loss(tgt_pred)
+            if self.hparams.soft_constraint_loss_raml:
+                tgt_loss = self.decoder.get_raml_loss(tgt_pred)
+
+            if (e := self.hparams.soft_constraint_loss_pr) > 0:
+                soft_constraint_pr_loss = self.decoder.get_soft_constraint_loss(tgt_pred)
+                logging_vals["soft_constraint_pr"] = soft_constraint_pr_loss
+                soft_constraint_pr_loss = e * soft_constraint_pr_loss
+
             if (e := self.hparams.parser_entropy_reg) > 0:
                 entropy = self.parser.entropy(src_ids, src_lens, dist)
                 src_entropy_reg = -e * entropy
@@ -190,23 +193,16 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
                 entropy = tgt_pred.dist.entropy
                 tgt_entropy_reg = -e * entropy
                 logging_vals["tgt_entropy"] = entropy
+
             if (e := self.hparams.pr_pt_neq_reg) > 0:
-                if self.hparams.pr_pt_neq_reg_type == 0:
-                    pr_neq_pt_reg = compute_pr(tgt_pred, None, NeqPT(e))
-                    logging_vals["pr_neq_pt"] = pr_neq_pt_reg
-                else:
-                    l = compute_pr(tgt_pred, None, NeqPTImpl2())
-                    logging_vals["pr_neq_pt"] = l
-                    pr_neq_pt_reg = l * e
+                l = compute_pr(tgt_pred, None, NeqPT())
+                logging_vals["pr_neq_pt"] = l
+                pr_neq_pt_reg = l * e
             if (e := self.hparams.pr_nt_neq_reg) > 0:
-                if self.hparams.pr_nt_neq_reg_type == 0:
-                    raise NotImplementedError
-                    pr_neq_nt_reg = compute_pr(tgt_pred, None, NeqNt(e))
-                    logging_vals["pr_neq_nt"] = pr_neq_nt_reg
-                else:
-                    l = compute_pr(tgt_pred, None, NeqNTImpl2())
-                    logging_vals["pr_neq_nt"] = l
-                    pr_neq_nt_reg = l * e
+                l = compute_pr(tgt_pred, None, NeqNT())
+                logging_vals["pr_neq_nt"] = l
+                pr_neq_nt_reg = l * e
+
             if (prior_alignment := batch.get("prior_alignment")) is not None:
                 prior_alignment = prior_alignment.transpose(1, 2)
                 logZ, trace = tgt_pred.dist.inside(tgt_pred.dist.params, LogSemiring, use_reentrant=False)
@@ -216,15 +212,19 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
                 pt_prior_loss = -(prior_alignment * term_m.clamp(1e-9).log()).sum((1, 2))
                 logging_vals["pt_prior_ce"] = pt_prior_loss
 
+            if self.hparams.length_calibrate:
+                length_calibrate_term = -tgt_pred.dist.partition_at_length(tgt_pred.params, tgt_lens)
+
         return {
-            "decoder": tgt_nll
-            + soft_constraint_loss
-            + raml_loss
+            "decoder": tgt_loss
+            + length_calibrate_term
+            + soft_constraint_pr_loss
             + tgt_entropy_reg
             + noisy_span_loss
             + pr_neq_pt_reg
+            + pr_neq_nt_reg
             + pt_prior_loss,
-            "encoder": (torch.zeros_like(src_nll) if self.hparams.no_src_nll else src_nll) + src_entropy_reg,
+            "encoder": (torch.zeros_like(src_loss) if self.hparams.no_src_nll else src_loss) + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
             "runtime": {"seq_encoded": seq_h, "span_encoded": span_h},

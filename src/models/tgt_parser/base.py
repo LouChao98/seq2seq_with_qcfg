@@ -228,9 +228,16 @@ class TgtParserBase(nn.Module):
         constraint_feature = self.rule_soft_constraint.get_feature_from_pred(pred)
         return self.rule_soft_constraint_solver(pred, constraint_feature)
 
+    def get_rl_loss(self, pred: TgtParserPrediction, ent_reg):
+        assert ent_reg > 0
+        # log pow(partition, 1/(len-1))
+        partition = pred.dist.partition / (torch.tensor(pred.lengths, device=pred.device) - 1)
+        reward = self.rule_soft_constraint.get_weight_from_pred(pred)
+        reward = reward + partition[:, None, None, None] - np.log(ent_reg)
+        dist = pred.dist.spawn(params={"rule": pred.dist.params["rule"] + reward})
+        return dist.nll
+
     def get_raml_loss(self, pred: TgtParserPrediction):
-        # NOTE: this is not the complete raml loss.
-        # I omit a term "nll" because this term is always added by other code.
         reward = self.rule_soft_constraint.get_weight_from_pred(pred)
         dist = pred.dist.spawn(
             params={
@@ -239,7 +246,7 @@ class TgtParserBase(nn.Module):
                 "root": torch.where(pred.dist.params["root"] > -1e8, 0.0, -1e9),
             }
         )
-        return dist.cross_entropy(pred.dist, fix_left=True)
+        return dist.cross_entropy(pred.dist, fix_left=True) + pred.dist.nll
 
     def get_noisy_span_loss(self, node_features, node_spans, num_or_ratio, observes):
         noisy_features, noisy_spans = [], []

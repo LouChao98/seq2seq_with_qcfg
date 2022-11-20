@@ -17,7 +17,7 @@ from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
 
 from src.models.base import ModelBase
-from src.models.posterior_regularization.general import NeqNTImpl2, NeqPT, NeqPTImpl2
+from src.models.posterior_regularization.general import NeqNT, NeqPT
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.src_parser.base import SrcParserBase
 from src.models.struct.semiring import LogSemiring
@@ -56,19 +56,21 @@ class GeneralSeq2SeqModule(ModelBase):
         real_val_every_n_epochs=5,
         export_detailed_prediction=True,
         # extension
+        warmup_pcfg=0,
+        warmup_qcfg=0,
         length_calibrate=False,
         pr_pt_neq_reg=0.0,
-        pr_pt_neq_reg_type=0,
-        pr_nt_neq_reg=0,
-        pr_nt_neq_reg_type=1,
+        pr_nt_neq_reg=0.0,
         noisy_spans_reg=0.0,
         noisy_spans_num=0.0,
         parser_entropy_reg=0.0,
         decoder_entropy_reg=0.0,
-        soft_constraint_loss_rl=0.0,
-        soft_constraint_loss_raml=0.0,
+        soft_constraint_loss_pr=0.0,
+        soft_constraint_loss_rl=False,
+        soft_constraint_loss_raml=False,
     ):
         # real_val_every_n_epochs = 1
+        assert warmup_pcfg <= warmup_qcfg
         super().__init__()
         self.save_hyperparameters(logger=False)
 
@@ -189,7 +191,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
         with self.profiler.profile("compute_src_nll_and_sampling"):
             dist = self.parser(src_ids, src_lens, extra_scores=extra_scores)
-            src_nll = dist.nll
+            src_loss = src_nll = dist.nll
             src_event, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
             src_spans = src_event["span"]
 
@@ -198,10 +200,13 @@ class GeneralSeq2SeqModule(ModelBase):
             # span labels are discarded (set to -1)
             node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
+        if self.current_epoch < self.hparams.warmup_pcfg:
+            node_features = apply_to_nested_tensor(node_features, lambda x: torch.zeros_like(x))
+
         with self.profiler.profile("compute_tgt_nll"):
             tgt_pred = self.decoder(node_features, node_spans)
             tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-            tgt_nll = tgt_pred.dist.nll
+            tgt_loss = tgt_nll = tgt_pred.dist.nll
 
         with self.profiler.profile("reward"), torch.no_grad():
             src_spans_argmax = self.parser.argmax(src_ids, src_lens, dist=dist)
@@ -214,8 +219,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
         objective = src_logprob * neg_reward
 
-        soft_constraint_loss = 0
-        raml_loss = 0
+        soft_constraint_pr_loss = 0
         noisy_span_loss = 0
         pt_prior_loss = 0
         src_entropy_reg = 0
@@ -223,15 +227,18 @@ class GeneralSeq2SeqModule(ModelBase):
         pr_neq_pt_reg = 0
         pr_neq_nt_reg = 0
         length_calibrate_term = 0
-        if self.training:
-            if (e := self.hparams.soft_constraint_loss_rl) > 0:
-                soft_constraint_loss = self.decoder.get_soft_constraint_loss(tgt_pred)
-                logging_vals["tgt_reg"] = soft_constraint_loss
-                soft_constraint_loss = e * soft_constraint_loss
-            if (e := self.hparams.soft_constraint_loss_raml) > 0:
-                raml_loss = self.decoder.get_raml_loss(tgt_pred)
-                logging_vals["tgt_reg"] = raml_loss
-                raml_loss = e * raml_loss
+
+        if self.training and self.current_epoch >= self.hparams.warmup_qcfg:
+            if self.hparams.soft_constraint_loss_rl:
+                tgt_loss = self.decoder.get_rl_loss(tgt_pred, self.hparams.decoder_entropy_reg)
+            if self.hparams.soft_constraint_loss_raml:
+                tgt_loss = self.decoder.get_raml_loss(tgt_pred)
+
+            if (e := self.hparams.soft_constraint_loss_pr) > 0:
+                soft_constraint_pr_loss = self.decoder.get_soft_constraint_loss(tgt_pred)
+                logging_vals["soft_constraint_pr"] = soft_constraint_pr_loss
+                soft_constraint_pr_loss = e * soft_constraint_pr_loss
+
             if (e := self.hparams.parser_entropy_reg) > 0:
                 entropy = self.parser.entropy(src_ids, src_lens, dist)
                 src_entropy_reg = -e * entropy
@@ -240,29 +247,23 @@ class GeneralSeq2SeqModule(ModelBase):
                 entropy = tgt_pred.dist.entropy
                 tgt_entropy_reg = -e * entropy
                 logging_vals["tgt_entropy"] = entropy
+
             if (e := self.hparams.noisy_spans_reg) > 0:
                 l = self.decoder.get_noisy_span_loss(
                     node_features, node_spans, self.hparams.noisy_spans_num, observed
                 )
                 logging_vals["noisy_spans"] = l
                 noisy_span_loss = e * l
+
             if (e := self.hparams.pr_pt_neq_reg) > 0:
-                if self.hparams.pr_pt_neq_reg_type == 0:
-                    pr_neq_pt_reg = compute_pr(tgt_pred, None, NeqPT(e))
-                    logging_vals["pr_neq_pt"] = pr_neq_pt_reg
-                else:
-                    l = compute_pr(tgt_pred, None, NeqPTImpl2())
-                    logging_vals["pr_neq_pt"] = l
-                    pr_neq_pt_reg = l * e
+                l = compute_pr(tgt_pred, None, NeqPT())
+                logging_vals["pr_neq_pt"] = l
+                pr_neq_pt_reg = l * e
             if (e := self.hparams.pr_nt_neq_reg) > 0:
-                if self.hparams.pr_nt_neq_reg_type == 0:
-                    raise NotImplementedError
-                    pr_neq_nt_reg = compute_pr(tgt_pred, None, NeqNt(e))
-                    logging_vals["pr_neq_nt"] = pr_neq_nt_reg
-                else:
-                    l = compute_pr(tgt_pred, None, NeqNTImpl2())
-                    logging_vals["pr_neq_nt"] = l
-                    pr_neq_nt_reg = l * e
+                l = compute_pr(tgt_pred, None, NeqNT())
+                logging_vals["pr_neq_nt"] = l
+                pr_neq_nt_reg = l * e
+
             if (prior_alignment := batch.get("prior_alignment")) is not None:
                 prior_alignment = prior_alignment.transpose(1, 2)
                 logZ, trace = tgt_pred.dist.inside(tgt_pred.dist.params, LogSemiring, use_reentrant=False)
@@ -271,18 +272,20 @@ class GeneralSeq2SeqModule(ModelBase):
                 term_m = term_m.sum(2)[:, : prior_alignment.shape[1], : prior_alignment.shape[2]]
                 pt_prior_loss = -(prior_alignment * term_m.clamp(1e-9).log()).sum((1, 2))
                 logging_vals["pt_prior_ce"] = pt_prior_loss
+
             if self.hparams.length_calibrate:
                 length_calibrate_term = -tgt_pred.dist.partition_at_length(tgt_pred.params, tgt_lens)
+
         return {
-            "decoder": tgt_nll
+            "decoder": tgt_loss
             + length_calibrate_term
-            + soft_constraint_loss
-            + raml_loss
+            + soft_constraint_pr_loss
             + tgt_entropy_reg
             + noisy_span_loss
             + pr_neq_pt_reg
+            + pr_neq_nt_reg
             + pt_prior_loss,
-            "encoder": src_nll + objective + src_entropy_reg,
+            "encoder": src_loss + objective + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
             "runtime": {"seq_encoded": x},
@@ -319,6 +322,12 @@ class GeneralSeq2SeqModule(ModelBase):
 
         tgt_pred = self.decoder(node_features, node_spans)
         tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
+
+        # # visualize pr constrained dist
+        # constraint_feature = self.decoder.rule_soft_constraint.get_feature_from_pred(tgt_pred)
+        # dist = self.decoder.rule_soft_constraint_solver(tgt_pred, constraint_feature, get_dist=True)
+        # tgt_pred.dist = dist
+
         tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(tgt_pred)
         tgt_annotated = []
         for snt, tgt_spans_inst in zip(batch["tgt"], tgt_spans):

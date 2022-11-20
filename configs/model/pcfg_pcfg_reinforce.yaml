@@ -9,6 +9,16 @@ _target_: src.models.general_seq2seq.GeneralSeq2SeqModule
 _recursive_: false
 
 param_initializer: "xavier_uniform"
+length_calibrate: false
+pr_pt_neq_reg: 0
+pr_nt_neq_reg: 0
+noisy_spans_reg: 0
+noisy_spans_num: 0
+parser_entropy_reg: 0
+decoder_entropy_reg: 0
+soft_constraint_loss_pr: 0
+soft_constraint_loss_rl: false
+soft_constraint_loss_raml: false
 
 embedding:
   _target_: torch.nn.Embedding
