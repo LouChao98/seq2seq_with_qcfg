@@ -2,63 +2,29 @@ import logging
 from typing import Any, List, Optional
 
 import torch
-import torch.nn.functional as F
 from hydra.utils import instantiate
 from pytorch_memlab import profile_every
 from torch.autograd import grad
-from torch.nn.utils.rnn import pad_sequence
-from torch_scatter import scatter_mean
 
 from src.models.posterior_regularization.general import NeqNT, NeqPT
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.struct.semiring import LogSemiring
-from src.utils.fn import annotate_snt_with_brackets, apply_to_nested_tensor, report_ids_when_err
+from src.utils.fn import apply_to_nested_tensor, report_ids_when_err
 
 from .general_seq2seq import GeneralSeq2SeqModule
 
 log = logging.getLogger(__file__)
 
 
-class GeneralSeq2SeqNTAlign(GeneralSeq2SeqModule):
-    """A module for general seq2seq tasks.
-
-    * support pretrained models
-    * encoders
-    * custom test metric
-    """
-
-    def __init__(self, alignment_module=None, **kwargs):
+class GeneralSeq2SeqAutoencoderModule(GeneralSeq2SeqModule):
+    def __init__(self, reconstructor=None, **kwargs):
         super().__init__(**kwargs)
         self.save_hyperparameters(logger=False)
 
     def setup_patch(self, stage: Optional[str] = None, datamodule=None):
-        # allow submodule changing submodules before loading checkpoint
-        self.alignment_module = instantiate(self.hparams.alignment_module)
-
-    def encode(self, batch, get_emb=False):
-        src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        x = []
-        if self.embedding is not None:
-            h = self.embedding(src_ids)
-            x.append(h)
-        if self.pretrained is not None:
-            h = self.pretrained(**batch["transformer_inputs"])[0]
-            if len(h) > len(src_ids):
-                h = h[: len(src_ids)]
-            out = torch.zeros(
-                src_ids.shape[0],
-                src_ids.shape[1] + 1,
-                h.shape[-1],
-                device=src_ids.device,
-            )
-            scatter_mean(h, batch["transformer_offset"], 1, out=out)
-            out = out[:, 1:]
-            x.append(out)
-        x = torch.cat(x, dim=-1) if len(x) > 1 else x[0]
-        encoded = self.encoder(x, src_lens)
-        if get_emb:
-            return x, encoded
-        return encoded
+        self.reconstructor = instantiate(
+            self.hparams.reconstructor, datamodule=datamodule  # , src_enc_dim=self.tree_encoder.get_output_dim()
+        )
 
     @report_ids_when_err
     @profile_every(5, enable=False)
@@ -71,6 +37,7 @@ class GeneralSeq2SeqNTAlign(GeneralSeq2SeqModule):
             "lengths": tgt_lens,
             "pt_copy": batch.get("copy_token"),
             "nt_copy": batch.get("copy_phrase"),
+            "pt_align": batch.get("align_token"),
             "observed_mask": batch.get("tgt_masks"),
         }
         logging_vals = {}
@@ -82,7 +49,7 @@ class GeneralSeq2SeqNTAlign(GeneralSeq2SeqModule):
             src_spans = src_event["span"]
 
         with self.profiler.profile("src_encoding"):
-            emb, x = self.encode(batch, get_emb=True)
+            x = self.encode(batch)
             # span labels are discarded (set to -1)
             node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
@@ -90,8 +57,11 @@ class GeneralSeq2SeqNTAlign(GeneralSeq2SeqModule):
             node_features = apply_to_nested_tensor(node_features, lambda x: torch.zeros_like(x))
 
         with self.profiler.profile("compute_tgt_nll"):
-            tgt_pred = self.decoder(node_features, node_spans)
-            tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
+            tgt_pred_orig = self.decoder(node_features, node_spans)
+            use_copy, self.decoder.use_copy = self.decoder.use_copy, False
+            tgt_pred_uc = self.decoder.observe_x(tgt_pred_orig, tgt_ids, tgt_lens, inplace=False)
+            self.decoder.use_copy = use_copy
+            tgt_pred = self.decoder.observe_x(tgt_pred_orig, **observed, inplace=False)
             tgt_loss = tgt_nll = tgt_pred.dist.nll
 
         if self.current_epoch < self.hparams.warmup_pcfg:
@@ -111,14 +81,18 @@ class GeneralSeq2SeqNTAlign(GeneralSeq2SeqModule):
         soft_constraint_pr_loss = 0
         noisy_span_loss = 0
         pt_prior_loss = 0
-        nt_prior_loss = 0
         src_entropy_reg = 0
         tgt_entropy_reg = 0
         pr_neq_pt_reg = 0
         pr_neq_nt_reg = 0
         length_calibrate_term = 0
+        ae_loss = 0
 
         if self.training and self.current_epoch >= self.hparams.warmup_qcfg:
+            ae_loss, to_log = self.reconstructor(batch, tgt_pred_uc)
+            logging_vals["ae"] = ae_loss
+            logging_vals.update(to_log)
+            # print(to_log['vae_beta'])
             if self.hparams.soft_constraint_loss_rl:
                 tgt_loss = self.decoder.get_rl_loss(tgt_pred, self.hparams.decoder_entropy_reg)
             if self.hparams.soft_constraint_loss_raml:
@@ -162,38 +136,9 @@ class GeneralSeq2SeqNTAlign(GeneralSeq2SeqModule):
                 term_m = term_m.sum(2)[:, : prior_alignment.shape[1], : prior_alignment.shape[2]]
                 pt_prior_loss = -(prior_alignment * term_m.clamp(1e-9).log()).sum((1, 2))
                 logging_vals["pt_prior_ce"] = pt_prior_loss
+
             if self.hparams.length_calibrate:
                 length_calibrate_term = -tgt_pred.dist.partition_at_length(tgt_pred.params, tgt_lens)
-            mterm, mtrace = tgt_pred.dist.marginal_with_grad
-            # b n n tgt_nt src_nt
-            mtrace = mtrace[:, 1:, :-1].sum(3)
-            normalizer = mtrace.sum(3, keepdim=True)
-            mtrace = mtrace / (normalizer + 1e-9)
-
-            tgt_h = self.pretrained(**batch["tgt_transformer_inputs"])[0]
-            tgt_out = torch.zeros(
-                tgt_ids.shape[0],
-                tgt_ids.shape[1] + 2,  # 1 more for right boundary
-                tgt_h.shape[-1],
-                device=src_ids.device,
-            )
-            scatter_mean(tgt_h, batch["tgt_transformer_offset"], 1, out=tgt_out)
-            tgt_x = tgt_out[:, 1:]
-            # tgt_x = self.encoder(tgt_x, tgt_lens)
-
-            with torch.no_grad():
-                # TODO vectorization
-                # fmt: off
-                src_spans_feats = pad_sequence([
-                    torch.stack([emb[bidx, span[0]] - (0 if span[1] == src_lens[bidx] else emb[bidx, span[1]]) for span in spans], dim=0)
-                    for bidx, spans in enumerate(tgt_pred.nt_nodes)
-                ], batch_first=True)
-                # fmt: on
-
-                tgt_spans_feats = tgt_x[:, :-1, None] - tgt_x[:, None, 1:]
-                score = F.cosine_similarity(src_spans_feats[:, None, None, :], tgt_spans_feats[:, :, :, None], dim=4)
-            nt_prior_loss = -((score * mtrace.clamp(1e-9).log()) * mtrace.detach()).sum((1, 2, 3))
-            logging_vals["nt_prior_ce"] = nt_prior_loss
 
         return {
             "decoder": tgt_loss
@@ -204,7 +149,7 @@ class GeneralSeq2SeqNTAlign(GeneralSeq2SeqModule):
             + pr_neq_pt_reg
             + pr_neq_nt_reg
             + pt_prior_loss
-            + nt_prior_loss,
+            + ae_loss,
             "encoder": src_loss + objective + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,

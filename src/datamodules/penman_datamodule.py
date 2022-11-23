@@ -81,9 +81,9 @@ class PenmanDataModule(_DataModule):
         if (d := _num_orig_Val - len(data_val)) > 0:
             logger.warning(f"Dropping {d} samples in ValSet.")
 
-        data_train = self.process_all_copy(data_train)
-        data_val = self.process_all_copy(data_val)
-        data_test = self.process_all_copy(data_test)
+        data_train = self.process_pair(data_train)
+        data_val = self.process_pair(data_val)
+        data_test = self.process_pair(data_test)
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
 
@@ -158,7 +158,7 @@ class PenmanDataModule(_DataModule):
             masks.append(torch.tensor([span_mask[i, i + w + 1] for i in range(length - w)]))
         return masks
 
-    def process_all_copy(self, data):
+    def process_pair(self, data):
         # none = do nothing
         # token = token
         # phrase = token + phrase

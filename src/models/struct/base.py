@@ -13,7 +13,7 @@ from torch.distributions.utils import lazy_property
 from ._fn import ns_diagonal as diagonal
 from ._fn import ns_diagonal_copy_ as diagonal_copy_
 from ._fn import ns_stripe as stripe
-from .semiring import CrossEntropySemiring, EntropySemiring, LogSemiring, MaxSemiring, SampledSemiring
+from .semiring import CrossEntropySemiring, EntropySemiring, KLSemiring, LogSemiring, MaxSemiring, SampledSemiring
 
 log = logging.getLogger(__file__)
 _OK, _SONMASK, _REACHLIMIT = 0, 1, 2
@@ -186,8 +186,12 @@ class DecompBase:
             sparams = self.params
         return self.inside((sparams, other.params), CrossEntropySemiring, False)[0]
 
-    def kl(self, other):
-        ...
+    def kl(self, other: "DecompBase", fix_left=False):
+        if fix_left:
+            sparams = {k: v.detach() if isinstance(v, Tensor) else v for k, v in self.params.items()}
+        else:
+            sparams = self.params
+        return self.inside((sparams, other.params), KLSemiring, False)[0]
 
     def sample_one(self, need_event=False, need_span=True):
         params = {

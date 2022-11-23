@@ -46,7 +46,6 @@ class GeneralGNN(torch.nn.Module):
                     edges.append((parent, i))
             graph = Data(torch.stack(vertices, 0), torch.tensor(edges).T)
             graph.node_label = torch.tensor([(l, r) for l, r, *_ in spans_item])
-            self.draw_graph(graph)
             graphs.append(graph)
 
         return (
@@ -76,6 +75,49 @@ class GeneralGNN(torch.nn.Module):
         pos = {int(k): v for k, v in pos.items()}
         nx.draw(graph, labels=labels, pos=pos)
         plt.savefig("graph.png")
+
+
+class GeneralGNN2(GeneralGNN):
+    def forward(self, features):
+        # build graph
+        batch, meta = self.build_gnn_input(features)
+        x = self.nn(batch.x, batch.edge_index)
+        # split
+        splitted = self.postprocess_gnn_output(x, meta)
+        if self.global_pooling is not None:
+            global_features = self.global_pooling(x, batch.batch, edge_index=batch.edge_index)
+            splitted = [localf + globalf.unsqueeze(0) for localf, globalf in zip(splitted, global_features)]
+        return splitted, meta["spans"]
+
+    def build_gnn_input(self, features):
+        # spans: batch x nspans x 2
+        # x: batch x seq_len x hidden
+
+        spans, parents = [], []
+        graphs = []
+        for bidx, features_item in enumerate(features):
+            vertices, edges = [], []
+            spans_item = list(features_item.keys())
+            parents_item = spans2tree(spans_item)
+            spans.append(spans_item)
+            parents.append(parents_item)
+            for i, (span, parent) in enumerate(zip(spans_item, parents_item)):
+                vertices.append(features_item[span])
+                if parent != -1:
+                    edges.append((i, parent))
+                    edges.append((parent, i))
+            graph = Data(torch.stack(vertices, 0), torch.tensor(edges).T)
+            graph.node_label = torch.tensor([(l, r) for l, r, *_ in spans_item])
+            graphs.append(graph)
+
+        return (
+            Batch.from_data_list(graphs).to(x.device),
+            {
+                "spans": spans,
+                "parents": parents,
+                "length": [len(item) for item in spans],
+            },
+        )
 
 
 if __name__ == "__main__":

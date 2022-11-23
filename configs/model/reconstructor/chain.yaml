@@ -1,0 +1,7 @@
+# @package model.reconstructor
+
+_target_: src.models.reconstructor.chain.ChainReconstructor
+_recursive_: false
+
+lm:
+  _target_: src.models.components.rnn_lm.RNNModel

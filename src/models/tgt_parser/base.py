@@ -46,6 +46,9 @@ class TgtParserPrediction:
     params: Dict[str, torch.Tensor]
     device: torch.device
 
+    nt_features: torch.Tensor = None
+    pt_features: torch.Tensor = None
+
     # parsing
     posterior_params: Optional[Dict[str, torch.Tensor]] = None
     lengths: Optional[List[int]] = None
@@ -363,7 +366,7 @@ class TgtParserBase(nn.Module):
                     added.add(key)
                 pair = {"id": len(expanded_batch), "src": src_item, "tgt": expanded}
                 expanded_batch.append(pair)
-            expanded_batch = self.datamodule.process_all_copy(expanded_batch)
+            expanded_batch = self.datamodule.process_pair(expanded_batch)
             expanded_batch = self.datamodule.apply_vocab(expanded_batch)
             preds_.append(expanded_batch)
         return preds_
@@ -371,17 +374,17 @@ class TgtParserBase(nn.Module):
     def expand_preds_not_using_copy(self, src, preds):
         preds_ = []
         for batch, src_item in zip(preds, src):
-            expanded_batch = [item[0] for item in batch]
-            expanded_batch = self.datamodule.tgt_vocab.convert_ids_to_tokens(expanded_batch)
+            batch = [item[0] for item in batch]
+            batch = self.datamodule.tgt_vocab.convert_ids_to_tokens(batch)
             expanded_batch = []
             added = set()
-            for i, item in enumerate(expanded_batch):
+            for item in batch:
                 if (key := " ".join(item)) in added:
                     continue
                 else:
                     added.add(key)
-                expanded_batch.append({"id": i, "src": src_item, "tgt": item})
-            expanded_batch = self.datamodule.process_all_copy(expanded_batch)
+                expanded_batch.append({"id": len(expanded_batch), "src": src_item, "tgt": item})
+            expanded_batch = self.datamodule.process_pair(expanded_batch)
             expanded_batch = self.datamodule.apply_vocab(expanded_batch)
             preds_.append(expanded_batch)
         return preds_
@@ -575,6 +578,7 @@ class TgtParserBase(nn.Module):
         nt: int,
         pt_copy=None,
         nt_copy=None,
+        pt_align=None,
         observed_mask=None,
         prior_alignment=None,
     ):
@@ -588,8 +592,13 @@ class TgtParserBase(nn.Module):
         add_scores = None
 
         if self.use_copy:
+            # TODO mask COPY if pt_copy and nt_copy is not given.
             if pt_copy is not None:
                 term = self.build_pt_copy_constraint(term, pt_copy)
+            if pt_align is not None:
+                # TODO refactor this
+                term = self.build_pt_align_constraint(term, pt_align)
+
             if nt_copy is not None:
                 constraint_scores = self.build_nt_copy_constraint(
                     batch_size,
@@ -626,6 +635,15 @@ class TgtParserBase(nn.Module):
         copy_m = constraint[:, : terms.shape[-1]].transpose(1, 2)
         terms[:, :, -1].fill_(self.neg_huge)
         terms[:, :, -1, : copy_m.shape[2]] = self.neg_huge * ~copy_m
+        terms = terms.view(batch_size, n, -1)
+        return terms
+
+    def build_pt_align_constraint(self, terms, constraint):
+        batch_size, n = terms.shape[:2]
+        terms = terms.view(batch_size, n, self.pt_states, -1)
+        align_m = constraint[:, : terms.shape[-1]].transpose(1, 2)
+        value = align_m.any(2, keepdim=True).float() * (1 - align_m.float()) * self.neg_huge
+        terms[:, :, :-1, : align_m.shape[2]] += value.unsqueeze(2)
         terms = terms.view(batch_size, n, -1)
         return terms
 

@@ -71,6 +71,7 @@ class GeneralSeq2SeqModule(ModelBase):
     ):
         # real_val_every_n_epochs = 1
         assert warmup_pcfg <= warmup_qcfg
+        self.warmup = warmup_pcfg
         super().__init__()
         self.save_hyperparameters(logger=False)
 
@@ -118,7 +119,7 @@ class GeneralSeq2SeqModule(ModelBase):
         self.val_best_metric = MinMetric()
         self.test_metric: Metric = instantiate(self.hparams.test_metric)
 
-        self.setup_patch(stage, datamodule)
+        self.setup_patch(stage, self.datamodule)
 
         if self.hparams.load_from_checkpoint is not None:
             state_dict = torch.load(self.hparams.load_from_checkpoint, map_location="cpu")
@@ -185,6 +186,7 @@ class GeneralSeq2SeqModule(ModelBase):
             "lengths": tgt_lens,
             "pt_copy": batch.get("copy_token"),
             "nt_copy": batch.get("copy_phrase"),
+            "pt_align": batch.get("align_token"),
             "observed_mask": batch.get("tgt_masks"),
         }
         logging_vals = {}
@@ -208,16 +210,19 @@ class GeneralSeq2SeqModule(ModelBase):
             tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
             tgt_loss = tgt_nll = tgt_pred.dist.nll
 
-        with self.profiler.profile("reward"), torch.no_grad():
-            src_spans_argmax = self.parser.argmax(src_ids, src_lens, dist=dist)
-            node_features_argmax, node_spans_argmax = self.tree_encoder(x, src_lens, spans=src_spans_argmax)
-            tgt_argmax_pred = self.decoder(node_features_argmax, node_spans_argmax)
-            tgt_argmax_pred = self.decoder.observe_x(tgt_argmax_pred, **observed)
-            tgt_nll_argmax = tgt_argmax_pred.dist.nll
-            neg_reward = (tgt_nll - tgt_nll_argmax).detach()
-            logging_vals["reward"] = -neg_reward
+        if self.current_epoch < self.hparams.warmup_pcfg:
+            objective = 0.0
+        else:
+            with self.profiler.profile("reward"), torch.no_grad():
+                src_spans_argmax = self.parser.argmax(src_ids, src_lens, dist=dist)
+                node_features_argmax, node_spans_argmax = self.tree_encoder(x, src_lens, spans=src_spans_argmax)
+                tgt_argmax_pred = self.decoder(node_features_argmax, node_spans_argmax)
+                tgt_argmax_pred = self.decoder.observe_x(tgt_argmax_pred, **observed)
+                tgt_nll_argmax = tgt_argmax_pred.dist.nll
+                neg_reward = (tgt_nll - tgt_nll_argmax).detach()
+                logging_vals["reward"] = -neg_reward
 
-        objective = src_logprob * neg_reward
+            objective = src_logprob * neg_reward
 
         soft_constraint_pr_loss = 0
         noisy_span_loss = 0
@@ -307,6 +312,7 @@ class GeneralSeq2SeqModule(ModelBase):
             "lengths": batch["tgt_lens"],
             "pt_copy": batch.get("copy_token"),
             "nt_copy": batch.get("copy_phrase"),
+            "pt_align": batch.get("align_token"),
             # "prior_alignment": batch.get("prior_alignment"),
             # "observed_mask": batch.get("tgt_masks"),
         }
@@ -319,6 +325,9 @@ class GeneralSeq2SeqModule(ModelBase):
 
         x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
+
+        if self.current_epoch < self.hparams.warmup_pcfg:
+            node_features = apply_to_nested_tensor(node_features, lambda x: torch.zeros_like(x))
 
         tgt_pred = self.decoder(node_features, node_spans)
         tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
@@ -466,13 +475,15 @@ class GeneralSeq2SeqModule(ModelBase):
         loss = loss_encoder + loss_decoder
         self.val_metric(output["tgt_nll"], batch["tgt_lens"])
 
-        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0:
-            output = self.test_step(batch, batch_idx=None)
+        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0 and self.current_epoch > self.warmup:
+            predicted = self.test_step(batch, batch_idx=None)
+        else:
+            predicted = {}
 
         # if batch_idx == 0:
         #     self.print_prediction(batch)
 
-        return {"loss": loss} | output
+        return {"loss": loss} | predicted
 
     def validation_epoch_end(self, outputs: List[Any]):
         ppl = self.val_metric.compute()  # get val accuracy from current epoch
@@ -483,7 +494,7 @@ class GeneralSeq2SeqModule(ModelBase):
         self.print("val/epoch", str(self.current_epoch + 1))
         self.print("val/ppl", str(ppl))
 
-        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0:
+        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0 and self.current_epoch > self.warmup:
             acc = self.test_metric.compute()
             self.log_dict({"val/" + k: v for k, v in acc.items()})
             self.print(acc)

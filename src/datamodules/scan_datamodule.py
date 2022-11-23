@@ -76,7 +76,7 @@ class SCANDataModule(_DataModule):
             data.append({"src": src, "tgt": tgt, "id": i})
         return data
 
-    def process_all_copy(self, data):
+    def process_pair(self, data):
         return data
 
     def build_vocab(self, data):

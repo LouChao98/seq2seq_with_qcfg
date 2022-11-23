@@ -161,6 +161,10 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
         with self.profiler.profile("src_encoding"):
             seq_h, span_h = self.encode(batch)
 
+        if self.current_epoch < self.hparams.warmup_pcfg:
+            seq_h = torch.zeros_like(seq_h)
+            span_h = torch.zeros_like(span_h)
+
         with self.profiler.profile("compute_tgt_nll"):
             tgt_pred = self.decoder(seq_h, span_h, span_indicator, src_lens)
             tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
@@ -174,7 +178,7 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
         pr_neq_pt_reg = 0
         pr_neq_nt_reg = 0
         length_calibrate_term = 0
-        if self.training:
+        if self.training and self.current_epoch >= self.hparams.warmup_qcfg:
             if self.hparams.soft_constraint_loss_rl:
                 tgt_loss = self.decoder.get_rl_loss(tgt_pred)
             if self.hparams.soft_constraint_loss_raml:

@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 import torch
 from torch_struct.distributions import SentCFG
 
-from src.models.posterior_regularization.general import NeqPTImpl2
+from src.models.posterior_regularization.general import NeqPT
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.struct.no_decomp import NoDecomp
 from src.models.tgt_parser.base import TgtParserPrediction
@@ -29,7 +29,7 @@ def enumerate_tree(i, j, nt, pt):
 
 
 def score(params, seq, span, nt):
-    s, p = spans2tree(span)
+    p = spans2tree(span)
     parent2children = defaultdict(list)
     for i, pj in enumerate(p):
         parent2children[pj].append(i)
@@ -41,15 +41,15 @@ def score(params, seq, span, nt):
             _score += params["root"][0, s[children[0]][2]]
         else:
             assert len(children) == 2
-            l = s[children[0]]
+            l = span[children[0]]
             lt = l[2] + (0 if l[0] != l[1] else nt)
-            r = s[children[1]]
+            r = span[children[1]]
             rt = r[2] + (0 if r[0] != r[1] else nt)
-            pt = s[pj][2]
+            pt = span[pj][2]
             _score += params["rule"][0, pt, lt, rt]
 
     pts = [None for _ in seq]
-    for sj in s:
+    for sj in span:
         if sj[0] == sj[1]:
             pts[sj[0]] = sj[2]
 
@@ -60,7 +60,7 @@ def score(params, seq, span, nt):
 
 
 def score2(params, seq, span, nt):
-    s, p = spans2tree(span)
+    p = spans2tree(span)
     parent2children = defaultdict(list)
     for i, pj in enumerate(p):
         parent2children[pj].append(i)
@@ -69,18 +69,18 @@ def score2(params, seq, span, nt):
     for pj, children in parent2children.items():
         if len(children) == 1:
             assert pj == -1
-            _score += params["root"][0, s[children[0]][2]]
+            _score += params["root"][0, span[children[0]][2]]
         else:
             assert len(children) == 2
-            l = s[children[0]]
+            l = span[children[0]]
             lt = l[2] + (0 if l[0] != l[1] else nt)
-            r = s[children[1]]
+            r = span[children[1]]
             rt = r[2] + (0 if r[0] != r[1] else nt)
-            pt = s[pj][2]
+            pt = span[pj][2]
             _score += params["rule"][0, pt, lt, rt]
 
     pts = [None for _ in seq]
-    for sj in s:
+    for sj in span:
         if sj[0] == sj[1]:
             pts[sj[0]] = sj[2]
 
@@ -205,7 +205,7 @@ pred.dist = NoDecomp(pred.posterior_params, pred.lengths, **pred.common())
 # print("ll3", pred.dist.partition.item())
 
 
-pr_task = NeqPTImpl2()
+pr_task = NeqPT()
 cc = pr_task.process_constraint(pred)
 
 ec = calculate_e(params_x, seq_inst, N, NT, PT, SRC_PT)

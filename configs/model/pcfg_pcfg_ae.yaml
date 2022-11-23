@@ -1,0 +1,44 @@
+defaults:
+  - encoder: yzhang_lstm
+  - parser: pcfg
+  - tree_encoder: treelstm
+  - decoder: nodecomp
+  - reconstructor: chain
+  - test_metric: bleu1234
+
+_target_: src.models.general_seq2seq_ae.GeneralSeq2SeqAutoencoderModule
+_recursive_: false
+
+param_initializer: "xavier_uniform"
+length_calibrate: false
+pr_pt_neq_reg: 0
+pr_nt_neq_reg: 0
+noisy_spans_reg: 0
+noisy_spans_num: 0
+parser_entropy_reg: 0
+decoder_entropy_reg: 0
+soft_constraint_loss_pr: 0
+soft_constraint_loss_rl: false
+soft_constraint_loss_raml: false
+
+embedding:
+  _target_: torch.nn.Embedding
+  embedding_dim: 300
+
+optimizer:
+  groups: ~
+  args:
+    _target_: torch.optim.AdamW
+    lr: 5.0e-4
+    betas: [0.75, 0.999]
+    weight_decay: 1.0e-5
+    eps: 1.0e-8
+
+scheduler:
+  ~
+  # interval: step
+  # frequency: 1
+  # monitor: val/ppl
+  # args:
+  #   _target_: src.utils.scheduler.get_exponential_lr_scheduler
+  #   gamma: 0.75**(1/10000)

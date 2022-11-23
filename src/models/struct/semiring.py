@@ -274,6 +274,78 @@ class CrossEntropySemiring(SemiringBase):
         return torch.stack([x0, x[1]], dim=0)
 
 
+class KLSemiring(SemiringBase):
+    zero = torch.tensor([-1e9, -1e9, 0.0])
+    one = torch.tensor([0.0, 0.0, 0.0])
+    size = 3
+
+    @staticmethod
+    def convert(a, b):
+        values = a.new_zeros((3,) + a.shape)
+        values[0] = a
+        values[1] = b
+        return values
+
+    @staticmethod
+    def unconvert(a):
+        return a[2]
+
+    @staticmethod
+    def mul(a, b):
+        return a + b
+
+    @staticmethod
+    def normal_space_mul(a, b):
+        # return torch.stack((a[0] * b[0], a[1] + b[1]), dim=0)
+        out = torch.empty_like(a)
+        torch.mul(a[0], b[0], out[0])
+        torch.mul(a[1], b[1], out[1])
+        torch.add(a[2], b[2], out[2])
+        return out
+
+    @staticmethod
+    def sum(a, dim):
+        dim = dim - 1 if dim > 0 else dim
+        part_p = torch.logsumexp(a[0], dim=dim)
+        part_q = torch.logsumexp(a[1], dim=dim)
+        log_sm_p = a[0] - part_p.unsqueeze(dim)
+        log_sm_q = a[1] - part_q.unsqueeze(dim)
+        sm_p = log_sm_p.exp()
+        return torch.stack(
+            (part_p, part_q, torch.sum(a[2].mul(sm_p) - log_sm_q.mul(sm_p) + log_sm_p.mul(sm_p), dim=dim))
+        )
+
+    @staticmethod
+    def normal_space_sum(a, dim):
+        dim = dim - 1 if dim > 0 else dim
+        part_p = torch.sum(a[0], dim=dim)
+        part_q = torch.sum(a[1], dim=dim)
+        sm_p = a[0] / (part_p.unsqueeze(dim) + 1e-9)
+        sm_q = a[1] / (part_q.unsqueeze(dim) + 1e-9)
+        return torch.stack(
+            (part_p, part_q, torch.sum(a[2].mul(sm_p) - sm_q.log().mul(sm_p) + sm_p.log().mul(sm_p), dim=dim))
+        )
+
+    @staticmethod
+    def to_normal_space(tlist: List[torch.Tensor], dims: List[int]):
+        raise NotImplementedError
+        max_val = [t[0, None].amax(dims) for t in tlist]
+        normalizer = torch.stack(max_val, dim=-1).max(-1)[0].squeeze(0)  # remove dim of semiring
+        shape = list(normalizer.shape) + [1] * len(dims)
+        output = []
+        for t in tlist:
+            t = t.clone()
+            t[0] = (t[0] - normalizer.view(shape)).exp()
+            output.append(t)
+        return output, normalizer
+
+    @staticmethod
+    def to_log_space(x, xn):
+        raise NotImplementedError
+        x0 = (x[0] + 1e-9).log() + xn.view(list(xn.shape) + [1] * (x.ndim - xn.ndim - 1))
+        return torch.stack([x0, x[1]], dim=0)
+
+
 class _SampledLogSumExp(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, dim):

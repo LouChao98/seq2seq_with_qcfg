@@ -29,6 +29,7 @@ datamodule:
 model:
   transformer_pretrained_model: bert-base-uncased
   fix_pretrained: true
+  real_val_every_n_epochs: 10
   embedding: ~
 
   encoder:

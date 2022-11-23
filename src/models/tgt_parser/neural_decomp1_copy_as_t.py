@@ -38,12 +38,14 @@ class NeuralDecomp1TgtParser(_BaseModel):
         pt: int,
         nt: int,
         pt_copy=None,
+        pt_align=None,
         nt_copy=None,
         observed_mask=None,
         prior_alignment=None,
     ):
         assert observed_mask is None or not self.use_observed
         assert prior_alignment is None
+        assert pt_align is None
         batch_size, n = tgt.shape[:2]
         term = term.unsqueeze(1).expand(batch_size, n, pt, term.size(2))
         tgt_expand = tgt.unsqueeze(2).expand(batch_size, n, pt).unsqueeze(3)

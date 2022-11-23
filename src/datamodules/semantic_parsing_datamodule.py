@@ -2,28 +2,26 @@ import json
 import logging
 import math
 import pickle
-import random
 import re
 from collections import Counter, defaultdict
-from email.policy import default
-from pathlib import Path
-from tokenize import single_quoted
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional
 
 import numpy as np
 import torch
 from nltk.tokenize import word_tokenize
-from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from src import is_under_debugger
-from src.datamodules.components.vocab import Vocabulary, VocabularyPair
-from src.datamodules.datamodule import _DataModule
 
+from .components.domain import DomainUtilsClevr, DomainUtilsGeo
+from .components.vocab import Vocabulary
+from .datamodule import _DataModule
 from .sampler import BucketedSampler, kmeans
 
 logger = logging.getLogger(__file__)
+
+DOMAIN_LEXICON = {"geo": DomainUtilsGeo.lexicon, "clevr": DomainUtilsClevr.lexicon}
 
 
 class SemanticParsingDataModule(_DataModule):
@@ -35,8 +33,9 @@ class SemanticParsingDataModule(_DataModule):
         prior_alignment_file: str = None,
         max_src_len: int = 100,
         max_tgt_len: int = 100,
+        domain: str = "geo",
         copy_mode: str = "none",
-        add_eos: bool = False,
+        lexicon_mode: str = "none",
         transformer_tokenizer_name: str = None,
         batch_size: int = 64,
         token_size: int = 0,  # enable if nonzero
@@ -47,6 +46,7 @@ class SemanticParsingDataModule(_DataModule):
         **kwargs,
     ):
         assert copy_mode in ("none", "token", "phrase")
+        assert lexicon_mode in ("none", "geo")
 
         super().__init__(**kwargs)
         self.save_hyperparameters(logger=False)
@@ -91,14 +91,9 @@ class SemanticParsingDataModule(_DataModule):
         if (d := _num_orig_Val - len(data_val)) > 0:
             logger.warning(f"Dropping {d} samples in ValSet.")
 
-        data_train = self.process_all_copy(data_train)
-        data_val = self.process_all_copy(data_val)
-        data_test = self.process_all_copy(data_test)
-
-        if self.hparams.add_eos:
-            data_train = self.add_eos(data_train)
-            data_val = self.add_eos(data_val)
-            data_test = self.add_eos(data_test)
+        data_train = self.process_pair(data_train)
+        data_val = self.process_pair(data_val)
+        data_test = self.process_pair(data_test)
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
 
@@ -122,28 +117,35 @@ class SemanticParsingDataModule(_DataModule):
 
             program = item["program"]
 
-            # if run_geo_pre:
-            #     assert program.startswith('answer')
-            #     program = program[7:]
+            if self.hparams.domain == "geo":
+                program = re.sub("cityid \( (.+?), ['_a-z]+ \)", r"cityid ( \1, _ )", program)
+                ignored = {"answer", "_"}
+            else:
+                ignored = set()
 
-            # just drop brackets because in FunQL:
-            # 1. we can recover them according to the grammar
-            # 2. they do not tell much about spans
-            program, spans = tokenize_program(program)
+            program, spans = tokenize_program(program, ignored=ignored)
             assert len(program) > 1 and len(question) > 1
 
             nouns = [item for item in spans if item[2] == "noun"]
-            src_nouns = []
+            src_nouns = set()
             for noun in nouns:
                 noun = program[noun[0] : noun[1]]
                 for i in range(len(question) - len(noun)):
                     if noun == question[i : i + len(noun)]:
-                        src_nouns.append((i, i + len(noun)))
+                        src_nouns.add((i, i + len(noun)))
 
             # from src.utils.executor import ProgramExecutorGeo
-            # r = ProgramExecutorGeo.recovery(program)
-            # assert r.replace(" , ", ",")==item['program'].replace(" ,", ",").replace(", ", ","), (r, item['program'])
-            # print('pass')
+
+            # ex = ProgramExecutorGeo(
+            #     "/home/louchao/project/semantic_parsing_qcfg/data/geo/geobase.pl",
+            #     "/home/louchao/project/semantic_parsing_qcfg/data/geo/geoquery.pl",
+            #     "/home/louchao/project/semantic_parsing_qcfg/data/geo/eval.pl",
+            # )
+            # result_r = ex.execute(ProgramExecutorGeo.recovery(program))
+            # result_g = ex.execute(item["program"])
+            # if result_r != result_g:
+            #     print(ProgramExecutorGeo.recovery(program), result_r)
+            #     print(item["program"], result_g)
 
             spans = [[item[0], item[1]] for item in spans if item[1] > item[0] + 1]
 
@@ -156,7 +158,7 @@ class SemanticParsingDataModule(_DataModule):
                     "tgt": program,
                     "tgt_spans": [[item[0], item[1]] for item in spans if item[1] > item[0] + 1],
                     "tgt_mask": self.gen_impossible_span_mask(spans, len(program)),
-                    "src_spans": src_nouns,
+                    "src_spans": list(src_nouns),
                     "src_mask": self.gen_impossible_span_mask(src_nouns, len(question)),
                 }
             converted.append(inst)
@@ -174,7 +176,7 @@ class SemanticParsingDataModule(_DataModule):
             masks.append(torch.tensor([span_mask[i, i + w + 1] for i in range(length - w)]))
         return masks
 
-    def process_all_copy(self, data):
+    def process_pair(self, data):
         # none = do nothing
         # token = token
         # phrase = token + phrase
@@ -185,6 +187,9 @@ class SemanticParsingDataModule(_DataModule):
         if self.hparams.copy_mode == "phrase":
             for item in data:
                 self.process_phrase_copy(item)
+        if self.hparams.lexicon_mode != "none":
+            for item in data:
+                self.process_lexicon(item, DOMAIN_LEXICON[self.hparams.lexicon_mode])
         return data
 
     def process_token_copy(self, inst):
@@ -224,11 +229,15 @@ class SemanticParsingDataModule(_DataModule):
             output.append(copy_position)
         inst["copy_phrase"] = output
 
-    def add_eos(self, data):
-        for item in data:
-            item["src"].append("<eos>")
-            item["tgt"].append("<eos>")
-        return data
+    def process_lexicon(self, inst, domain_dict):
+        src = inst["src"]  # do not use ids, because src/tgt have diff vocab
+        tgt = inst["tgt"]
+        align_m = np.zeros((len(src), len(tgt)), dtype=np.bool8)
+        for i, stoken in enumerate(src):
+            for j, ttoken in enumerate(tgt):
+                if stoken in domain_dict.get(ttoken[1:], []):
+                    align_m[i, j] = True
+        inst["align_token"] = align_m
 
     def load_prior_alignment(self, data, path):
         # read probs generated by efmaral.
@@ -363,6 +372,14 @@ class SemanticParsingDataModule(_DataModule):
                 copy_token[i, : item.shape[0], : item.shape[1]] = item
             batched["copy_token"] = copy_token
 
+        align_token = None
+        if "align_token" in data[0]:
+            align_token = torch.zeros(len(src), max_src_len, max_tgt_len, dtype=torch.bool)
+            for i, item in enumerate(data):
+                item = torch.from_numpy(item["align_token"])
+                align_token[i, : item.shape[0], : item.shape[1]] = item
+            batched["align_token"] = align_token
+
         copy_phrase = None
         if "copy_phrase" in data[0]:
             copy_phrase = [item["copy_phrase"] for item in data]
@@ -435,7 +452,7 @@ class SemanticParsingDataModule(_DataModule):
         return batched
 
 
-def tokenize_program(program):
+def tokenize_program(program, ignored):
     tokens = []
     spans = []
     buffer = []
@@ -448,8 +465,8 @@ def tokenize_program(program):
             if len(token_buffer) > 0:
                 if single_quote is not None:
                     tokens.append("".join(token_buffer))
-                else:
-                    tokens.append("@" + "".join(token_buffer))
+                elif (token := "".join(token_buffer)) not in ignored:
+                    tokens.append("@" + token)
                 token_buffer.clear()
             if c == "(":
                 buffer.append(len(tokens))

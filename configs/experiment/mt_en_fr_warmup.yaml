@@ -29,9 +29,15 @@ datamodule:
   vocab_min_freq: 1
 
 model:
+  warmup_pcfg: 4
+  warmup_qcfg: 4
+
+  parser:
+    nt_states: 20
+    pt_states: 20
   decoder:
-    nt_states: 14
-    pt_states: 14
+    nt_states: 20
+    pt_states: 20
     use_copy: false
     generation_max_length: 30
     generation_num_samples: 100

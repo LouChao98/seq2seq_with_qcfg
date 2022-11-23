@@ -76,7 +76,7 @@ class ProgramExecutorGeo(Executor):
                 elif token in cls.predicate:
                     result.append(token)
                     # binary predicate
-                    if token in ("cityid", "exclude", "intersection"):
+                    if token in ("exclude", "intersection"):
                         result.append("(")
                         i = _process(i)
                         j = i + 1
@@ -101,6 +101,10 @@ class ProgramExecutorGeo(Executor):
                             result.extend([rollback_token, ",", "_", ")"])
                         else:
                             result.extend([" ".join(parts[:-1]) + "'", ",", "'" + parts[-1], ")"])
+                    elif token == "cityid":
+                        result.append("(")
+                        i = _process(i)
+                        result.extend([",", "_", ")"])
                     else:
                         result.append("(")
                         i = _process(i)
@@ -111,7 +115,7 @@ class ProgramExecutorGeo(Executor):
             return i
 
         _process(-1)
-        return " ".join(result)
+        return f'answer({"".join(result)})'
 
 
 if __name__ == "__main__":

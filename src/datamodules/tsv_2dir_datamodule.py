@@ -18,7 +18,7 @@ class TSV2DirDataModuleMode(IntEnum):
 
 
 class TSV2DirDataModule(TSVDataModule):
-    def process_all_copy(self, data):
+    def process_pair(self, data):
         # none = do nothing
         # token = token
         # phrase = token + phrase

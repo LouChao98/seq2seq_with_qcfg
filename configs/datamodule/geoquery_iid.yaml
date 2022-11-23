@@ -5,6 +5,7 @@ dev_file: ${data_dir}/geo/funql/dev.json
 test_file: ${data_dir}/geo/funql/test.json
 
 copy_mode: "phrase"
+lexicon_mode: "geo"
 max_src_len: 16
 
 batch_size: 4

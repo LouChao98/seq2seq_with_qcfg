@@ -148,10 +148,12 @@ class NeuralNoDecompTgtParser(TgtParserBase):
             nt_states=self.nt_states,
             nt_nodes=nt_spans,
             nt_num_nodes=nt_num_nodes,
+            nt_features=nt_node_features,
             pt=pt,
             pt_states=self.pt_states,
             pt_nodes=pt_spans,
             pt_num_nodes=pt_num_nodes,
+            pt_features=pt_node_features,
             params=params,
             device=device,
         )
