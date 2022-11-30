@@ -4,9 +4,11 @@
 # python train.py experiment=example
 
 defaults:
-  # - /model/decoder/constraint: fp_hard_sh
   - override /datamodule: mt_en_fr
-  - override /model: pcfg_pcfg_reinforce
+  - override /model: pcfg_pcfg_ae
+  - override /model/reconstructor: tree
+  - override /model/tree_encoder: treelstm
+  - override /model/decoder: nodecomp
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -29,24 +31,19 @@ datamodule:
   vocab_min_freq: 1
 
 model:
-  warmup_pcfg: 4
-  warmup_qcfg: 4
-
-  parser:
-    nt_states: 20
-    pt_states: 20
   decoder:
-    nt_states: 20
-    pt_states: 20
+    nt_states: 14
+    pt_states: 14
     use_copy: false
     generation_max_length: 30
     generation_num_samples: 100
+  reconstructor:
+    hidden_size: 256
+    num_layers: 2
+
+  load_reconstructor_from_checkpoint: ${data_dir}/MT/en_fr_seq2seq_pretrained/checkpoints/epoch_005_val_69.447502.ckpt
 
 logger:
   wandb:
     project: "mt_en_fr"
-    tags:
-      - "${hydra:runtime.choices.model/parser}"
-      - "${hydra:runtime.choices.model/tree_encoder}"
-      - "${hydra:runtime.choices.model/decoder}"
     offline: ${in_cluster:}

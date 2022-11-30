@@ -4,10 +4,9 @@
 # python train.py experiment=example
 
 defaults:
+  # - /model/decoder/constraint: fp_hard_sh
   - override /datamodule: mt_en_fr
-  - override /model: pcfg_pcfg_ae
-  - override /model/tree_encoder: treelstm
-  - override /model/decoder: nodecomp
+  - override /model: crf_pcfg_reinforce
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -16,7 +15,7 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "mt_en_fr_${hydra:runtime.choices.model/decoder}"
+name: "mt_en_fr_crf_${hydra:runtime.choices.model/decoder}"
 
 trainer:
   max_epochs: 40
@@ -24,20 +23,23 @@ trainer:
   gradient_clip_val: 3
 
 datamodule:
+  transformer_tokenizer_name: xlm-roberta-base
   copy_mode: none
   batch_size: 2
   eval_batch_size: 2
   vocab_min_freq: 1
 
 model:
+  transformer_pretrained_model: xlm-roberta-base
+  fix_pretrained: true
+  embedding: ~
+
   decoder:
     nt_states: 14
     pt_states: 14
     use_copy: false
     generation_max_length: 30
     generation_num_samples: 100
-
-  load_reconstructor_from_checkpoint: ${data_dir}/MT/en_fr_seq2seq_pretrained/checkpoints/epoch_005_val_69.447502.ckpt
 
 logger:
   wandb:

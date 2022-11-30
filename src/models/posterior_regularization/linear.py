@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import logging
-from copy import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -15,6 +14,14 @@ if TYPE_CHECKING:
 
 
 log = logging.getLogger(__file__)
+
+
+def neg_log_length():
+    return lambda x: -torch.tensor(x.lengths, dtype=torch.float, device=x.device).log_()
+
+
+def neg_log2_length():
+    return lambda x: -torch.tensor(x.lengths, dtype=torch.float, device=x.device).log2_()
 
 
 @dataclass
@@ -29,22 +36,22 @@ class UngroundedPRLineSearchSolver:
     num_iter: int = 3
     ignore_failure: bool = True
 
-    def __call__(self, pred: TgtParserPrediction, constraint_feature, get_dist=False):
+    def __call__(self, pred: TgtParserPrediction, constraint_feature, get_dist=False, shortcut=True):
         cparams = apply_to_nested_tensor(pred.posterior_params, lambda x: x.detach())
         if cparams[self.field].ndim != constraint_feature.ndim:
             # TODO: REMOVE DANGEROUS ASSUMPTION
             assert cparams[self.field].shape[2:] == constraint_feature.shape[1:]
             constraint_feature = constraint_feature.unsqueeze(1)
-        if self.b > 0:
+        if self.b == 0 and shortcut:
+            p = cparams[self.field].clone()
+            p[constraint_feature > 0.1] = -1e9
+            cparams[self.field] = p
+            dist = pred.dist.spawn(params=cparams)
+        else:
             lambdas = self.solve(pred, constraint_feature)
             cparams[self.field] = self.make_constrained_params(
                 cparams[self.field], constraint_feature, lambdas, pred.dist.is_log_param(self.field)
             )
-            dist = pred.dist.spawn(params=cparams)
-        else:
-            p = cparams[self.field].clone()
-            p[constraint_feature > 0.1] = -1e9
-            cparams[self.field] = p
             dist = pred.dist.spawn(params=cparams)
         if get_dist:
             return dist
@@ -63,6 +70,7 @@ class UngroundedPRLineSearchSolver:
         lb, rb = self.lbound, self.rbound
         lt, rt, max_t, max_l = None, None, None, None
         input_params = pred.posterior_params
+        b = self.b if isinstance(self.b, (int, float)) else self.b(pred)
         for itidx in range(self.num_iter):
             if itidx > 0:  # skip lb rb
                 lgrid_np = np.geomspace(lb, rb, self.num_point + 2, dtype=np.float32)
@@ -76,7 +84,7 @@ class UngroundedPRLineSearchSolver:
                 params[self.field], constraint_feature, lgrid, pred.dist.is_log_param(self.field)
             )
             dist = pred.dist.spawn(params=params, batch_size=self.num_point)
-            target = -lgrid * self.b + dist.nll
+            target = -lgrid * b + dist.nll
             target = target.cpu().numpy()
             if itidx > 0:  # take back lb, rb and argmax
                 target = [lt, *target.tolist(), rt]

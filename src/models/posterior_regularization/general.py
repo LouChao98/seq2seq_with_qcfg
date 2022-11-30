@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 class NeqPT(PrTask):
     # this pushes count of alignment >= 1
 
-    # this encourage y_pt < 1
     def get_b(self, pred: TgtParserPrediction):
         return -torch.ones(pred.batch_size, pred.pt_num_nodes, device=pred.device)
 

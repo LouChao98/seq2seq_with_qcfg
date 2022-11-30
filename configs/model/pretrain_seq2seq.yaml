@@ -1,15 +1,17 @@
-defaults:
-  - parser: pcfg
-
-_target_: src.models.pretrain.PretrainPCFGModule
+_target_: src.models.pretrain_seq2seq.PretrainSeq2SeqModule
 _recursive_: false
 
 param_initializer: "xavier_uniform"
-domain: "src"
 
-parser:
-  pt_states: 20
-  nt_states: 20
+lm:
+  _target_: src.models.components.rnn_lm.RNNModel
+  tok_emb: 256
+  tok_hid: 256
+  nlayers: 1
+
+hidden_size: 256
+num_layers: 2
+dropout: 0.5
 
 optimizer:
   groups: ~

@@ -8,8 +8,8 @@ from sqlalchemy import values
 from supar.modules.affine import Biaffine, Triaffine
 
 from ..components.common import MultiResidualLayer
+from ..struct.decomp7 import Decomp7, Decomp7Sampler
 from .base import TgtParserBase, TgtParserPrediction
-from .struct.decomp7 import Decomp7, Decomp7Sampler
 
 log = logging.getLogger(__file__)
 

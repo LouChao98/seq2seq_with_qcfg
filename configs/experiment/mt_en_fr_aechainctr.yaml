@@ -6,10 +6,11 @@
 defaults:
   - override /datamodule: mt_en_fr
   - override /model: pcfg_pcfg_ae
+  - override /model/reconstructor: chain_contr
   - override /model/tree_encoder: treelstm
   - override /model/decoder: nodecomp
   - override /callbacks: default
-  - override /logger: tensorboard
+  - override /logger: wandb
   - override /trainer: default
 
 # all parameters below will be merged with parameters from default configurations set above
@@ -37,11 +38,9 @@ model:
     generation_max_length: 30
     generation_num_samples: 100
 
+  load_reconstructor_from_checkpoint: ${data_dir}/MT/en_fr_seq2seq_pretrained/checkpoints/epoch_005_val_69.447502.ckpt
+
 logger:
   wandb:
     project: "mt_en_fr"
-    tags:
-      - "${hydra:runtime.choices.model/parser}"
-      - "${hydra:runtime.choices.model/tree_encoder}"
-      - "${hydra:runtime.choices.model/decoder}"
     offline: ${in_cluster:}

@@ -1,9 +1,12 @@
 # @package model.reconstructor
 
-_target_: src.models.reconstructor.chain.ChainReconstructor
+_target_: src.models.reconstructor.chain_contr2.ChainContrastive2Reconstructor
 _recursive_: false
 
 lm:
   _target_: src.models.components.rnn_lm.RNNModel
   tok_emb: 256
   tok_hid: 256
+
+src_node_dim: 1
+hidden_dim: 100

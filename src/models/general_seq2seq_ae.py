@@ -17,13 +17,23 @@ log = logging.getLogger(__file__)
 
 
 class GeneralSeq2SeqAutoencoderModule(GeneralSeq2SeqModule):
-    def __init__(self, reconstructor=None, **kwargs):
+    def __init__(self, reconstructor=None, load_reconstructor_from_checkpoint=None, **kwargs):
         super().__init__(**kwargs)
         self.save_hyperparameters(logger=False)
 
+    def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
+        super().setup(stage, datamodule)
+        if self.hparams.load_reconstructor_from_checkpoint is not None:
+            log.info(f"Loading reconstructor from {self.hparams.load_reconstructor_from_checkpoint}")
+            with open(self.hparams.load_reconstructor_from_checkpoint, "rb") as f:
+                state_dict = torch.load(f, map_location="cpu")["state_dict"]
+            loadedkeys = self.reconstructor.load_state_dict(state_dict, strict=False)
+            if len(loadedkeys.unexpected_keys) > 0:
+                log.warning(f"Unexpected keys: {loadedkeys.unexpected_keys}")
+
     def setup_patch(self, stage: Optional[str] = None, datamodule=None):
         self.reconstructor = instantiate(
-            self.hparams.reconstructor, datamodule=datamodule  # , src_enc_dim=self.tree_encoder.get_output_dim()
+            self.hparams.reconstructor, datamodule=datamodule, src_node_dim=self.tree_encoder.get_output_dim()
         )
 
     @report_ids_when_err
@@ -88,10 +98,18 @@ class GeneralSeq2SeqAutoencoderModule(GeneralSeq2SeqModule):
         length_calibrate_term = 0
         ae_loss = 0
 
+        if self.training and self.current_epoch < self.hparams.warmup_qcfg:
+            ae_loss, to_log = self.reconstructor.forward_lang_only(batch, tgt_pred_uc)
+            logging_vals.update(to_log)
+
         if self.training and self.current_epoch >= self.hparams.warmup_qcfg:
             ae_loss, to_log = self.reconstructor(batch, tgt_pred_uc)
             logging_vals["ae"] = ae_loss
             logging_vals.update(to_log)
+
+            if "rec_neg_reward" in logging_vals:
+                objective += src_logprob * logging_vals["rec_neg_reward"]
+
             # print(to_log['vae_beta'])
             if self.hparams.soft_constraint_loss_rl:
                 tgt_loss = self.decoder.get_rl_loss(tgt_pred, self.hparams.decoder_entropy_reg)

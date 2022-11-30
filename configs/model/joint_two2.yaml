@@ -1,0 +1,135 @@
+_target_: src.models.joint_two2.TwoDirectionalModule
+_recursive_: false
+
+constraint_strength:
+  1
+  # - 0@0
+  # - 0@9
+  # - 0.5@10
+
+model1:
+  encoder:
+    _target_: src.models.components.encoder.VariationalLSTM
+    hidden_size: 256
+    bidirectional: true
+    dropout: 0.2
+    num_layers: 1
+  parser:
+    _target_: src.models.src_parser.neural_pcfg.NeuralPCFGSrcParser
+    dim: 256
+    pt_states: 20
+    nt_states: 20
+    num_layers: 2
+  tree_encoder:
+    _target_: src.models.tree_encoder.treelstm.BinaryTreeLSTM
+  decoder:
+    _target_: src.models.tgt_parser.neural_nodecomp.NeuralNoDecompTgtParser
+    _recursive_: false
+    pt_states: 8
+    nt_states: 8
+    pt_span_range:
+      - 1
+      - 1
+    nt_span_range:
+      - 2
+      - 1000
+    use_copy: false
+    rule_hard_constraint: null
+    rule_soft_constraint: null
+    rule_soft_constraint_solver: null
+    generation_max_length: 40
+    generation_num_samples: 10
+    generation_ppl_batch_size: 1
+    dim: 512
+    num_layers: 3
+  test_metric:
+    _target_: src.utils.metric.MultiMetric
+    bleu-1:
+      _target_: torchmetrics.BLEUScore
+      n_gram: 1
+    bleu-2:
+      _target_: torchmetrics.BLEUScore
+      n_gram: 2
+    bleu-3:
+      _target_: torchmetrics.BLEUScore
+      n_gram: 3
+    bleu-4:
+      _target_: torchmetrics.BLEUScore
+      n_gram: 4
+  _target_: src.models.general_seq2seq.GeneralSeq2SeqModule
+  _recursive_: false
+  param_initializer: xavier_uniform
+
+  embedding:
+    _target_: torch.nn.Embedding
+    embedding_dim: 300
+
+model2:
+  encoder:
+    _target_: src.models.components.encoder.VariationalLSTM
+    hidden_size: 256
+    bidirectional: true
+    dropout: 0.2
+    num_layers: 1
+  parser:
+    _target_: src.models.src_parser.neural_pcfg.NeuralPCFGSrcParser
+    dim: 256
+    pt_states: 20
+    nt_states: 20
+    num_layers: 2
+  tree_encoder:
+    _target_: src.models.tree_encoder.treelstm.BinaryTreeLSTM
+  decoder:
+    _target_: src.models.tgt_parser.neural_nodecomp.NeuralNoDecompTgtParser
+    _recursive_: false
+    pt_states: 8
+    nt_states: 8
+    pt_span_range:
+      - 1
+      - 1
+    nt_span_range:
+      - 2
+      - 1000
+    use_copy: false
+    rule_hard_constraint: null
+    rule_soft_constraint: null
+    rule_soft_constraint_solver: null
+    generation_max_length: 40
+    generation_num_samples: 10
+    generation_ppl_batch_size: 1
+    dim: 512
+    num_layers: 3
+
+  test_metric:
+    _target_: src.utils.metric.MultiMetric
+    bleu-1:
+      _target_: torchmetrics.BLEUScore
+      n_gram: 1
+    bleu-2:
+      _target_: torchmetrics.BLEUScore
+      n_gram: 2
+    bleu-3:
+      _target_: torchmetrics.BLEUScore
+      n_gram: 3
+    bleu-4:
+      _target_: torchmetrics.BLEUScore
+      n_gram: 4
+  _target_: src.models.general_seq2seq.GeneralSeq2SeqModule
+  _recursive_: false
+  param_initializer: xavier_uniform
+
+  embedding:
+    _target_: torch.nn.Embedding
+    embedding_dim: 300
+
+optimizer:
+  groups: null
+  args:
+    _target_: torch.optim.AdamW
+    lr: 0.0005
+    betas:
+      - 0.75
+      - 0.999
+    weight_decay: 1.0e-05
+    eps: 1.0e-08
+scheduler: null

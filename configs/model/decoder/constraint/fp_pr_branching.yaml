@@ -1,0 +1,11 @@
+# @package model.decoder
+
+defaults:
+  - none
+
+rule_soft_constraint:
+  _target_: src.models.constraint.fully_parameterized.FPPenaltyBranching
+rule_soft_constraint_solver:
+  _target_: src.models.posterior_regularization.linear.UngroundedPRLineSearchSolver
+  b:
+    _target_: src.models.posterior_regularization.linear.neg_log_length

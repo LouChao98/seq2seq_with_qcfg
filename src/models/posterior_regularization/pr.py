@@ -116,9 +116,9 @@ def compute_pr(pred: TgtParserPrediction, constraints, task: PrTask, get_dist=Fa
     lambdas = pgd_solver(pred, constraints, task, **kwargs)
     cdist = task.build_constrained_dist(pred, lambdas, constraints, entropy_reg)
 
-    pred_debug = copy(pred)
-    pred_debug.dist = cdist
-    pe = task.calc_e(pred_debug, constraints)
+    # pred_debug = copy(pred)
+    # pred_debug.dist = cdist
+    # pe = task.calc_e(pred_debug, constraints)
 
     if get_dist:
         return cdist

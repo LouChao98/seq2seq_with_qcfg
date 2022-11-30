@@ -16,7 +16,7 @@ def is_parent(parent, child):
 
 
 def is_strict_parent(parent, child):
-    return is_parent(parent, child) and parent != child
+    return is_parent(parent, child) and parent[:2] != child[:2]
 
 
 def span_len(span):
@@ -27,6 +27,10 @@ def covers(parent, child1, child2):
     return (span_len(parent) == (span_len(child1) + span_len(child2))) and (
         (parent[0] == child1[0] and parent[1] == child2[1]) or (parent[0] == child2[0] and parent[1] == child1[1])
     )
+
+
+def intersect(span1, span2):
+    return max(span1[0], span2[0]) < min(span1[1], span2[1])
 
 
 class FPSimpleHierarchy(RuleConstraintBase):
@@ -127,8 +131,11 @@ class FPPenaltyDepth(RuleConstraintBase):
     # p(m) ^ k > p(0) ^ {k-1} p(mk), assume p(0) -> 1
     # k log p(m) >= log p(mk)
 
-    def __init__(self, upwards_score=1e-4, stay_score=0.9, nt_temperature=1.0, pt_temperature=1.0) -> None:
+    def __init__(
+        self, upwards_score=1e-4, stay_score=0.9, nt_temperature=1.0, pt_temperature=1.0, infeasible_score=1e-4
+    ) -> None:
         super().__init__()
+        self.infeasible_score = np.log(infeasible_score)
         self.upwards_score = np.log(upwards_score)
         self.stay_score = np.log(stay_score)
         self.nt_temperature = nt_temperature
@@ -139,7 +146,7 @@ class FPPenaltyDepth(RuleConstraintBase):
     def get_weight(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
         nt = nt_num_nodes * nt_states
         pt = pt_num_nodes * pt_states
-        node_score = torch.full((batch_size, nt, nt + pt), -1e9)
+        node_score = torch.full((batch_size, nt, nt + pt), self.infeasible_score)
 
         nt_idx = slice(0, nt)
         pt_idx = slice(nt, nt + pt)
@@ -190,3 +197,70 @@ class FPPenaltyDepth(RuleConstraintBase):
         return -self.get_weight(
             batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device
         )
+
+
+class FPPenaltyDepthAndNonIntersection(FPPenaltyDepth):
+    def __init__(self, intersect_score=0.8, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.intersect_score = np.log(intersect_score)
+
+    def get_weight(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+        node_score = super().get_weight(
+            batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device
+        )
+        nt = nt_num_nodes * nt_states
+        pt = pt_num_nodes * pt_states
+        nt_idx = slice(0, nt)
+        pt_idx = slice(nt, nt + pt)
+
+        nt_ntnt = node_score[:, nt_idx, nt_idx, nt_idx].view(
+            batch_size, nt_states, nt_num_nodes, nt_states, nt_num_nodes, nt_states, nt_num_nodes
+        )
+        nt_ntpt = node_score[:, nt_idx, nt_idx, pt_idx].view(
+            batch_size, nt_states, nt_num_nodes, nt_states, nt_num_nodes, pt_states, pt_num_nodes
+        )
+        nt_ptnt = node_score[:, nt_idx, pt_idx, nt_idx].view(
+            batch_size, nt_states, nt_num_nodes, pt_states, pt_num_nodes, nt_states, nt_num_nodes
+        )
+        nt_ptpt = node_score[:, nt_idx, pt_idx, pt_idx].view(
+            batch_size, nt_states, nt_num_nodes, pt_states, pt_num_nodes, pt_states, pt_num_nodes
+        )
+
+        for b, (pt_span, nt_span) in enumerate(zip(pt_spans, nt_spans)):
+
+            for j, child1 in enumerate(nt_span):
+                for k, child2 in enumerate(nt_span):
+                    if intersect(child1, child2):
+                        nt_ntnt[b, :, :, :, j, :, k] += self.intersect_score
+                        if j == k:
+                            nt_ntnt[b, :, j, :, j, :, k] -= self.intersect_score
+            for j, child1 in enumerate(nt_span):
+                for k, child2 in enumerate(pt_span):
+                    if intersect(child1, child2):
+                        nt_ntpt[b, :, :, :, j, :, k] += self.intersect_score
+                        nt_ptnt[b, :, :, :, k, :, j] += self.intersect_score
+            # for j, child1 in enumerate(pt_span):
+            #     for k, child2 in enumerate(pt_span):
+            #         if intersect(child1, child2):
+            #             nt_ptpt[b, :, :, :, j, :, k] += self.intersect_score
+        return node_score
+
+
+class FPPenaltyBranching(RuleConstraintBase):
+    def get_feature(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
+        nt = nt_num_nodes * nt_states
+        pt = pt_num_nodes * pt_states
+        node_score = torch.zeros((batch_size, nt, nt + pt, nt + pt), device=device)
+
+        nt_idx = slice(0, nt)
+        pt_idx = slice(nt, nt + pt)
+
+        node_score[:, :, nt_idx, nt_idx] = -1.0
+        node_score[:, :, pt_idx, pt_idx] = -1.0
+        return node_score
+
+    def get_mask(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def get_weight(self, *args, **kwargs):
+        raise NotImplementedError

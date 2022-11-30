@@ -1,6 +1,6 @@
 # @package model.reconstructor
 
-_target_: src.models.reconstructor.chain.ChainReconstructor
+_target_: src.models.reconstructor.tree.TreeReconstructor
 _recursive_: false
 
 lm:

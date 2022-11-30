@@ -7,6 +7,8 @@ now = datetime.datetime.now()
 
 to_remove = []
 for fname in Path("logs").glob("*/runs/*"):
+    if "_download_" in str(fname):
+        continue
     if fname.is_dir():
         fdate = datetime.datetime.strptime(fname.name, r"%Y-%m-%d_%H-%M-%S")
         if fdate + datetime.timedelta(days=2) < now:

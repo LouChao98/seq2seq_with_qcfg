@@ -1,0 +1,3 @@
+_target_: src.models.src_parser.neural_crf.NeuralCRFSrcParser
+n_span_mlp: 400
+mlp_dropout: 0.33

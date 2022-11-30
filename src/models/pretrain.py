@@ -44,7 +44,10 @@ class PretrainPCFGModule(ModelBase):
         assert datamodule is not None or self.trainer.datamodule is not None
         self.datamodule = datamodule or self.trainer.datamodule
 
-        self.parser: SrcParserBase = instantiate(self.hparams.parser, vocab=len(self.datamodule.src_vocab))
+        vocab_size = (
+            len(self.datamodule.src_vocab) if self.hparams.domain == "src" else len(self.datamodule.tgt_vocab)
+        )
+        self.parser: SrcParserBase = instantiate(self.hparams.parser, vocab=vocab_size)
         self.gold_tree_processor = GoldTreeProcessor(binarize=False)
 
         self.train_metric = PerplexityMetric()

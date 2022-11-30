@@ -162,11 +162,13 @@ class GeneralSeq2SeqNTAlign(GeneralSeq2SeqModule):
                 term_m = term_m.sum(2)[:, : prior_alignment.shape[1], : prior_alignment.shape[2]]
                 pt_prior_loss = -(prior_alignment * term_m.clamp(1e-9).log()).sum((1, 2))
                 logging_vals["pt_prior_ce"] = pt_prior_loss
+
             if self.hparams.length_calibrate:
                 length_calibrate_term = -tgt_pred.dist.partition_at_length(tgt_pred.params, tgt_lens)
+
             mterm, mtrace = tgt_pred.dist.marginal_with_grad
             # b n n tgt_nt src_nt
-            mtrace = mtrace[:, 1:, :-1].sum(3)
+            mtrace = mtrace[:, :-1, 1:].sum(3)
             normalizer = mtrace.sum(3, keepdim=True)
             mtrace = mtrace / (normalizer + 1e-9)
 
@@ -185,13 +187,30 @@ class GeneralSeq2SeqNTAlign(GeneralSeq2SeqModule):
                 # TODO vectorization
                 # fmt: off
                 src_spans_feats = pad_sequence([
-                    torch.stack([emb[bidx, span[0]] - (0 if span[1] == src_lens[bidx] else emb[bidx, span[1]]) for span in spans], dim=0)
+                    torch.stack([emb[bidx, span[0] : span[1]].mean(0) for span in spans], dim=0)
                     for bidx, spans in enumerate(tgt_pred.nt_nodes)
                 ], batch_first=True)
                 # fmt: on
 
-                tgt_spans_feats = tgt_x[:, :-1, None] - tgt_x[:, None, 1:]
+                tgt_spans_feats = torch.zeros(
+                    tgt_ids.shape[0], tgt_ids.shape[1], tgt_ids.shape[1], tgt_x.shape[-1], device=tgt_x.device
+                )
+                for i in range(tgt_ids.shape[1]):
+                    for j in range(i, tgt_ids.shape[1]):
+                        tgt_spans_feats[:, i, j] = tgt_x[:, i : j + 1].mean(1)
+
                 score = F.cosine_similarity(src_spans_feats[:, None, None, :], tgt_spans_feats[:, :, :, None], dim=4)
+            # with torch.no_grad():
+            #     # TODO vectorization
+            #     # fmt: off
+            #     src_spans_feats = pad_sequence([
+            #         torch.stack([emb[bidx, span[0]] - (0 if span[1] == src_lens[bidx] else emb[bidx, span[1]]) for span in spans], dim=0)
+            #         for bidx, spans in enumerate(tgt_pred.nt_nodes)
+            #     ], batch_first=True)
+            #     # fmt: on
+
+            #     tgt_spans_feats = tgt_x[:, :-1, None] - tgt_x[:, None, 1:]
+            #     score = F.cosine_similarity(src_spans_feats[:, None, None, :], tgt_spans_feats[:, :, :, None], dim=4)
             nt_prior_loss = -((score * mtrace.clamp(1e-9).log()) * mtrace.detach()).sum((1, 2, 3))
             logging_vals["nt_prior_ce"] = nt_prior_loss
 
