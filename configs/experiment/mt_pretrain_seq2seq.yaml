@@ -1,0 +1,29 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  # - /model/decoder/constraint: fp_hard_sh
+  - override /datamodule: mt_en_fr
+  - override /model: pretrain_seq2seq
+  - override /callbacks: default
+  - override /logger: tensorboard
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "mt_en_fr_pretrain_seq2seq"
+
+trainer:
+  max_epochs: 40
+  accumulate_grad_batches: 1
+  gradient_clip_val: 3
+
+datamodule:
+  copy_mode: none
+  batch_size: 32
+  eval_batch_size: 32
+  vocab_min_freq: 1

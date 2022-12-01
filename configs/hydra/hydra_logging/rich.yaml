@@ -1,0 +1,15 @@
+# @package hydra.hydra_logging
+# python logging configuration for tasks
+version: 1
+formatters:
+  short:
+    format: "%(message)s"
+handlers:
+  console:
+    class: src.utils.log_utils.CustomRichHandler
+    formatter: short
+root:
+  level: INFO
+  handlers: [console]
+
+disable_existing_loggers: false

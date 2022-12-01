@@ -1,0 +1,46 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: mt_en_fr
+  - override /model: pcfg_pcfg_nt_align
+  - override /model/decoder: nodecomp
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "styleptb_${hydra:runtime.choices.model/decoder}"
+
+datamodule:
+  transformer_tokenizer_name: xlm-roberta-base
+  tokenize_tgt: true
+  batch_size: 2
+  eval_batch_size: 2
+
+model:
+  transformer_pretrained_model: xlm-roberta-base
+  fix_pretrained: true
+  embedding: ~
+
+  decoder:
+    nt_states: 14
+    pt_states: 14
+    use_copy: false
+    generation_max_length: 30
+    generation_num_samples: 100
+
+trainer:
+  max_epochs: 50
+  accumulate_grad_batches: 4
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: "mt_en_fr"
+    offline: ${in_cluster:}

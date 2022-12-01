@@ -1,0 +1,35 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: styleptb
+  - override /model: pcfg_pcfg_gumbel
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "styleptb"
+
+model:
+  encoder:
+    num_layers: 2
+
+trainer:
+  max_epochs: 50
+  accumulate_grad_batches: 1
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: "styleptb"
+    tags:
+      - "${hydra:runtime.choices.model/parser}"
+      - "${hydra:runtime.choices.model/decoder}"
+      - "gumbel"
+    offline: ${in_cluster:}

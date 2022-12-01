@@ -1,0 +1,36 @@
+defaults:
+  - encoder: yzhang_lstm
+  - parser: pcfg
+  - tree_encoder: treelstm
+  - decoder: decomp3
+  - test_metric: bleu1234
+
+_target_: src.models.amr_v1.AMRV1Module
+_recursive_: false
+
+param_initializer: "xavier_uniform"
+
+embedding:
+  _target_: torch.nn.Embedding
+  embedding_dim: 300
+
+decoder:
+  nt_states: 8
+  pt_states: 8
+
+optimizer:
+  groups: ~
+  args:
+    _target_: torch.optim.AdamW
+    lr: 5.0e-4
+    betas: [0.75, 0.999]
+    weight_decay: 1.0e-5
+    eps: 1.0e-8
+
+scheduler:
+  interval: step
+  frequency: 1
+  monitor: val/ppl
+  args:
+    _target_: src.utils.scheduler.get_exponential_lr_scheduler
+    gamma: 0.75**(1/10000)

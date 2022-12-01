@@ -1,0 +1,23 @@
+_target_: src.models.tgt_parser.neural_qcfg_d1_v2.NeuralQCFGD1V2TgtParser
+_recursive_: false
+
+# base
+pt_states: 8
+nt_states: ${.pt_states}
+pt_span_range: [1, 1000]
+nt_span_range: ${.pt_span_range}
+use_copy: true
+rule_hard_constraint:
+  _target_: src.models.constraint.unfolded.USimpleHierarchy
+  pt_states: ${..pt_states}
+  nt_states: ${..nt_states}
+rule_soft_constraint: ~
+rule_soft_constraint_solver: ~
+generation_max_length: 40
+generation_num_samples: 10
+generation_ppl_batch_size: 1
+
+# NeuralQCFGTgtParser
+dim: 512
+num_layers: 3
+cpd_rank: 256

@@ -1,0 +1,14 @@
+# https://wandb.ai
+
+wandb:
+  _target_: src.utils.callbacks.CustomWandbLogger
+  project: "template-tests"
+  save_dir: ${original_work_dir}/logs
+  offline: False # set True to store all logs only locally
+  id: null # pass correct id to resume experiment!
+  # entity: ""  # set to name of your wandb team
+  log_model: False
+  prefix: ""
+  job_type: "train"
+  group: ""
+  tags: []

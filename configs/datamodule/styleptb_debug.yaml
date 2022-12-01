@@ -1,0 +1,15 @@
+_target_: src.datamodules.tsv_datamodule.TSVDataModule
+
+train_file: ${data_dir}/StylePTB/ATP/debug_overfit.tsv
+dev_file: ${data_dir}/StylePTB/ATP/debug_overfit.tsv
+test_file: ${data_dir}/StylePTB/ATP/debug_overfit.tsv
+
+copy_mode: "phrase"
+
+batch_size: 4 #${in_debugger:2,4}
+eval_batch_size: 1 # ${in_debugger:2,6}
+num_workers: 4 #${in_debugger:0,4}
+pin_memory: false
+
+cache_dir: ${data_dir}/cache
+enable_cache: false

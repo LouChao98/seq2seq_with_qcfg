@@ -1,0 +1,10 @@
+# @package model.decoder
+
+defaults:
+  - none
+
+rule_hard_constraint:
+  _target_: src.models.constraint.fully_parameterized.FPSynchronous
+
+pt_span_range: [1, 1000]
+nt_span_range: [1, 1000]

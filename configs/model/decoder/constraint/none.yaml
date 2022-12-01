@@ -1,0 +1,6 @@
+# @package model.decoder
+
+rule_hard_constraint: ~
+rule_soft_constraint: ~
+rule_soft_constraint_solver: ~
+rule_reweight_constraint: ~

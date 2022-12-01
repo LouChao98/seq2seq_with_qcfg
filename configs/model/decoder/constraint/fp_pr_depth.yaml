@@ -1,0 +1,15 @@
+# @package model.decoder
+
+defaults:
+  - none
+
+rule_soft_constraint:
+  _target_: src.models.constraint.fully_parameterized.FPPenaltyDepth
+  upwards_score: 1e-4
+  stay_score: 0.8
+  nt_temperature: 1.
+  pt_temperature: 1.
+rule_soft_constraint_solver:
+  _target_: src.models.posterior_regularization.linear.UngroundedPRLineSearchSolver
+  b: 5 # this should no be much matter
+  rbound: 10 # this matters, because lambda will reach rbound in most cases

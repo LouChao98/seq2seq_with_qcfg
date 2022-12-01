@@ -1,0 +1,50 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: clevr
+  - override /model: clevr
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "clevr"
+
+datamodule:
+  copy_mode: "phrase"
+  batch_size: 2
+  # dev_file: ${.test_file}
+model:
+  decoder:
+    use_copy: true
+#   copy_mode: "phrase"
+#   transformer_tokenizer_name: bert-base-cased
+
+# model:
+#   transformer_pretrained_model: bert-base-cased
+#   decoder:
+#     pt_states: 6
+#     nt_states: 6
+#     generation_num_samples: 5
+#     generation_ppl_batch_size: 5
+# rule_hard_constraint: ~
+
+trainer:
+  max_epochs: 50
+  accumulate_grad_batches: 4
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: "clevr"
+    tags:
+      - "${hydra:runtime.choices.model/parser}"
+      - "${hydra:runtime.choices.model/tree_encoder}"
+      - "${hydra:runtime.choices.model/decoder}"
+    offline: ${in_cluster:}

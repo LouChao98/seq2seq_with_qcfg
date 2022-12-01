@@ -1,0 +1,42 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: arithmetic
+  - override /model: scan
+  - override /callbacks: default
+  - override /logger: tensorboard
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "arithmetic"
+
+# ~17GB
+datamodule:
+  batch_size: 2
+  eval_batch_size: 1
+  max_src_len: 100
+
+model:
+  decoder:
+    num_samples: 8
+    nt_states: 4
+
+trainer:
+  max_epochs: 20
+  accumulate_grad_batches: 10
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: arithmetic
+    tags:
+      - "${hydra:runtime.choices.model/parser}"
+      - "${hydra:runtime.choices.model/tree_encoder}"
+      - "${hydra:runtime.choices.model/decoder}"
+    offline: ${in_cluster:}

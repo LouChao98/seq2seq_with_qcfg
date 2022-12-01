@@ -1,0 +1,63 @@
+name: qcfg
+channels:
+  - pytorch
+  - pyg
+  - defaults
+dependencies:
+  - pytorch=1.12.1
+  - torchvision
+  - cudatoolkit=11.3
+  - tensorboard
+  - black
+  - isort
+  - flake8
+  - rich
+  - pytest
+  - ipython
+  - ipykernel
+  - ipywidgets
+  - sqlalchemy
+  - matplotlib
+  - seaborn
+  # - pytorch-scatter  # waiting package for torch 1.12
+  # - pyg
+  - numba
+  - dill
+  - scikit-learn
+  - tqdm
+  - networkx
+  - joblib
+  - pyyaml
+  - yaml
+  - nltk
+  - pip
+  - pip:
+      - python-dotenv
+      - pre-commit
+      - nbstripout
+      - pudb
+      - pytorch-lightning
+      - torchmetrics
+      - hydra-core
+      - hydra-colorlog
+      - hydra-optuna-sweeper
+      - hydra-submitit-launcher
+      - transformers
+      - wandb
+      - class-resolver
+      - penman
+      - torch-semiring-einsum
+      - opt-einsum
+      - fairscale
+      - easydict
+      - pytorch-memlab
+      # - allennlp
+      - svgling
+      - amrlib
+      - unidecode
+      - -e ./pytorch-struct
+      - torch-scatter -f https://data.pyg.org/whl/torch-1.12.1+cu113.html
+      - torch-sparse -f https://data.pyg.org/whl/torch-1.12.1+cu113.html
+      - torch-spline-conv -f https://data.pyg.org/whl/torch-1.12.1+cu113.html
+      - torch-geometric -f https://data.pyg.org/whl/torch-1.12.1+cu113.html
+      - supar

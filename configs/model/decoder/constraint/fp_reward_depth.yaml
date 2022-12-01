@@ -1,0 +1,11 @@
+# @package model.decoder
+
+defaults:
+  - none
+
+rule_soft_constraint:
+  _target_: src.models.constraint.fully_parameterized.FPPenaltyDepth
+  upwards_score: 1e-4
+  stay_score: 0.9
+  nt_temperature: 1.
+  pt_temperature: 1.

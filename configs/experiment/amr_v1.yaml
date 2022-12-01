@@ -1,0 +1,42 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: amr3
+  - override /model: amr_v1
+  - override /model/decoder: decomp3
+  - override /callbacks: default
+  - override /logger: tensorboard
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "amr"
+
+datamodule:
+  copy_mode: "phrase"
+  max_src_len: 32
+
+  batch_size: 1
+  token_size: 0
+
+model:
+  decoder:
+    use_copy: true
+    cpd_rank: 32
+
+trainer:
+  # check_val_every_n_epoch: 10
+  max_epochs: 10
+  accumulate_grad_batches: 1
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: "amr"
+    tags: ["v1"]
+    offline: ${in_cluster:}

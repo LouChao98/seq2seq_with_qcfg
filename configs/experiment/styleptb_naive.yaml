@@ -1,0 +1,42 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: styleptb
+  - override /model: styleptb_fixedsrctree
+  - override /model/parser: naive
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "styleptb_fixedsrctree"
+
+datamodule:
+  load_gold_tree: true
+  copy_mode: "token"
+model:
+  # load_from_checkpoint: /home/louchao/project/semantic_parsing_qcfg/logs/experiments/runs/styleptb_fixedsrctree/2022-09-08_11-16-12/checkpoints/last.ckpt
+  parser:
+    mode: rightbranching
+  decoder:
+    rule_constraint_type: 0
+
+trainer:
+  max_epochs: 50
+  accumulate_grad_batches: 1
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: "styleptb"
+    tags:
+      - "${hydra:runtime.choices.model/parser}"
+      - "${hydra:runtime.choices.model/tree_encoder}"
+      - "${hydra:runtime.choices.model/decoder}"
+    offline: ${in_cluster:}

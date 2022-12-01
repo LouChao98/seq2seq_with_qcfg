@@ -1,0 +1,27 @@
+# @package _global_
+
+# specify here default evaluation configuration
+defaults:
+  - _self_
+  - datamodule: scan
+  - model: scan
+  - callbacks: default
+  - logger: tensorboard # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
+  - trainer: default
+  - hydra: default
+  - experiment: null
+
+original_work_dir: ${hydra:runtime.cwd}
+
+data_dir: ${original_work_dir}/data/
+
+print_config: True
+
+ignore_warnings: True
+
+seed: null
+
+name: "default"
+
+# passing checkpoint path is necessary
+ckpt_path: ???

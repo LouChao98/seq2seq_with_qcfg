@@ -1,0 +1,13 @@
+_target_: src.utils.metric.MultiMetric
+
+denotation:
+  _target_: src.utils.metric.GeoDenotationMetric
+
+  executor:
+    _target_: src.utils.executor.ProgramExecutorGeo
+    geobase_pl: ${data_dir}/geo/geobase.pl
+    geoquery_pl: ${data_dir}/geo/geoquery.pl
+    eval_pl: ${data_dir}/geo/eval.pl
+
+exact:
+  _target_: src.utils.metric.WholeSentMatchAccuracy

@@ -1,0 +1,11 @@
+# @package model.reconstructor
+
+_target_: src.models.reconstructor.chain_contr.ChainContrastiveReconstructor
+_recursive_: false
+
+lm:
+  _target_: src.models.components.rnn_lm.RNNModel
+  tok_emb: 256
+  tok_hid: 256
+
+hidden_dim: 100

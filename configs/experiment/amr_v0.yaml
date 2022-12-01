@@ -1,0 +1,48 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: amr3
+  - override /model: styleptb
+  - override /model/decoder: decomp3
+  - override /callbacks: default
+  - override /logger: tensorboard
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "amr"
+
+datamodule:
+  copy_mode: "phrase"
+  max_src_len: 32
+
+  batch_size: 1
+  token_size: 0
+
+model:
+  parser:
+    pt_states: 12
+    nt_states: 12
+  decoder:
+    use_copy: true
+    cpd_rank: 32
+#     _target_: src.models.tgt_parser.neural_qcfg_amr.NeuralQCFGAMRTgtParser
+#     num_samples: 100
+#     check_ppl_batch_size: 1
+
+trainer:
+  # check_val_every_n_epoch: 10
+  max_epochs: 10
+  accumulate_grad_batches: 1
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: "amr"
+    tags: ["v0"]
+    offline: ${in_cluster:}

@@ -1,0 +1,5 @@
+_target_: src.models.src_parser.neural_pcfg.NeuralPCFGSrcParser
+dim: 256 # this is independent to other modules
+pt_states: 20
+nt_states: 20
+num_layers: 2
