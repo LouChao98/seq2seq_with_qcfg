@@ -44,7 +44,7 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         self.root_mlp_child = nn.Linear(dim, 1, bias=False)
 
         self.encoder = BertEncoder(
-            BertConfig(hidden_size=src_dim, num_hidden_layers=2, num_attention_heads=6, intermediate_size=src_dim * 4)
+            BertConfig(hidden_size=src_dim, num_hidden_layers=2, num_attention_heads=4, intermediate_size=src_dim * 4)
         )
 
         self.reset_parameters()
@@ -77,10 +77,10 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         pt = self.pt_states * pt_num_nodes
 
         # fmt: off
-        nt_mask = torch.arange(nt_num_nodes, device=rules.device).unsqueeze(0) \
-                  < torch.tensor(nt_num_nodes_list, device=rules.device).unsqueeze(1)
-        pt_mask = torch.arange(pt_num_nodes, device=rules.device).unsqueeze(0) \
-                  < torch.tensor(pt_num_nodes_list, device=rules.device).unsqueeze(1)
+        nt_mask = torch.arange(nt_num_nodes, device=device).unsqueeze(0) \
+                  < torch.tensor(nt_num_nodes_list, device=device).unsqueeze(1)
+        pt_mask = torch.arange(pt_num_nodes, device=device).unsqueeze(0) \
+                  < torch.tensor(pt_num_nodes_list, device=device).unsqueeze(1)
         lhs_mask = nt_mask.unsqueeze(1).expand(-1, self.nt_states, -1).reshape(batch_size, -1)
         _pt_rhs_mask = pt_mask.unsqueeze(1).expand(-1, self.pt_states, -1).reshape(batch_size, -1)
         # fmt: on
@@ -99,9 +99,8 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         pt_emb = pt_emb.view(batch_size, pt, -1)
 
         all_emb = torch.cat([nt_emb, pt_emb], 1)
-        all_emb = self.encoder(all_emb, attention_mask=rhs_mask)
-        
-        nt_mask, pt_mask = torch.split(all_emb, (nt, pt), 2)
+        all_emb = self.encoder(all_emb, attention_mask=(rhs_mask.unsqueeze(1) & rhs_mask.unsqueeze(2)).unsqueeze(1))[0]
+        nt_emb, pt_emb = torch.split(all_emb, (nt, pt), 1)
 
         # S->A
         roots = self.root_mlp_child(nt_emb)

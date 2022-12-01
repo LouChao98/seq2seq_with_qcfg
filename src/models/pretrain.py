@@ -71,7 +71,7 @@ class PretrainPCFGModule(ModelBase):
             for name, param in self.named_parameters():
                 if param.dim() > 1:
                     init_func(param)
-                elif "norm" not in name:
+                elif "norm" not in name.lower():
                     nn.init.zeros_(param)
 
     @report_ids_when_err

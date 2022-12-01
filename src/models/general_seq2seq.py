@@ -139,7 +139,7 @@ class GeneralSeq2SeqModule(ModelBase):
                     continue
                 if param.dim() > 1:
                     init_func(param)
-                elif "norm" not in name:
+                elif "norm" not in name.lower():
                     nn.init.zeros_(param)
 
         if self.hparams.load_src_parser_from_checkpoint is not None:

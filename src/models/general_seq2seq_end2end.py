@@ -94,7 +94,7 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
                     continue
                 if param.dim() > 1:
                     init_func(param)
-                elif "norm" not in name:
+                elif "norm" not in name.lower():
                     nn.init.zeros_(param)
 
     def encode(self, batch):
