@@ -18,7 +18,7 @@ from src.datamodules.components.vocab import Vocabulary
 from src.datamodules.datamodule import _DataModule
 from vendor.amrlib.amrlib.models.parse_xfm.penman_serializer import load_and_serialize
 
-from .sampler import BucketedSampler, kmeans
+from .components.sampler import BucketedSampler, kmeans
 
 logger = logging.getLogger(__file__)
 

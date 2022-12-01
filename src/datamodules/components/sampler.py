@@ -1,3 +1,5 @@
+import random
+from collections import defaultdict
 from typing import Dict, List, Tuple
 
 import torch
@@ -30,9 +32,7 @@ class BucketedSampler(torch.utils.data.Sampler):
     ):
         self.batch_size = batch_size
         self.shuffle = shuffle
-        self.sizes, self.buckets = zip(
-            *[(size, bucket) for size, bucket in buckets.items()]
-        )
+        self.sizes, self.buckets = zip(*[(size, bucket) for size, bucket in buckets.items()])
         # number of batches in each bucket, clipped by range [1, len(bucket)]
         self.n_batches = [
             min(len(bucket), max(round(size * len(bucket) / batch_size), 1))
@@ -55,16 +55,9 @@ class BucketedSampler(torch.utils.data.Sampler):
         total, batches = 0, []
         # if `shuffle=True`, shuffle both the buckets and samples in each bucket
         # for distributed training, make sure each process generates the same random sequence at each epoch
-        range_fn = (
-            torch.arange
-            if not self.shuffle
-            else lambda x: torch.randperm(x, generator=g)
-        )
+        range_fn = torch.arange if not self.shuffle else lambda x: torch.randperm(x, generator=g)
         for i, bucket in enumerate(self.buckets):
-            split_sizes = [
-                (len(bucket) - j - 1) // self.n_batches[i] + 1
-                for j in range(self.n_batches[i])
-            ]
+            split_sizes = [(len(bucket) - j - 1) // self.n_batches[i] + 1 for j in range(self.n_batches[i])]
             # DON'T use `torch.chunk` which may return wrong number of batches
             for batch in range_fn(len(bucket)).split(split_sizes):
                 if total % self.n_replicas == self.rank:
@@ -77,9 +70,7 @@ class BucketedSampler(torch.utils.data.Sampler):
         return self.n_samples
 
 
-def kmeans(
-    x: List[int], k: int, max_it: int = 32
-) -> Tuple[List[float], List[List[int]]]:
+def kmeans(x: List[int], k: int, max_it: int = 32) -> Tuple[List[float], List[List[int]]]:
     r"""
     KMeans algorithm for clustering the sentences by length.
     Args:
@@ -131,9 +122,7 @@ def kmeans(
             # re-calculate the mask
             mask = torch.arange(k).unsqueeze(-1).eq(y)
         # update the centroids
-        centroids, old = (datapoints * freqs * mask).sum(-1) / (freqs * mask).sum(
-            -1
-        ), centroids
+        centroids, old = (datapoints * freqs * mask).sum(-1) / (freqs * mask).sum(-1), centroids
         # re-assign all datapoints to clusters
         dists, y = torch.abs_(datapoints.unsqueeze(-1) - centroids).min(-1)
         # stop iteration early if the centroids converge
@@ -145,11 +134,40 @@ def kmeans(
     # get the centroids of the assigned clusters
     centroids = centroids[assigned].tolist()
     # map all values of datapoints to buckets
-    clusters = [
-        torch.where(indices.unsqueeze(-1).eq(torch.where(y.eq(i))[0]).any(-1))[
-            0
-        ].tolist()
-        for i in assigned
-    ]
+    clusters = [torch.where(indices.unsqueeze(-1).eq(torch.where(y.eq(i))[0]).any(-1))[0].tolist() for i in assigned]
 
     return centroids, clusters
+
+
+"""
+Copy from https://github.com/sustcsonglin/TN-PCFG/blob/main/parser/helper/data_module.py
+---
+Same as (Kim et al, 2019)
+"""
+
+
+class ByLengthSampler:
+    def __init__(self, lengths, batch_size=4):
+        self.group = defaultdict(list)
+        self.seq_lens = lengths
+        for i, length in enumerate(self.seq_lens):
+            self.group[length].append(i)
+        self.batch_size = batch_size
+        total = []
+
+        def chunks(lst, n):
+            """Yield successive n-sized chunks from lst."""
+            for i in range(0, len(lst), n):
+                yield lst[i : i + n]
+
+        for idx, lst in self.group.items():
+            total = total + list(chunks(lst, self.batch_size))
+        self.total = total
+
+    def __iter__(self):
+        random.shuffle(self.total)
+        for batch in self.total:
+            yield batch
+
+    def __len__(self):
+        return len(self.total)

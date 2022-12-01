@@ -15,6 +15,8 @@ from src import is_under_debugger
 from src.datamodules.components.vocab import Vocabulary
 from src.datamodules.datamodule import _DataModule
 
+from .components.sampler import ByLengthSampler
+
 logger = logging.getLogger(__file__)
 
 
@@ -34,6 +36,7 @@ class TSVDataModule(_DataModule):
         batch_size: int = 64,
         vocab_min_freq: int = 3,
         eval_batch_size: int = 64,
+        force_src_same_length: bool = False,
         num_workers: int = 0,
         pin_memory: bool = False,
         ###
@@ -230,38 +233,69 @@ class TSVDataModule(_DataModule):
         else:
             shuffle = not is_under_debugger()
             collator = self.collator
-        loader = DataLoader(
-            dataset=self.data_train,
-            batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
-            collate_fn=collator,
-            shuffle=shuffle,
-        )
+        if self.hparams.force_src_same_length:
+            loader = DataLoader(
+                dataset=self.data_train,
+                batch_sampler=ByLengthSampler(
+                    [len(item["src"]) for item in self.data_train], self.hparams.batch_size
+                ),
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=collator,
+            )
+        else:
+            loader = DataLoader(
+                dataset=self.data_train,
+                batch_size=self.hparams.batch_size,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=collator,
+                shuffle=shuffle,
+            )
         logger.info(f"Train dataloader: {len(loader)}")
         return loader
 
     def val_dataloader(self):
-        loader = DataLoader(
-            dataset=self.data_val,
-            batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
-            collate_fn=self.collator,
-            shuffle=False,
-        )
+        if self.hparams.force_src_same_length:
+            loader = DataLoader(
+                dataset=self.data_val,
+                batch_sampler=ByLengthSampler([len(item["src"]) for item in self.data_val], self.hparams.batch_size),
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collator,
+            )
+        else:
+            loader = DataLoader(
+                dataset=self.data_val,
+                batch_size=self.hparams.batch_size,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collator,
+                shuffle=False,
+            )
         logger.info(f"Val dataloader: {len(loader)}")
         return loader
 
     def test_dataloader(self):
-        return DataLoader(
-            dataset=self.data_test,
-            batch_size=self.hparams.eval_batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
-            collate_fn=self.collator,
-            shuffle=False,
-        )
+        if self.hparams.force_src_same_length:
+            loader = DataLoader(
+                dataset=self.data_test,
+                batch_sampler=ByLengthSampler([len(item["src"]) for item in self.data_test], self.hparams.batch_size),
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collator,
+            )
+        else:
+            loader = DataLoader(
+                dataset=self.data_test,
+                batch_size=self.hparams.eval_batch_size,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collator,
+                shuffle=False,
+            )
+        logger.info(f"Test dataloader: {len(loader)}")
+        return loader
 
     def collator(self, data, sort=True):
         if sort:

@@ -5,6 +5,8 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from src.models.struct.semiring import SampledSemiring
+
 from ._fn import stripe, stripe2
 from ._utils import checkpoint, weighted_random_v2
 from .base import _COPY_NT, _COPY_PT, _OK, _REACHLIMIT, _SONMASK, _VOCAB, DecompBase, DecompSamplerBase
@@ -116,6 +118,28 @@ class Decomp1(DecompBase):
         logZ = semiring.sum(final, dim=-1)
         logZ = semiring.unconvert(logZ)
         return logZ, _span_indicator
+
+    def sample_one(self, need_event=False, need_span=True):
+        params = {
+            k: v.detach().requires_grad_() if isinstance(v, torch.Tensor) else v for k, v in self.params.items()
+        }
+        logZ, trace = self.inside(params, SampledSemiring, True)
+        logZ.sum().backward()
+
+        output = {"logZ": logZ}
+
+        if need_span:
+            spans = [[] for _ in range(self.batch_size)]
+            for b, i, j in trace.grad.nonzero().tolist():
+                spans[b].append((i, j, None, None))
+            for b, i, w, state_node in params["term"].grad.nonzero().tolist():
+                spans[b].append((i, i + 1, None, None))
+            output["span"] = spans
+
+        if need_event:
+            output["event"] = {k: params[k].grad for k in self.KEYS} | {"trace": trace.grad[0]}
+
+        return output
 
     @staticmethod
     def random(bsz, max_len, tgt_pt, src_pt, tgt_nt, src_nt, r, ngram=1):

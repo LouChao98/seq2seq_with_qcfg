@@ -15,9 +15,9 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 from src import is_under_debugger
 
 from .components.domain import DomainUtilsClevr, DomainUtilsGeo
+from .components.sampler import BucketedSampler, kmeans
 from .components.vocab import Vocabulary
 from .datamodule import _DataModule
-from .sampler import BucketedSampler, kmeans
 
 logger = logging.getLogger(__file__)
 
