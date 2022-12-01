@@ -21,7 +21,10 @@ normalize_func = {
 
 
 class NeuralNoDecompTgtParser(TgtParserBase):
-    def __init__(self, vocab=100, dim=256, num_layers=3, src_dim=256, normalize_mode="softmax", **kwargs):
+    def __init__(
+        self, vocab=100, dim=256, num_layers=3, src_dim=256, normalize_mode="softmax", debug_1=False, **kwargs
+    ):
+        # debug_1: maskout -> NT PT or -> PT NT
         super().__init__(**kwargs)
 
         self.vocab = vocab
@@ -29,6 +32,8 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         self.src_dim = src_dim
         self.num_layers = num_layers
         self.normalizer = normalize_func[normalize_mode]
+
+        self.debug_1 = debug_1
 
         self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -122,6 +127,10 @@ class NeuralNoDecompTgtParser(TgtParserBase):
 
         rules = self.normalizer(rules.flatten(2), dim=-1).clone()
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
+
+        if self.debug_1:
+            rules[:, :, :nt, nt:] = self.neg_huge
+            rules[:, :, nt:, :nt] = self.neg_huge
 
         if self.rule_reweight_constraint is not None and (not self.rule_reweight_test_only or not self.training):
             weight = self.rule_reweight_constraint.get_weight(*common)

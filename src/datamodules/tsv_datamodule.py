@@ -36,6 +36,8 @@ class TSVDataModule(_DataModule):
         eval_batch_size: int = 64,
         num_workers: int = 0,
         pin_memory: bool = False,
+        ###
+        debug_1=False,  # set target sequence to even length.
         **kwargs,
     ):
         assert copy_mode in ("none", "token", "phrase")
@@ -115,6 +117,10 @@ class TSVDataModule(_DataModule):
         if len(src) == 1 or len(tgt) == 1:
             src = src + src
             tgt = tgt + tgt
+
+        if self.hparams.debug_1:
+            if len(tgt) % 2 == 1:
+                tgt.append("<dbg1>")
         inst = {"src": src, "tgt": tgt}
         return inst
 

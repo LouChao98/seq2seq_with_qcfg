@@ -13,12 +13,19 @@ logger = logging.getLogger(__file__)
 
 
 class TSV2DirDataModuleMode(IntEnum):
-    NORMAL = 0
-    INVERSE = 1
+    FORWARD = 0
+    BACKWARD = 1
+    JOINT = 2
 
 
 class TSV2DirDataModule(TSVDataModule):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._mode = TSV2DirDataModuleMode.JOINT
+
     def process_pair(self, data):
+        if self._mode != TSV2DirDataModuleMode.JOINT:
+            return super().process_pair(data)
         # none = do nothing
         # token = token
         # phrase = token + phrase
@@ -32,6 +39,8 @@ class TSV2DirDataModule(TSVDataModule):
         return data
 
     def process_token_copy(self, inst):
+        if self._mode != TSV2DirDataModuleMode.JOINT:
+            return super().process_token_copy(inst)
         src = inst["src"]  # do not use ids, because src/tgt have diff vocab
         tgt = inst["tgt"]
         copy_m = np.zeros((len(src), len(tgt)), dtype=np.bool8)
@@ -43,6 +52,8 @@ class TSV2DirDataModule(TSVDataModule):
         inst["copy_token_t2s"] = copy_m.transpose()
 
     def process_phrase_copy(self, inst):
+        if self._mode != TSV2DirDataModuleMode.JOINT:
+            return super().process_phrase_copy(inst)
         # generate a list of bool vectors from width 2 to len(tgt)-1.
         # NOTE this assume phrases are at least length 2
         src = inst["src"]
@@ -111,6 +122,9 @@ class TSV2DirDataModule(TSVDataModule):
         return src_vocab, tgt_vocab
 
     def collator(self, data):
+        if self._mode != TSV2DirDataModuleMode.JOINT:
+            return super().collator(data)
+
         # ONLY SUPPORT QCFG
         assert not self.use_transformer_tokenizer, "not implemented"
 
@@ -142,11 +156,15 @@ class TSV2DirDataModule(TSVDataModule):
         return batch1, batch2
 
     @contextmanager
-    def normal_mode(self):
+    def forward_mode(self):
+        _backup, self._mode = self._mode, TSV2DirDataModuleMode.FORWARD
         yield
+        self._mode = _backup
 
     @contextmanager
-    def inverse_mode(self):
+    def backward_mode(self):
         self.src_vocab, self.tgt_vocab = self.tgt_vocab, self.src_vocab
+        _backup, self._mode = self._mode, TSV2DirDataModuleMode.BACKWARD
         yield
         self.src_vocab, self.tgt_vocab = self.tgt_vocab, self.src_vocab
+        self._mode = _backup
