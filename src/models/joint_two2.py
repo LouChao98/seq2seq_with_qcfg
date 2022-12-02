@@ -15,20 +15,21 @@ from .posterior_regularization.agree import PTAgree
 log = logging.getLogger(__file__)
 
 
-def _save_prediction(data, path=None, model=None, prefix=None):
+def _save_prediction(data, path=None, func=None, prefix=None):
     if path is None:
-        return model._save_predictions(data, prefix + "predict_on_test.txt")
+        return func(data, prefix + "predict_on_test.txt")
     else:
         # TODO allow folder
-        return model._save_predictions(data, prefix + path)
+        return func(data, prefix + path)
 
 
-def _save_detailed_prediction(data, path=None, model=None, prefix=None):
+def _save_detailed_prediction(data, path=None, func=None, prefix=None):
     if path is None:
-        return model._save_detailed_predictions(data, prefix + "detailed_predict_on_test.txt")
+        return func(data, prefix + "detailed_predict_on_test.txt")
     else:
         # TODO allow folder
-        return model._save_detailed_predictions(data, prefix + path)
+        return func(data, prefix + path)
+
 
 class TwoDirectionalModule(ModelBase):
     # model1 is the primary model
@@ -59,19 +60,19 @@ class TwoDirectionalModule(ModelBase):
             self.model1.setup(stage, datamodule)
             self.model1.log = partial(self.sub_log, prefix="m1")
             self.model1.print = partial(self.sub_print, prefix="m1")
-            self.model1._save_predictions = self.model1.save_predictions
-            self.model1._save_detailed_predictions = self.model1.save_detailed_predictions
-            self.model1.save_predictions = partial(_save_prediction, model=self.model1, prefix="m1_")
-            self.model1.save_detailed_predictions = partial(_save_detailed_prediction, model=self.model1, prefix="m1_")
+            self.model1.save_predictions = partial(_save_prediction, func=self.model1.save_predictions, prefix="m1_")
+            self.model1.save_detailed_predictions = partial(
+                _save_detailed_prediction, func=self.model1.save_detailed_predictions, prefix="m1_"
+            )
 
         with self.datamodule.backward_mode():
             self.model2.setup(stage, datamodule)
             self.model2.log = partial(self.sub_log, prefix="m2")
             self.model2.print = partial(self.sub_print, prefix="m2")
-            self.model2._save_predictions = self.model2.save_predictions
-            self.model2._save_detailed_predictions = self.model2.save_detailed_predictions
-            self.model2.save_predictions = partial(_save_prediction, model=self.model2, prefix="m2_")
-            self.model2.save_detailed_predictions = partial(_save_detailed_prediction, model=self.model2, prefix="m2_")
+            self.model2.save_predictions = partial(_save_prediction, func=self.model2.save_predictions, prefix="m2_")
+            self.model2.save_detailed_predictions = partial(
+                _save_detailed_prediction, func=self.model2.save_detailed_predictions, prefix="m2_"
+            )
 
         self.pr_solver = PTAgree()
 
@@ -118,13 +119,13 @@ class TwoDirectionalModule(ModelBase):
             output1 = self.model1.validation_step(batch[0], batch_idx)
         with self.datamodule.backward_mode():
             output2 = self.model2.validation_step(batch[1], batch_idx)
-        return {"loss": output1['loss'] + output2['loss'], 'output1': output1, 'output2': output2}
+        return {"loss": output1["loss"] + output2["loss"], "output1": output1, "output2": output2}
 
     def validation_epoch_end(self, outputs: List[Any]):
         with self.datamodule.forward_mode():
-            self.model1.validation_epoch_end([item['output1'] for item in outputs])
+            self.model1.validation_epoch_end([item["output1"] for item in outputs])
         with self.datamodule.backward_mode():
-            self.model2.validation_epoch_end([item['output2'] for item in outputs])
+            self.model2.validation_epoch_end([item["output2"] for item in outputs])
 
     def on_test_epoch_start(self) -> None:
         with self.datamodule.forward_mode():
