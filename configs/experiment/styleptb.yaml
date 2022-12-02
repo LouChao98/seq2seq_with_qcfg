@@ -6,8 +6,6 @@
 defaults:
   - override /datamodule: styleptb
   - override /model: pcfg_pcfg_reinforce
-  - override /model/tree_encoder: treelstm
-  - override /model/decoder: nodecomp
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default

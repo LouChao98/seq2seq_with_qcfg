@@ -171,6 +171,12 @@ class DecompBase:
 
     @lazy_property
     def marginal_with_grad(self):
+        params = {}
+        for key, value in self.params.items():
+            if key in self.KEYS and not value.requires_grad:
+                params[key] = value.requires_grad_()
+            else:
+                params[key] = value
         logZ, trace = self.inside(self.params, LogSemiring, trace=True, use_reentrant=False)
         grads = grad(logZ.sum(), [self.params["term"], trace], create_graph=True)
         return grads

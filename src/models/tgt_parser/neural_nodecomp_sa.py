@@ -4,12 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
+from transformers.models.bert.modeling_bert import BertConfig, BertEncoder
 
 from ..components.common import MultiResidualLayer
 from ..components.sparse_activations import entmax15, sparsemax
 from ..struct.no_decomp import NoDecomp, NoDecompSampler
 from .base import TgtParserBase, TgtParserPrediction
-from transformers.models.bert.modeling_bert import BertEncoder, BertConfig
 
 log = logging.getLogger(__file__)
 
@@ -46,6 +46,8 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         self.encoder = BertEncoder(
             BertConfig(hidden_size=src_dim, num_hidden_layers=2, num_attention_heads=4, intermediate_size=src_dim * 4)
         )
+        self.position_embedding = nn.Embedding(200, src_dim)
+        self.emb_layernorm = nn.LayerNorm(src_dim)
 
         self.reset_parameters()
 
@@ -97,9 +99,24 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         pt_state_emb = self.src_pt_emb.expand(batch_size, self.pt_states, self.dim)
         pt_emb = pt_state_emb.unsqueeze(2) + pt_node_emb.unsqueeze(1)
         pt_emb = pt_emb.view(batch_size, pt, -1)
-
         all_emb = torch.cat([nt_emb, pt_emb], 1)
-        all_emb = self.encoder(all_emb, attention_mask=(rhs_mask.unsqueeze(1) & rhs_mask.unsqueeze(2)).unsqueeze(1))[0]
+
+        _nt_t = [torch.tensor([span[:2] for span in spans]) for spans in nt_spans]
+        _nt_t = pad_sequence(_nt_t, batch_first=True).to(device).unsqueeze(1).repeat(1, self.nt_states, 1, 1)
+        _nt_t = _nt_t.view(batch_size, -1, 2)
+        _pt_t = [torch.tensor([span[:2] for span in spans]) for spans in pt_spans]
+        _pt_t = pad_sequence(_pt_t, batch_first=True).to(device).unsqueeze(1).repeat(1, self.pt_states, 1, 1)
+        _pt_t = _pt_t.view(batch_size, -1, 2)
+        _at_t = torch.cat([_nt_t, _pt_t], 1)
+
+        emb_l = self.position_embedding(_at_t[..., 0])
+        emb_r = self.position_embedding(_at_t[..., 1])
+        all_emb = all_emb + emb_l + emb_r
+        all_emb = self.emb_layernorm(all_emb)
+
+        all_emb = self.encoder(all_emb, attention_mask=(rhs_mask.unsqueeze(1) & rhs_mask.unsqueeze(2)).unsqueeze(1))[
+            0
+        ]
         nt_emb, pt_emb = torch.split(all_emb, (nt, pt), 1)
 
         # S->A

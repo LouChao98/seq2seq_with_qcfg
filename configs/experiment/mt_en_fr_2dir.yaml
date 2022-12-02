@@ -19,14 +19,14 @@ name: "mt_en_fr_${hydra:runtime.choices.model/decoder}"
 
 trainer:
   max_epochs: 40
-  accumulate_grad_batches: 16
+  accumulate_grad_batches: 8
   gradient_clip_val: 3
 
 datamodule:
   copy_mode: none
-  batch_size: 1
-  eval_batch_size: 1
-  vocab_min_freq: 1
+  batch_size: 2
+  eval_batch_size: 2
+  vocab_min_freq: 2
 
 model:
   model1:
