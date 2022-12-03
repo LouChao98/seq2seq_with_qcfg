@@ -1,4 +1,6 @@
 import logging
+from collections import Counter
+from copy import copy
 from enum import IntEnum
 from functools import partial
 from typing import Dict, List, Tuple
@@ -9,7 +11,14 @@ from numba import jit
 from torch import Tensor
 
 from ._fn import diagonal_copy_, stripe
-from ._utils import check_full_marginal, checkpoint, compare_marginal, weighted_random_v2
+from ._utils import (
+    check_full_marginal,
+    checkpoint,
+    compare_marginal,
+    compute_unnormalized_prob,
+    enumerate_seq,
+    weighted_random_v2,
+)
 from .base import _COPY_NT, _COPY_PT, _OK, _REACHLIMIT, _SONMASK, _VOCAB, DecompBase, DecompSamplerBase
 
 log = logging.getLogger(__file__)
@@ -498,7 +507,7 @@ if __name__ == "__main__":
     VOCAB = 4
     NUM_SAMPLE = 50000
     MAX_LENGTH = 4
-    r = 2
+    r = 1
     lens = [max(2, N - i) for i in range(B)]
     params = Decomp7.random(B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r)
     meta = {
@@ -550,7 +559,6 @@ if __name__ == "__main__":
         generation_max_length=MAX_LENGTH,
         generation_num_samples=NUM_SAMPLE,
         generation_strict=True,
-        normalize_mode="entmax",
     )
     pred = parser(node_features, spans)
     pred = parser.prepare_sampler(pred, batch["src"], batch["src_ids"])

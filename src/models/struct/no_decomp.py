@@ -577,7 +577,7 @@ if __name__ == "__main__":
 
     # cnt = torch.tensor(cnt, dtype=torch.float) / 1000
     # print(prob, cnt)
-    # assert torch.allclose(cnt, prob, rtol=0.01, atol=10), (prob, cnt)
+    # assert torch.allclose(cnt, prob, rtol=0.01, atol=0.1), (prob, cnt)
 
     print("test sample seq")
     batch = next(iter(datamodule.train_dataloader()))

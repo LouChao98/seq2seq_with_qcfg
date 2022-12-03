@@ -12,7 +12,7 @@ log = logging.getLogger(__file__)
 
 
 class NeuralDecomp1TgtParser(TgtParserBase):
-    def __init__(self, cpd_rank=32, vocab=100, dim=256, num_layers=3, src_dim=256, **kwargs):
+    def __init__(self, cpd_rank=32, vocab=100, dim=256, num_layers=3, src_dim=256, tie_r=False, **kwargs):
         super().__init__(**kwargs)
 
         assert self.rule_hard_constraint is None, "Do not support any constraint."
@@ -35,6 +35,13 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         self.rule_mlp_parent = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
         self.rule_mlp_left = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
         self.rule_mlp_right = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
+
+        if tie_r:
+            _w, _b = self.rule_mlp_parent.out_linear.weight, self.rule_mlp_parent.out_linear.bias
+            self.rule_mlp_left.out_linear.weight = _w
+            self.rule_mlp_left.out_linear.bias = _b
+            self.rule_mlp_right.out_linear.weight = _w
+            self.rule_mlp_right.out_linear.bias = _b
 
         self.reset_parameters()
 

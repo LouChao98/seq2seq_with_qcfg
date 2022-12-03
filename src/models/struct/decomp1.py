@@ -308,8 +308,15 @@ def g_merge3(y, z, y_term, z_term, h, semiring):
 
 
 if __name__ == "__main__":
+    from torch_struct import SentCFG
+
+    from src.datamodules.scan_datamodule import SCANDataModule
     from src.models.tgt_parser.neural_decomp1 import NeuralDecomp1TgtParser
-    from src.models.tgt_parser.struct.pcfg import PCFG
+
+    datamodule = SCANDataModule(
+        "data/scan_debug.txt", "data/scan_debug.txt", "data/scan_debug.txt", enable_cache=False
+    )
+    datamodule.setup()
 
     B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT = 2, 4, 2, 5, 3, 7
     NT = TGT_NT * SRC_NT
@@ -331,62 +338,86 @@ if __name__ == "__main__":
     }
 
     pcfg = Decomp1(params, lens, **meta)
-    pcfg_ref = PCFG()
+    pcfg_ref = SentCFG((params_ref["term"], params_ref["rule"], params_ref["root"]), lens)
 
     print("test nll")
     nll = pcfg.nll
-    nll_ref = pcfg_ref(params_ref, lens)
+    nll_ref = -pcfg_ref.partition
     assert torch.allclose(nll, nll_ref), (nll, nll_ref)
 
     print("test marginal")
     m1 = pcfg.marginal
     check_full_marginal(m1["term"], m1["trace"], lens)
 
-    m2 = pcfg_ref(params_ref, lens, marginal=True)[-1]
+    m2 = pcfg_ref.marginals[-1]
     compare_marginal(m1["trace"], m2)
 
     # print('test mbr decoding')
     # decoded = pcfg.mbr_decoded
     # decoded_ref = pcfg_ref(params, lens, decode=True)
 
-    print("test sample tree")
-    output = pcfg.sample_one(return_type="full")
-    prob = (pcfg.score(output) - pcfg.partition).exp()
-    target = output["span"]
+    B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT = 2, 4, 2, 1, 2, 1
+    NT = TGT_NT * SRC_NT
+    PT = TGT_PT * SRC_PT
+    VOCAB = 4
+    NUM_SAMPLE = 50000
+    MAX_LENGTH = 4
+    r = 1
+    lens = [max(2, N - i) for i in range(B)]
+    params = Decomp1.random(B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT, r)
+    meta = {
+        "batch_size": B,
+        "nt_states": TGT_NT,
+        "nt_num_nodes": SRC_NT,
+        "pt_states": TGT_PT,
+        "pt_num_nodes": SRC_PT,
+        "batch_size": B,
+    }
+    pcfg = Decomp1(params, lens, **meta)
 
-    cnt = [0 for i in range(B)]
-    for _ in range(1000):
-        output = pcfg.sample_one(return_type="tuple")
-        for b in range(B):
-            t = target[b]
-            p = output[b]
-            if t == p:
-                cnt[b] += 1
+    # print("test sample tree")
+    # output = pcfg.sample_one(need_event=True, need_span=True)
+    # prob = (pcfg.score(output['event']) - pcfg.partition).exp()
+    # target = output["span"]
 
-    cnt = torch.tensor(cnt, dtype=torch.float) / 1000
-    assert torch.allclose(cnt, prob, rtol=0.01, atol=10), (prob, cnt)
+    # cnt = [0 for i in range(B)]
+    # for _ in range(1000):
+    #     output = pcfg.sample_one(need_span=True)["span"]
+    #     for b in range(B):
+    #         t = target[b]
+    #         p = output[b]
+    #         if t == p:
+    #             cnt[b] += 1
+
+    # cnt = torch.tensor(cnt, dtype=torch.float) / 1000
+    # print(prob, cnt)
+    # assert torch.allclose(cnt, prob, rtol=0.01, atol=0.1), (prob, cnt)
 
     print("test sample seq")
-    spans = [[(i, i, 0) for i in range(l)] + [(0, i, 0) for i in range(1, l)] for l in lens]
-    node_features = [torch.randn(l * 2 - 1, 8) for l in lens]
+    batch = next(iter(datamodule.train_dataloader()))
+    MAX_LENGTH = 2
+    B = 1
+    VOCAB = len(datamodule.tgt_vocab)
+    spans = [[(i, i + 1, 0) for i in range(l)] + [(0, i + 1, 0) for i in range(1, l)] for l in batch["src_lens"]]
+    node_features = [torch.randn(len(s), 4) for s in spans]
     parser = NeuralDecomp1TgtParser(
-        TGT_PT,
-        TGT_NT,
-        dim=8,
-        src_dim=8,
+        pt_states=TGT_PT,
+        nt_states=TGT_NT,
+        dim=4,
+        src_dim=4,
         num_layers=1,
         vocab=VOCAB,
+        datamodule=datamodule,
         use_copy=False,
         generation_max_length=MAX_LENGTH,
         generation_num_samples=NUM_SAMPLE,
         generation_strict=True,
     )
     pred = parser(node_features, spans)
-    pred = parser.prepare_sampler(pred, None, None)
+    pred = parser.prepare_sampler(pred, batch["src"], batch["src_ids"])
     samples = pred.sampler()
-    samples = parser.expand_preds_not_using_copy(samples)[0]
     for bidx in range(B):
-        count = Counter(tuple(item) for item in samples[bidx])
+        count = Counter(tuple(item[0]) for item in samples[bidx])
         total = len(samples[bidx])
 
         sub_pred = copy(pred)
@@ -405,12 +436,12 @@ if __name__ == "__main__":
 
         errors = []
         empirical_cdf = 0
-        theoratical_cfg = 0
+        theoratical_cdf = 0
         for prob, seq in probs_with_seq[:5]:
             empirical_cdf += count[tuple(seq)] / total
-            theoratical_cfg += prob / partition
-            errors.append(abs(empirical_cdf - theoratical_cfg) / theoratical_cfg)
+            theoratical_cdf += prob / partition
+            errors.append(abs(empirical_cdf - theoratical_cdf) / theoratical_cdf)
 
         assert max(errors) < 0.1, errors
-
+        print(empirical_cdf, theoratical_cdf, errors)
     print("pass")
