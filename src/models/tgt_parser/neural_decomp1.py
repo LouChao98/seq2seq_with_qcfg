@@ -23,6 +23,7 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         self.src_dim = src_dim
         self.num_layers = num_layers
         self.cpd_rank = cpd_rank
+        self.tie_r = tie_r
 
         self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)

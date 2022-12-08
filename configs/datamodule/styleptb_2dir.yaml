@@ -1,11 +1,11 @@
 _target_: src.datamodules.tsv_2dir_datamodule.TSV2DirDataModule
 
-train_file: ${data_dir}/StylePTB/ATP/debug_val.tsv
-dev_file: ${data_dir}/StylePTB/ATP/debug_val.tsv
-test_file: ${data_dir}/StylePTB/ATP/debug_val.tsv
-# train_file: ${data_dir}/StylePTB/ATP/train.tsv
-# dev_file: ${data_dir}/StylePTB/ATP/valid.tsv
-# test_file: ${data_dir}/StylePTB/ATP/test.tsv
+# train_file: ${data_dir}/StylePTB/ATP/debug_val.tsv
+# dev_file: ${data_dir}/StylePTB/ATP/debug_val.tsv
+# test_file: ${data_dir}/StylePTB/ATP/debug_val.tsv
+train_file: ${data_dir}/StylePTB/ATP/train.tsv
+dev_file: ${data_dir}/StylePTB/ATP/valid.tsv
+test_file: ${data_dir}/StylePTB/ATP/test.tsv
 
 copy_mode: none
 max_src_len: 60

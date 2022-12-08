@@ -101,16 +101,31 @@ class TwoDirectionalModule(ModelBase):
             loss = torch.zeros(1, device=model1_pred["tgt_runtime"]["pred"].device)
         else:
             if self.reg_method == "pr":
-                loss = self.pr_solver(model1_pred["tgt_runtime"]["pred"], model2_pred["tgt_runtime"]["pred"])
+                token_align_loss = self.pr_solver(
+                    model1_pred["tgt_runtime"]["pred"], model2_pred["tgt_runtime"]["pred"]
+                )
             elif self.reg_method == "emr":
                 pred1 = model1_pred["tgt_runtime"]["pred"]
                 pred2 = model2_pred["tgt_runtime"]["pred"]
-                m_term1, m_trace1 = pred1.dist.marginal_with_grad
-                m_term2, m_trace2 = pred2.dist.marginal_with_grad
+                m_term1, m_tgt_trace1 = pred1.dist.marginal_with_grad
+                m_term2, m_tgt_trace2 = pred2.dist.marginal_with_grad
                 m_term1 = m_term1.view(pred1.batch_size, -1, pred1.pt_states, pred1.pt_num_nodes).sum(2)
                 m_term2 = m_term2.view(pred2.batch_size, -1, pred2.pt_states, pred2.pt_num_nodes).sum(2)
                 m_term2 = m_term2 / (m_term2.sum(2, keepdim=True) + 1e-9)
-                loss = smoothed_hinge_loss(m_term1 - m_term2.transpose(1, 2), 0.1)
+                token_align_loss = smoothed_hinge_loss(m_term1 - m_term2.transpose(1, 2), 0.1)
+
+                _, m_src_trace1 = model1_pred["src_runtime"]["dist"].marginal_with_grad
+                _, m_src_trace2 = model2_pred["src_runtime"]["dist"].marginal_with_grad
+                m_tgt_trace1 = m_tgt_trace1.flatten(3).sum(3)
+                m_tgt_trace2 = m_tgt_trace2.flatten(3).sum(3)
+                m_src_trace1 = m_src_trace1.flatten(3).sum(3)
+                m_src_trace2 = m_src_trace2.flatten(3).sum(3)
+
+                tree_agreement_loss = smoothed_hinge_loss(m_tgt_trace1 - m_src_trace2, 0.1) + smoothed_hinge_loss(
+                    m_tgt_trace2 - m_src_trace1, 0.1
+                )
+
+                loss = token_align_loss + tree_agreement_loss
 
         return {"agreement": loss.mean()}
 

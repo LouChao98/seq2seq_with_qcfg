@@ -165,6 +165,8 @@ class TgtParserBase(nn.Module):
         rule_soft_constraint_solver=None,
         rule_reweight_constraint=None,
         rule_reweight_test_only=False,
+        score_normalization_method="none",
+        score_normalization_scale=1.0,
         generation_criteria: str = "ppl",
         generation_max_length: int = 40,
         generation_max_actions: int = 80,
@@ -188,6 +190,9 @@ class TgtParserBase(nn.Module):
         self.rule_reweight_constraint: Optional[RuleConstraintBase] = instantiate(rule_reweight_constraint)
         self.rule_reweight_test_only = rule_reweight_test_only
 
+        self.score_normalization_method = score_normalization_method
+        self.score_normalization_scale = score_normalization_scale
+
         assert generation_criteria in ("ppl", "likelihood", "contrastive", "none")
 
         self.generation_criteria = generation_criteria
@@ -201,6 +206,26 @@ class TgtParserBase(nn.Module):
 
     def forward(self, node_features, spans, **kwargs) -> TgtParserPrediction:
         raise NotImplementedError
+
+    def score_normalize(self, score: torch.Tensor, dims):
+        if self.score_normalization_method == "minmax":
+            mean_ = score.mean(dims, keepdim=True)
+            range_ = score.amax(dims, keepdim=True) - score.amin(dims, keepdim=True)
+            score = (score - mean_) / range_
+            score = self.score_normalization_scale * score
+
+        elif self.score_normalization_method == "zscore":
+            mean_, std_ = torch.std_mean(score, dims, keepdim=True)
+            score = score - mean_ / std_
+            score = self.score_normalization_scale * score
+
+        elif self.score_normalization_method == "clamp":
+            score = score.clamp(min=-100, max=100)
+        elif self.score_normalization_method == "none":
+            pass
+        else:
+            raise ValueError("Invalid potential normalization method %s" % self.score_normalization_method)
+        return score
 
     def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:
         if not inplace:
@@ -232,7 +257,7 @@ class TgtParserBase(nn.Module):
         return self.rule_soft_constraint_solver(pred, constraint_feature)
 
     def get_rl_loss(self, pred: TgtParserPrediction, ent_reg):
-        assert ent_reg > 0
+        assert ent_reg > 0, "model.decoder_entropy_reg should be > 0"
         # log pow(partition, 1/(len-1))
         partition = pred.dist.partition / (torch.tensor(pred.lengths, device=pred.device) - 1)
         reward = self.rule_soft_constraint.get_weight_from_pred(pred)

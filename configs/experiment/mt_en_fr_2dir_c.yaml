@@ -15,7 +15,7 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "mt_en_fr_${hydra:runtime.choices.model/decoder}"
+name: "mt_en_fr_2dir"
 
 trainer:
   max_epochs: 40
@@ -30,17 +30,21 @@ datamodule:
 
 model:
   model1:
+    warmup_pcfg: 1
+    warmup_qcfg: 2
     decoder:
       nt_states: 14
       pt_states: 14
       use_copy: false
       generation_max_length: 30
-      generation_num_samples: 10
+      generation_num_samples: 100
 
       rule_hard_constraint:
         _target_: src.models.constraint.fully_parameterized.FPSimpleHierarchy
 
   model2:
+    warmup_pcfg: 1
+    warmup_qcfg: 2
     decoder:
       nt_states: 14
       pt_states: 14

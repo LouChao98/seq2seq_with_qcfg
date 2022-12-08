@@ -14,7 +14,7 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb_${hydra:runtime.choices.model/decoder}"
+name: "styleptb" # _${hydra:runtime.choices.model/decoder}"
 
 trainer:
   max_epochs: 50
@@ -24,8 +24,8 @@ trainer:
 logger:
   wandb:
     project: "styleptb"
-    tags:
-      - "${hydra:runtime.choices.model/parser}"
-      - "${hydra:runtime.choices.model/tree_encoder}"
-      - "${hydra:runtime.choices.model/decoder}"
+    # tags:
+    #   - "${hydra:runtime.choices.model/parser}"
+    #   - "${hydra:runtime.choices.model/tree_encoder}"
+    #   - "${hydra:runtime.choices.model/decoder}"
     offline: ${in_cluster:}

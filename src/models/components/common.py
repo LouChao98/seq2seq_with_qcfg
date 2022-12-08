@@ -11,7 +11,7 @@ class ResidualLayer(nn.Module):
         self.out_dim = dim
 
     def forward(self, x):
-        return F.relu(self.lin2(F.relu(self.lin1(x)))) + x
+        return F.leaky_relu(self.lin2(F.leaky_relu(self.lin1(x)))) + x
 
 
 class MultiResidualLayer(nn.Module):
@@ -26,9 +26,7 @@ class MultiResidualLayer(nn.Module):
             self.out_linear = nn.Linear(res_dim, out_dim)
         else:
             self.out_linear = None
-        self.res_blocks = nn.ModuleList(
-            [ResidualLayer(res_dim) for _ in range(num_layers)]
-        )
+        self.res_blocks = nn.ModuleList([ResidualLayer(res_dim) for _ in range(num_layers)])
         self.out_dim = res_dim if out_dim is None else out_dim
 
     def forward(self, x):
@@ -88,11 +86,7 @@ class SharedDropout(nn.Module):
 
         if not self.training:
             return x
-        return (
-            x * self.get_mask(x[:, 0], self.p).unsqueeze(1)
-            if self.batch_first
-            else self.get_mask(x[0], self.p)
-        )
+        return x * self.get_mask(x[:, 0], self.p).unsqueeze(1) if self.batch_first else self.get_mask(x[0], self.p)
 
     @staticmethod
     def get_mask(x: torch.Tensor, p: float) -> torch.FloatTensor:

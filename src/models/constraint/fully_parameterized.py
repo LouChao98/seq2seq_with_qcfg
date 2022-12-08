@@ -227,7 +227,6 @@ class FPPenaltyDepthAndNonIntersection(FPPenaltyDepth):
         )
 
         for b, (pt_span, nt_span) in enumerate(zip(pt_spans, nt_spans)):
-
             for j, child1 in enumerate(nt_span):
                 for k, child2 in enumerate(nt_span):
                     if intersect(child1, child2):
@@ -239,10 +238,10 @@ class FPPenaltyDepthAndNonIntersection(FPPenaltyDepth):
                     if intersect(child1, child2):
                         nt_ntpt[b, :, :, :, j, :, k] += self.intersect_score
                         nt_ptnt[b, :, :, :, k, :, j] += self.intersect_score
-            # for j, child1 in enumerate(pt_span):
-            #     for k, child2 in enumerate(pt_span):
-            #         if intersect(child1, child2):
-            #             nt_ptpt[b, :, :, :, j, :, k] += self.intersect_score
+            for j, child1 in enumerate(pt_span):
+                for k, child2 in enumerate(pt_span):
+                    if intersect(child1, child2):
+                        nt_ptpt[b, :, :, :, j, :, k] += self.intersect_score
         return node_score
 
 

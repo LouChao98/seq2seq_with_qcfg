@@ -4,42 +4,30 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: styleptb_2dir
-  - override /model: joint_two2
+  - override /datamodule: cognition_en_zh
+  - override /model: pretrain
   - override /callbacks: default
-  - override /logger: wandb
+  - override /logger: tensorboard
   - override /trainer: default
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb_2dir"
+name: "mt_pretrain"
 
 datamodule:
-  copy_mode: phrase
-
-model:
-  model1:
-    decoder:
-      use_copy: true
-  model2:
-    decoder:
-      use_copy: true
+  load_gold_tree: false
+  copy_mode: "none"
+  batch_size: 256
+  eval_batch_size: 256
+  enable_cache: false
 
 trainer:
-  max_epochs: 50
-  accumulate_grad_batches: 8
+  max_epochs: 5
+  accumulate_grad_batches: 1
   gradient_clip_val: 3
 
 callbacks:
-  model_checkpoint:
-    monitor: m1/val/ppl
   early_stopping:
-    monitor: m1/val/ppl
-
-logger:
-  wandb:
-    project: "styleptb"
-    tags: []
-    offline: ${in_cluster:}
+    patience: 10

@@ -5,9 +5,9 @@
 
 defaults:
   # - /model/decoder/constraint: fp_hard_sh
-  - override /datamodule: mt_en_fr
+  - override /datamodule: cognition_en_zh
   - override /model: pcfg_pcfg_reinforce
-  # - override /model/decoder: decomp1_skeleton
+  - override /model/test_metric: sbleu_zh
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -16,10 +16,10 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "mt_en_fr_${hydra:runtime.choices.model/decoder}"
+name: "cognition_en_zh_${hydra:runtime.choices.model/decoder}"
 
 trainer:
-  max_epochs: 40
+  max_epochs: 15
   accumulate_grad_batches: 8
   gradient_clip_val: 3
 
@@ -27,9 +27,10 @@ datamodule:
   copy_mode: none
   batch_size: 2
   eval_batch_size: 2
-  vocab_min_freq: 1
 
 model:
+  real_val_every_n_epochs: 1
+
   decoder:
     nt_states: 14
     pt_states: 14
@@ -39,5 +40,5 @@ model:
 
 logger:
   wandb:
-    project: "mt_en_fr"
+    project: "cognition_en_zh"
     offline: ${in_cluster:}

@@ -3,6 +3,7 @@ import logging
 import torch
 import torch.nn.functional as F
 
+from ..components.common import MultiResidualLayer
 from ..components.sparse_activations import entmax15, sparsemax
 from .base import TgtParserPrediction
 from .neural_decomp1 import NeuralDecomp1TgtParser
@@ -22,14 +23,19 @@ class NeuralDecomp1SkeletonTgtParser(NeuralDecomp1TgtParser):
     #       Unifying Probabilistic Context-Free Grammars and Dynamic Bayesian Networks
     # A -> BC and A -> w is seperated by a structure random variable z.
     # Here we use z to choose ->NT ->PT
-    def __init__(self, normalize_mode="softmax", **kwargs):
+    def __init__(self, normalize_mode="softmax", use_nn=True, **kwargs):
         super().__init__(**kwargs)
         self.normalize_mode = normalize_mode
         self.normalizer = normalize_func[normalize_mode]
 
-        rule_skeleton = (torch.tensor([self.nt_states, self.pt_states]) / (self.nt_states + self.pt_states)).log()
-        rule_skeleton = rule_skeleton[None, :, None].repeat(2, 1, self.cpd_rank)  # 2(direction) x 2(nt/pt) x r
-        self.register_parameter("rule_skeleton", torch.nn.Parameter(rule_skeleton, requires_grad=True))
+        assert not use_nn or self.tie_r
+        self.use_nn = use_nn
+        if self.use_nn:
+            self.skeleton_mlp = MultiResidualLayer(self.rule_mlp_parent.out_linear.weight.shape[1], self.dim, 1)
+        else:
+            rule_skeleton = (torch.tensor([self.nt_states, self.pt_states]) / (self.nt_states + self.pt_states)).log()
+            rule_skeleton = rule_skeleton[None, :, None].repeat(2, 1, self.cpd_rank)  # 2(direction) x 2(nt/pt) x r
+            self.register_parameter("rule_skeleton", torch.nn.Parameter(rule_skeleton, requires_grad=True))
 
     def forward(self, node_features, spans):
         batch_size = len(spans)
@@ -77,7 +83,13 @@ class NeuralDecomp1SkeletonTgtParser(NeuralDecomp1TgtParser):
         rule_right_nt = self.rule_mlp_right(nt_emb)
         rule_right_pt = self.rule_mlp_right(pt_emb)
 
-        rule_skeleton = self.rule_skeleton.log_softmax(1)
+        if self.use_nn:
+            # -> r x 4
+            rule_skeleton = self.skeleton_mlp(self.rule_mlp_parent.out_linear.weight)
+            rule_skeleton = rule_skeleton.transpose(0, 1).view(2, 2, -1)
+            rule_skeleton = rule_skeleton.log_softmax(1)
+        else:
+            rule_skeleton = self.rule_skeleton.log_softmax(1)
 
         # fmt: off
         device = roots.device

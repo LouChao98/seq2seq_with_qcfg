@@ -1,6 +1,6 @@
 import gc
 import logging
-from typing import Any, List
+from typing import Any, List, Sequence
 
 import torch
 import torchmetrics
@@ -9,6 +9,34 @@ from torchmetrics import Metric
 from src.utils.executor import Executor
 
 logger = logging.getLogger(__file__)
+
+
+class SacreBLEUScore(torchmetrics.SacreBLEUScore):
+    def __init__(self, lang="en") -> None:
+        super().__init__(tokenize="zh" if lang == "zh" else "13a")
+        self.lang = lang
+
+    def update(self, preds: Sequence[str], target: Sequence[Sequence[str]]) -> None:
+        if self.lang == "zh":
+            preds = ["".join(item) for item in preds]
+            target = [["".join(item)] for item in target]
+        else:
+            preds = [" ".join(item) for item in preds]
+            target = [[" ".join(item)] for item in target]
+        return super().update(preds, target)
+
+    def compute(self):
+        return {f"sbleu-{self.n_gram}": super().compute().item()}
+
+
+class BLEUScore(torchmetrics.BLEUScore):
+    def update(self, preds: Sequence[str], target: Sequence[Sequence[str]]) -> None:
+        preds = [" ".join(item) for item in preds]
+        target = [[" ".join(item)] for item in target]
+        return super().update(preds, target)
+
+    def compute(self):
+        return {f"bleu-{self.n_gram}": super().compute().item()}
 
 
 class PerplexityMetric(Metric):
@@ -71,13 +99,7 @@ class MultiMetric(Metric):
 
     def update(self, preds, targets):
         for n, m in self._metrics.items():
-            if isinstance(m, (torchmetrics.BLEUScore, torchmetrics.SacreBLEUScore)):
-                m.update(
-                    [" ".join(item) for item in preds],
-                    [[" ".join(item)] for item in targets],
-                )
-            else:
-                m.update(preds, targets)
+            m.update(preds, targets)
 
     def compute(self):
         outputs = {}

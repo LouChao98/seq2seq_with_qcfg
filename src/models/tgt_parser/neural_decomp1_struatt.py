@@ -13,7 +13,7 @@ log = logging.getLogger(__file__)
 
 
 class NeuralDecomp1StruAttTgtParser(TgtParserBase):
-    def __init__(self, cpd_rank=32, vocab=100, dim=256, num_layers=3, src_dim=256, **kwargs):
+    def __init__(self, cpd_rank=32, vocab=100, dim=256, num_layers=3, src_dim=256, ignore_weight=False, **kwargs):
         super().__init__(**kwargs)
 
         assert self.rule_hard_constraint is None, "Do not support any constraint."
@@ -24,6 +24,7 @@ class NeuralDecomp1StruAttTgtParser(TgtParserBase):
         self.src_dim = src_dim
         self.num_layers = num_layers
         self.cpd_rank = cpd_rank
+        self.ignore_weight = ignore_weight
 
         self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -78,6 +79,9 @@ class NeuralDecomp1StruAttTgtParser(TgtParserBase):
         pt_node_features = pad_sequence(pt_node_features, batch_first=True, padding_value=0.0)
         nt_weights = pad_sequence(nt_weights, batch_first=True, padding_value=0.0).clamp(1e-32).log()
         pt_weights = pad_sequence(pt_weights, batch_first=True, padding_value=0.0).clamp(1e-32).log()
+        if self.ignore_weight:
+            nt_weights.zero_()
+            pt_weights.zero_()
         pt_num_nodes = pt_node_features.size(1)
         nt_num_nodes = nt_node_features.size(1)
         return (

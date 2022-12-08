@@ -102,7 +102,7 @@ class UngroundedPRLineSearchSolver:
                     # This can also be understood as the slack-penalty version
                     # of PR. The dual problem is
                     # max -b\lambda - log Z s.t. 0 <= \lambda, dual_norm(\lambda) < \sigma
-                    log.warning("Line search fails.")
+                    log.warning("Failing.")
                 return lgrid_np[argmax_i]
             lt, rt = target[argmax_i - 1], target[argmax_i + 1]
             lb, rb = lgrid_np[argmax_i - 1], lgrid_np[argmax_i + 1]

@@ -4,9 +4,9 @@
 # python train.py experiment=example
 
 defaults:
-  - override /datamodule: styleptb_2dir
-  - override /model: joint_two2
-  - override /callbacks: default
+  - override /datamodule: mt_en_fr
+  - override /model: pcfg_pcfg_struatt
+  - override /callbacks: default_hparams_search
   - override /logger: wandb
   - override /trainer: default
 
@@ -14,32 +14,28 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "styleptb_2dir"
-
-datamodule:
-  copy_mode: phrase
-
-model:
-  model1:
-    decoder:
-      use_copy: true
-  model2:
-    decoder:
-      use_copy: true
+name: "mt_en_fr_ps"
 
 trainer:
-  max_epochs: 50
+  max_epochs: 40
   accumulate_grad_batches: 8
   gradient_clip_val: 3
 
-callbacks:
-  model_checkpoint:
-    monitor: m1/val/ppl
-  early_stopping:
-    monitor: m1/val/ppl
+datamodule:
+  copy_mode: none
+  batch_size: 4
+  eval_batch_size: 4
+  vocab_min_freq: 2
+
+model:
+  decoder:
+    nt_states: 14
+    pt_states: 14
+    use_copy: false
+    generation_max_length: 30
+    generation_num_samples: 100
 
 logger:
   wandb:
-    project: "styleptb"
-    tags: []
+    project: "mt_en_fr"
     offline: ${in_cluster:}

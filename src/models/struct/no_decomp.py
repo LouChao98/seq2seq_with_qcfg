@@ -225,9 +225,9 @@ class NoDecomp(DecompBase):
         pt = tgt_pt * src_pt
         src = src_nt + src_pt
         return {
-            "term": torch.randn(bsz, max_len, pt).log_softmax(-1).requires_grad_(True),
-            "root": torch.randn(bsz, nt).log_softmax(-1).requires_grad_(True),
-            "rule": torch.randn(bsz, nt, nt + pt, nt + pt)
+            "term": (torch.randn(bsz, max_len, pt) * 5).log_softmax(-1).requires_grad_(True),
+            "root": (torch.randn(bsz, nt) * 5).log_softmax(-1).requires_grad_(True),
+            "rule": (torch.randn(bsz, nt, nt + pt, nt + pt) * 5)
             .flatten(2)
             .log_softmax(-1)
             .view(bsz, nt, nt + pt, nt + pt)

@@ -20,66 +20,23 @@ from src.models.base import ModelBase
 from src.models.posterior_regularization.general import NeqNT, NeqPT
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.src_parser.base import SrcParserBase
+from src.models.src_parser.neural_cpcfg import NeuralCPCFGSrcParser
 from src.models.struct.semiring import LogSemiring
-from src.models.tgt_parser.base import NO_COPY_SPAN, TgtParserBase
-from src.models.tgt_parser.neural_decomp8 import NeuralDecomp8TgtParser
+from src.models.tgt_parser.base import TgtParserBase
 from src.models.tree_encoder.base import TreeEncoderBase
 from src.utils.fn import annotate_snt_with_brackets, apply_to_nested_tensor, report_ids_when_err
 from src.utils.metric import PerplexityMetric
 
+from .general_seq2seq import GeneralSeq2SeqModule
+
 log = logging.getLogger(__file__)
 
 
-class GeneralSeq2SeqModule(ModelBase):
-    """A module for general seq2seq tasks.
-
-    * support pretrained models
-    * encoders
-    * custom test metric
-    """
-
-    def __init__(
-        self,
-        embedding=None,
-        transformer_pretrained_model=None,
-        fix_pretrained=True,
-        encoder=None,
-        tree_encoder=None,
-        decoder=None,
-        parser=None,
-        optimizer=None,
-        scheduler=None,
-        test_metric=None,
-        load_from_checkpoint=None,
-        load_src_parser_from_checkpoint=None,
-        load_tgt_parser_from_checkpoint=None,
-        param_initializer="xavier_uniform",
-        real_val_every_n_epochs=5,
-        export_detailed_prediction=True,
-        # extension
-        warmup_pcfg=0,
-        warmup_qcfg=0,
-        length_calibrate=False,
-        pr_pt_neq_reg=0.0,
-        pr_nt_neq_reg=0.0,
-        noisy_spans_reg=0.0,
-        noisy_spans_num=0.0,
-        parser_entropy_reg=0.0,
-        decoder_entropy_reg=0.0,
-        soft_constraint_loss_pr=0.0,
-        soft_constraint_loss_rl=False,
-        soft_constraint_loss_raml=False,
-        mini_target=False,
-    ):
-        # real_val_every_n_epochs = 1
-        assert warmup_pcfg <= warmup_qcfg
-        self.warmup = warmup_pcfg
-        super().__init__()
-        self.save_hyperparameters(logger=False)
+class CPRModule(GeneralSeq2SeqModule):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
-        super().setup(stage)
-
         self.profiler = self.trainer.profiler or PassThroughProfiler()
         if not isinstance(self.profiler, PassThroughProfiler):
             log.warning("Profiler is enabled.")
@@ -107,7 +64,9 @@ class GeneralSeq2SeqModule(ModelBase):
             + (0 if self.pretrained is None else self.pretrained.config.hidden_size),
         )
 
-        self.parser: SrcParserBase = instantiate(self.hparams.parser, vocab=len(self.datamodule.src_vocab))
+        self.parser: SrcParserBase = instantiate(
+            self.hparams.parser, vocab=len(self.datamodule.src_vocab), enc_dim=self.encoder.get_output_dim()
+        )
         self.tree_encoder: TreeEncoderBase = instantiate(self.hparams.tree_encoder, dim=self.encoder.get_output_dim())
         self.decoder: TgtParserBase = instantiate(
             self.hparams.decoder,
@@ -150,33 +109,6 @@ class GeneralSeq2SeqModule(ModelBase):
         if self.hparams.load_tgt_parser_from_checkpoint is not None:
             ...
 
-    def setup_patch(self, stage: Optional[str] = None, datamodule=None):
-        # allow submodule changing submodules before loading checkpoint
-        ...
-
-    def encode(self, batch):
-        src_ids, src_lens = batch["src_ids"], batch["src_lens"]
-        x = []
-        if self.embedding is not None:
-            h = self.embedding(src_ids)
-            x.append(h)
-        if self.pretrained is not None:
-            h = self.pretrained(**batch["transformer_inputs"])[0]
-            if len(h) > len(src_ids):
-                h = h[: len(src_ids)]
-            out = torch.zeros(
-                src_ids.shape[0],
-                src_ids.shape[1] + 1,
-                h.shape[-1],
-                device=src_ids.device,
-            )
-            scatter_mean(h, batch["transformer_offset"], 1, out=out)
-            out = out[:, 1:]
-            x.append(out)
-        x = torch.cat(x, dim=-1) if len(x) > 1 else x[0]
-        x = self.encoder(x, src_lens)
-        return x
-
     @report_ids_when_err
     @profile_every(5, enable=False)
     def forward(self, batch):
@@ -193,14 +125,18 @@ class GeneralSeq2SeqModule(ModelBase):
         }
         logging_vals = {}
 
-        with self.profiler.profile("compute_src_nll_and_sampling"):
-            dist = self.parser(src_ids, src_lens, extra_scores=extra_scores)
-            src_loss = src_nll = dist.nll
-            src_event, src_logprob = self.parser.sample(src_ids, src_lens, dist=dist)
-            src_spans = src_event["span"]
-
         with self.profiler.profile("src_encoding"):
             x = self.encode(batch)
+
+        with self.profiler.profile("compute_src_nll_and_sampling"):
+            z, kl = self.parser.get_z(x)
+            dist = self.parser(src_ids, src_lens, z, extra_scores=extra_scores)
+            src_nll = dist.nll
+            src_loss = kl + src_nll
+            src_event, src_logprob = self.parser.sample(src_ids, src_lens, z, dist=dist)
+            src_spans = src_event["span"]
+
+        with self.profiler.profile("tree_encoding"):
             # span labels are discarded (set to -1)
             node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
@@ -216,7 +152,7 @@ class GeneralSeq2SeqModule(ModelBase):
             objective = 0.0
         else:
             with self.profiler.profile("reward"), torch.no_grad():
-                src_spans_argmax = self.parser.argmax(src_ids, src_lens, dist=dist)
+                src_spans_argmax = self.parser.argmax(src_ids, src_lens, z, dist=dist)
                 node_features_argmax, node_spans_argmax = self.tree_encoder(x, src_lens, spans=src_spans_argmax)
                 tgt_argmax_pred = self.decoder(node_features_argmax, node_spans_argmax)
                 tgt_argmax_pred = self.decoder.observe_x(tgt_argmax_pred, **observed)
@@ -234,7 +170,6 @@ class GeneralSeq2SeqModule(ModelBase):
         pr_neq_pt_reg = 0
         pr_neq_nt_reg = 0
         length_calibrate_term = 0
-        mini_target = 0
 
         if self.training and self.current_epoch >= self.hparams.warmup_qcfg:
             if self.hparams.soft_constraint_loss_rl:
@@ -248,7 +183,7 @@ class GeneralSeq2SeqModule(ModelBase):
                 soft_constraint_pr_loss = e * soft_constraint_pr_loss
 
             if (e := self.hparams.parser_entropy_reg) > 0:
-                entropy = self.parser.entropy(src_ids, src_lens, dist)
+                entropy = self.parser.entropy(src_ids, src_lens, z, dist)
                 src_entropy_reg = -e * entropy
                 logging_vals["src_entropy"] = entropy
             if (e := self.hparams.decoder_entropy_reg) > 0:
@@ -284,17 +219,6 @@ class GeneralSeq2SeqModule(ModelBase):
             if self.hparams.length_calibrate:
                 length_calibrate_term = -tgt_pred.dist.partition_at_length(tgt_pred.params, tgt_lens)
 
-            if self.hparams.mini_target:
-                mini_node_features = [item[-1:].expand(2, -1) for item in node_features]
-                mini_node_spans = [[(0, 1, NO_COPY_SPAN), (0, 2, NO_COPY_SPAN)] for _ in range(len(node_spans))]
-                nt_range, pt_range = self.decoder.nt_span_range, self.decoder.pt_span_range
-                self.decoder.nt_span_range = self.decoder.pt_span_range = [1, 1]
-                mini_pred = self.decoder(mini_node_features, mini_node_spans)
-                mini_pred = self.decoder.observe_x(mini_pred, **observed)
-                mini_target = mini_pred.dist.nll
-                logging_vals["mini_target"] = mini_target
-                self.decoder.nt_span_range, self.decoder.pt_span_range = nt_range, pt_range
-
         return {
             "decoder": tgt_loss
             + length_calibrate_term
@@ -303,8 +227,7 @@ class GeneralSeq2SeqModule(ModelBase):
             + noisy_span_loss
             + pr_neq_pt_reg
             + pr_neq_nt_reg
-            + pt_prior_loss
-            + mini_target,
+            + pt_prior_loss,
             "encoder": src_loss + objective + src_entropy_reg,
             "tgt_nll": tgt_nll,
             "src_nll": src_nll,
@@ -331,14 +254,14 @@ class GeneralSeq2SeqModule(ModelBase):
             # "prior_alignment": batch.get("prior_alignment"),
             # "observed_mask": batch.get("tgt_masks"),
         }
-
-        src_spans = self.parser.argmax(src_ids, src_lens, extra_scores=extra_scores)
+        x = self.encode(batch)
+        z, kl = self.parser.get_z(x)
+        src_spans = self.parser.argmax(src_ids, src_lens, z, extra_scores=extra_scores)
         src_annotated = []
         for snt, src_span_inst in zip(batch["src"], src_spans):
             tree = annotate_snt_with_brackets(snt, src_span_inst)
             src_annotated.append(tree)
 
-        x = self.encode(batch)
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         if self.current_epoch < self.hparams.warmup_pcfg:
@@ -350,17 +273,6 @@ class GeneralSeq2SeqModule(ModelBase):
         # # visualize pr constrained dist
         # constraint_feature = self.decoder.rule_soft_constraint.get_feature_from_pred(tgt_pred)
         # dist = self.decoder.rule_soft_constraint_solver(tgt_pred, constraint_feature, get_dist=True)
-        # tgt_pred.dist = dist
-
-        # visualize reward: nodecomp
-        # reward = self.decoder.rule_soft_constraint.get_weight_from_pred(tgt_pred)
-        # dist = tgt_pred.dist.spawn(
-        #     params={
-        #         "term": torch.where(tgt_pred.dist.params["term"] > -1e8, 0, -1e9),
-        #         "rule": torch.where(tgt_pred.dist.params["rule"] > -1e8, reward, -1e9),
-        #         "root": torch.where(tgt_pred.dist.params["root"] > -1e8, 0.0, -1e9),
-        #     }
-        # )
         # tgt_pred.dist = dist
 
         tgt_spans, aligned_spans, pt_spans, nt_spans = self.decoder.parse(tgt_pred)
@@ -430,10 +342,11 @@ class GeneralSeq2SeqModule(ModelBase):
         # actually predict the target sequence
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
 
-        dist = self.parser(src_ids, src_lens)
-        src_spans = self.parser.argmax(src_ids, src_lens, dist=dist)
-
         x = self.encode(batch)
+        z, kl = self.parser.get_z(x)
+        dist = self.parser(src_ids, src_lens, z)
+        src_spans = self.parser.argmax(src_ids, src_lens, z, dist=dist)
+
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
         tgt_pred = self.decoder(node_features, node_spans)
@@ -454,158 +367,3 @@ class GeneralSeq2SeqModule(ModelBase):
             baseline = None
 
         return {"pred": [item[0] for item in y_preds], "score": [item[1] for item in y_preds], "baseline": baseline}
-
-    def print_prediction(self, batch, handler=None, batch_size=1):
-        training_state = self.training
-        self.train(False)
-        if handler is None:
-            handler = self.print
-        if isinstance(batch_size, int):
-            batch = make_subbatch(batch, batch_size)
-        trees = self.forward_visualize(batch)
-        for src, tgt, alg in zip(trees["src_tree"], trees["tgt_tree"], trees["alignment"]):
-            handler("Src:  ", src)
-            handler("Tgt:  ", tgt)
-            handler("Alignment:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
-            handler("=" * 79)
-        self.train(training_state)
-
-    def training_step(self, batch: Any, batch_idx: int, *, forward_prediction=None):
-        output = forward_prediction if forward_prediction is not None else self(batch)
-        loss_decoder = output["decoder"].mean()
-        loss_encoder = output["encoder"].mean()
-        loss = loss_encoder + loss_decoder
-        ppl = self.train_metric(output["tgt_nll"], batch["tgt_lens"])
-        self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
-        self.log("train/ppl", ppl, prog_bar=True)
-        self.log("train/src", loss_encoder, prog_bar=True)
-        self.log("train/tgt", loss_decoder, prog_bar=True)
-
-        if "log" in output:
-            self.log_dict({"train/" + k: v.mean() for k, v in output["log"].items()})
-
-        if batch_idx == 0:
-            self.print_prediction(batch)
-
-        return {"loss": loss}
-
-    def on_validation_epoch_start(self) -> None:
-        super().on_validation_epoch_start()
-        self.val_metric.reset()
-        self.test_metric.reset()
-
-    def validation_step(self, batch: Any, batch_idx: int):
-        output = self(batch)
-        loss_decoder = output["decoder"].mean()
-        loss_encoder = output["encoder"].mean()
-        loss = loss_encoder + loss_decoder
-        self.val_metric(output["tgt_nll"], batch["tgt_lens"])
-
-        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0 and self.current_epoch > self.warmup:
-            predicted = self.test_step(batch, batch_idx=None)
-        else:
-            predicted = {}
-
-        # if batch_idx == 0:
-        #     self.print_prediction(batch)
-
-        return {"loss": loss} | predicted
-
-    def validation_epoch_end(self, outputs: List[Any]):
-        ppl = self.val_metric.compute()  # get val accuracy from current epoch
-        self.val_best_metric.update(ppl)
-        best_ppl = self.val_best_metric.compute().item()
-        self.log("val/ppl", ppl, on_epoch=True, prog_bar=True)
-        self.log("val/ppl_best", best_ppl, on_epoch=True, prog_bar=True)
-        self.print("val/epoch", str(self.current_epoch + 1))
-        self.print("val/ppl", str(ppl))
-
-        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0 and self.current_epoch > self.warmup:
-            acc = self.test_metric.compute()
-            self.log_dict({"val/" + k: v for k, v in acc.items()})
-            self.print(acc)
-            self.save_predictions(outputs, f"predict_on_val_epoch{self.current_epoch}")
-            if outputs[0].get("detailed") is not None:
-                self.save_detailed_predictions(outputs, f"detailed_predict_on_val_epoch{self.current_epoch}")
-
-    @torch.inference_mode(False)
-    def on_test_epoch_start(self) -> None:
-        self.test_metric.reset()
-        return super().on_test_epoch_start()
-
-    @torch.inference_mode(False)
-    @torch.no_grad()
-    def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = None):
-        # patch for inference_mode
-        batch = apply_to_nested_tensor(batch, func=lambda x: x.clone())
-
-        preds = self.forward_generate(batch, get_baseline=self.hparams.export_detailed_prediction)
-        targets = batch["tgt"]
-        self.test_metric([item["tgt"] for item in preds["pred"]], targets)
-
-        # if batch_idx == 0:
-        #     self.print_prediction(batch)
-
-        def split_prediction_string(s: str):
-            buffer = []
-            output = []
-            for line in chain(s.split("\n"), ["==="]):
-                if line.startswith("==="):
-                    if len(buffer) > 0:
-                        output.append("\n".join(buffer))
-                        buffer.clear()
-                elif len(line.strip()) > 0:
-                    buffer.append(line)
-            return output
-
-        if self.hparams.export_detailed_prediction:
-            device = batch["src_ids"].device
-            str_io = StringIO()
-            self.print_prediction(batch, handler=partial(print, file=str_io), batch_size=None)
-            parses_on_given = split_prediction_string(str_io.getvalue())
-            scores_on_given = preds["baseline"]
-            parses_on_predicted = []
-            for pred in preds["pred"]:
-                _batch = self.datamodule.collator([pred])
-                _batch = self.datamodule.transfer_batch_to_device(_batch, device, 0)
-                str_io = StringIO()
-                self.print_prediction(_batch, handler=partial(print, file=str_io))
-                parses_on_predicted.extend(split_prediction_string(str_io.getvalue()))
-            scores_on_predicted = preds["score"]
-            assert (
-                len(parses_on_given) == len(scores_on_given) == len(parses_on_predicted) == len(scores_on_predicted)
-            ), (len(parses_on_given), len(scores_on_given), len(parses_on_predicted), len(scores_on_predicted))
-            detailed = list(zip(parses_on_given, scores_on_given, parses_on_predicted, scores_on_predicted))
-        else:
-            detailed = None
-
-        return {
-            "preds": [item["tgt"] for item in preds["pred"]],
-            "detailed": detailed,
-            "targets": targets,
-            "id": batch["id"],
-        }
-
-    def test_epoch_end(self, outputs) -> None:
-        acc = self.test_metric.compute()
-        d = {"test/" + k: v for k, v in acc.items()}
-        d["step"] = self.global_step
-        self.log_dict(d)
-        self.print(acc)
-        self.save_predictions(outputs)
-        if outputs[0].get("detailed") is not None:
-            self.save_detailed_predictions(outputs)
-
-
-def make_subbatch(batch, size):
-    output = {}
-    for key, value in batch.items():
-        if key == "transformer_inputs":
-            output[key] = value
-        elif key == "tgt_masks":
-            output[key] = [item[:size] for item in value]
-        elif key == "src_masks":
-            output[key] = [item[:size] for item in value]
-        else:
-            output[key] = value[:size]
-    return output

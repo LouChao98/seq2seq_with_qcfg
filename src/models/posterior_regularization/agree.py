@@ -26,6 +26,11 @@ class PTAgree:
 
         cparams1 = apply_to_nested_tensor(pred1.posterior_params, lambda x: x.detach())
         cparams2 = apply_to_nested_tensor(pred2.posterior_params, lambda x: x.detach())
+
+        # If phrase copy, p(pt align to some node) = 0. So PTAgree does not like phrase copy.
+        cparams1["constraint"] = None
+        cparams2["constraint"] = None
+
         dist1 = pred1.dist.spawn(params=cparams1)
         dist2 = pred2.dist.spawn(params=cparams2)
 

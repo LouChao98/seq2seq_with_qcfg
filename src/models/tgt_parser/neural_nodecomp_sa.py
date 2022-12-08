@@ -113,10 +113,12 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         emb_r = self.position_embedding(_at_t[..., 1])
         all_emb = all_emb + emb_l + emb_r
         all_emb = self.emb_layernorm(all_emb)
-
-        all_emb = self.encoder(all_emb, attention_mask=(rhs_mask.unsqueeze(1) & rhs_mask.unsqueeze(2)).unsqueeze(1))[
-            0
-        ]
+        # all_emb = _inp = all_emb.detach().requires_grad_()
+        _att_mask = (rhs_mask.unsqueeze(1) & rhs_mask.unsqueeze(2)).unsqueeze(1)
+        _att_mask = (1.0 - _att_mask.float()) * torch.finfo(all_emb.dtype).min
+        all_emb = self.encoder(all_emb, attention_mask=_att_mask)[0]
+        # all_emb[2,0].sum().backward()
+        # breakpoint()
         nt_emb, pt_emb = torch.split(all_emb, (nt, pt), 1)
 
         # S->A

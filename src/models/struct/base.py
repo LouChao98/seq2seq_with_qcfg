@@ -97,6 +97,8 @@ class DecompBase:
                         for value1, value2 in zip(params[0][key], params[1][key]):
                             converted.append(semiring.convert(value1, value2))
                         new_params[key] = converted
+                elif key.startswith("_"):
+                    continue
                 else:
                     assert params[0][key] is None, f"Not implemented for {key}"
             semiring.set_device(params[0][self.KEYS[0]].device)
@@ -116,6 +118,8 @@ class DecompBase:
                         for value in params[key]:
                             converted.append(semiring.convert(value))
                         new_params[key] = converted
+                elif key.startswith("_"):
+                    continue
                 else:
                     assert params[key] is None, f"Not implemented for {key}"
             semiring.set_device(params[self.KEYS[0]].device)

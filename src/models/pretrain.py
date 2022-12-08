@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 from hydra.utils import instantiate
 from torchmetrics import Metric, MinMetric
-from transformers import AutoModel
 
 from src.models.base import ModelBase
 from src.models.src_parser.base import SrcParserBase
