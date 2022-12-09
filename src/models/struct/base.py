@@ -259,21 +259,26 @@ class DecompBase:
         term_m: Tensor = marginal["term"]
         # to avoid some trivial corner cases.
         if seq_len >= 3:
-            scores = trace_m.flatten(3).sum(-1)
+            scores = trace_m.flatten(3).sum(-1) if trace_m.ndim > 3 else trace_m
             spans = _cky_zero_order(scores, self.lens)
         else:
             spans = [[(0, 1), (1, 2), (0, 2)] for _ in range(batch)]
 
-        nt_label = trace_m.flatten(3).argmax(-1)
-        nt_label_tgt = torch.div(nt_label, self.nt_num_nodes, rounding_mode="floor")
-        nt_label_src = torch.remainder(nt_label, self.nt_num_nodes)
+        has_label = trace_m.ndim > 3
         pt_label = term_m.flatten(2).argmax(-1)
         pt_label_tgt = torch.div(pt_label, self.pt_num_nodes, rounding_mode="floor")
         pt_label_src = torch.remainder(pt_label, self.pt_num_nodes)
-        nt_label_tgt = nt_label_tgt.cpu().numpy()
-        nt_label_src = nt_label_src.cpu().numpy()
         pt_label_tgt = pt_label_tgt.cpu().numpy()
         pt_label_src = pt_label_src.cpu().numpy()
+        if has_label:
+            nt_label = trace_m.flatten(3).argmax(-1)
+            nt_label_tgt = torch.div(nt_label, self.nt_num_nodes, rounding_mode="floor")
+            nt_label_src = torch.remainder(nt_label, self.nt_num_nodes)
+            nt_label_tgt = nt_label_tgt.cpu().numpy()
+            nt_label_src = nt_label_src.cpu().numpy()
+        else:
+            _naive_label = type("_NL", (object,), {"__getitem__": lambda *x: None})()
+            nt_label_tgt = nt_label_src = _naive_label
         spans_ = []
         for i, spans_item in enumerate(spans):
             labels_spans_item = []

@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from numba import jit
 from torch import Tensor
+from torch_struct.semirings.sample import SampledSemiring
 
 from ._fn import diagonal_copy_, stripe
 from ._utils import (
@@ -166,6 +167,29 @@ class Decomp9(DecompBase):
         logZ = semiring.sum(final.flatten(-2), dim=-1)
         logZ = semiring.unconvert(logZ)
         return logZ, _span_indicator
+
+    def sample_one(self, need_event=False, need_span=True):
+        params = {
+            k: v.detach().requires_grad_() if isinstance(v, torch.Tensor) else v for k, v in self.params.items()
+        }
+        logZ, trace = self.inside(params, SampledSemiring, True)
+        logZ.sum().backward()
+
+        output = {"logZ": logZ}
+
+        if need_span:
+            spans = [[] for _ in range(self.batch_size)]
+            for b, i, j in trace.grad.nonzero().tolist():
+                spans[b].append((i, j, None, None))
+            for b, i, state_node in params["term"].grad.nonzero().tolist():
+                state, node = divmod(state_node, self.pt_num_nodes)
+                spans[b].append((i, i + 1, state, node))
+            output["span"] = spans
+
+        if need_event:
+            output["event"] = {k: params[k].grad for k in self.KEYS} | {"trace": trace.grad[0]}
+
+        return output
 
     @staticmethod
     def random(bsz, max_len, tgt_pt, src_pt, tgt_nt, src_nt, r):

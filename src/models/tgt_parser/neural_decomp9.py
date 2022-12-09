@@ -131,14 +131,14 @@ class NeuralDecomp9TgtParser(TgtParserBase):
         # fmt: on
         _mask = torch.cat([nt_mask, pt_mask], dim=1)[:, None, None].expand(-1, self.cpd_rank, nt_num_nodes, -1)
 
-        rule_align_left[_mask] = self.neg_huge
-        rule_align_right[_mask] = self.neg_huge
+        rule_align_left[~_mask] = self.neg_huge
+        rule_align_right[~_mask] = self.neg_huge
 
         if self.rule_hard_constraint is not None:
             raise NotImplementedError
 
-        rule_align_left = rule_align_left.log_softmax(-1)
-        rule_align_right = rule_align_right.log_softmax(-1)
+        rule_align_left = rule_align_left.log_softmax(-1).clone()
+        rule_align_right = rule_align_right.log_softmax(-1).clone()
 
         _mask = (~nt_mask)[:, None, :, None].expand(-1, self.cpd_rank, -1, nt_num_nodes + pt_num_nodes)
         rule_align_left[_mask] = self.neg_huge

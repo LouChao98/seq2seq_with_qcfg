@@ -274,7 +274,18 @@ class TgtParserBase(nn.Module):
                 "root": torch.where(pred.dist.params["root"] > -1e8, 0.0, -1e9),
             }
         )
-        return dist.cross_entropy(pred.dist, fix_left=True) + pred.dist.nll
+        return (
+            dist.cross_entropy(
+                pred.dist.spawn(
+                    params={
+                        "term": pred.dist.params["term"].detach(),
+                        "root": pred.dist.params["root"].detach(),
+                    }
+                ),
+                fix_left=True,
+            )
+            + pred.dist.nll
+        )
 
     def get_noisy_span_loss(self, node_features, node_spans, num_or_ratio, observes):
         noisy_features, noisy_spans = [], []

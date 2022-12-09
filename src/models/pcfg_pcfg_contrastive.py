@@ -1,6 +1,6 @@
 import logging
 import operator
-from typing import Any, List, Optional, Union
+import random
 
 import numpy as np
 import torch
@@ -10,26 +10,29 @@ from torch.autograd import grad
 from src.models.posterior_regularization.general import NeqNT, NeqPT
 from src.models.posterior_regularization.pr import compute_pr
 from src.models.struct.semiring import LogSemiring
-from src.models.tgt_parser.neural_decomp8 import NeuralDecomp8TgtParser
-from src.models.tgt_parser.neural_decomp9 import NeuralDecomp9TgtParser
-from src.utils.fn import annotate_snt_with_brackets, report_ids_when_err
+from src.utils.fn import annotate_snt_with_brackets, apply_to_nested_tensor, report_ids_when_err
 
 from .general_seq2seq import GeneralSeq2SeqModule
 
 log = logging.getLogger(__file__)
 
 
-class PDRModule(GeneralSeq2SeqModule):
-    decoder: Union[NeuralDecomp8TgtParser, NeuralDecomp9TgtParser]
+def random_derangement(n):
+    assert n > 1
+    while True:
+        v = [i for i in range(n)]
+        for j in range(n - 1, -1, -1):
+            p = random.randint(0, j)
+            if v[p] == j:
+                break
+            else:
+                v[j], v[p] = v[p], v[j]
+        else:
+            if v[0] != 0:
+                return tuple(v)
 
-    def __init__(self, mini_target_kl_strength=0.01, **kwargs):
-        super().__init__(**kwargs)
-        self.save_hyperparameters(logger=False)
 
-    def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
-        super().setup(stage, datamodule)
-        assert isinstance(self.decoder, (NeuralDecomp8TgtParser, NeuralDecomp9TgtParser))
-
+class PPCModule(GeneralSeq2SeqModule):
     @report_ids_when_err
     @profile_every(5, enable=False)
     def forward(self, batch):
@@ -57,35 +60,31 @@ class PDRModule(GeneralSeq2SeqModule):
             # span labels are discarded (set to -1)
             node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
+        if self.current_epoch < self.hparams.warmup_pcfg:
+            node_features = apply_to_nested_tensor(node_features, lambda x: torch.zeros_like(x))
+
         with self.profiler.profile("compute_tgt_nll"):
+
             tgt_pred = self.decoder(node_features, node_spans)
             tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-            if self.hparams.mini_target:
-                mini_pred = self.decoder.get_mini(tgt_pred, tgt_ids)
-                if self.current_epoch >= self.hparams.warmup_pcfg:
-                    # p(w | D [i]): D[i]->w
-                    big_term = tgt_pred.params["term"].view(
-                        tgt_pred.batch_size, tgt_pred.pt_states, tgt_pred.pt_num_nodes, -1
-                    )
-                    # SUM_i p(w | D [i]) * unif(i)
-                    big_term = big_term.logsumexp(2).log_softmax(2)
-                    mini_term = mini_pred.params["term"]
-                    kl = (big_term.exp() * (big_term - mini_term)).flatten(1).sum(1)
-                else:
-                    kl = torch.tensor(0.0)
-                    self.decoder.vocab_out.load_state_dict(self.decoder.vocab_out2.state_dict())
-                tgt_nll = mini_pred.dist.nll
-                # tgt_nll.sum().backward()
-                logging_vals["mini_target"] = tgt_nll
-                logging_vals["mini_kl"] = kl
-                tgt_loss = mini_pred.dist.nll + self.hparams.mini_target_kl_strength * kl
-            else:
-                tgt_nll = torch.tensor(0.0)
-                tgt_loss = torch.tensor(0.0)
+            tgt_nll = tgt_pred.dist.nll
 
-            if self.current_epoch >= self.hparams.warmup_pcfg:
-                tgt_nll = tgt_pred.dist.nll
-                tgt_loss = 0.1 * tgt_loss + tgt_nll
+            if self.current_epoch < self.hparams.warmup_pcfg or len(src_ids) <= 1:
+                tgt_loss = tgt_nll
+            else:
+                shuffle_ids = random_derangement(len(src_ids))
+                shuffled_node_features = [node_features[i] for i in shuffle_ids]
+                shuffled_node_spans = [node_spans[i] for i in shuffle_ids]
+                negative_tgt_pred = self.decoder(shuffled_node_features, shuffled_node_spans)
+                negative_tgt_pred = self.decoder.observe_x(negative_tgt_pred, **observed)
+                negative_nll = negative_tgt_pred.dist.nll
+
+                rearangement_ids = list(range(len(src_ids)))
+                rearangement_ids.sort(key=lambda x: shuffle_ids[x])
+                negative_nll = negative_nll[rearangement_ids]
+
+                # tgt_loss = (tgt_nll - negative_nll + 1).clamp(0)
+                tgt_loss = torch.where(tgt_nll > -np.log(0.2), tgt_nll, (tgt_nll - negative_nll + 1).clamp(0))
 
         if self.current_epoch < self.hparams.warmup_pcfg:
             objective = 0.0
@@ -122,7 +121,7 @@ class PDRModule(GeneralSeq2SeqModule):
                 soft_constraint_pr_loss = e * soft_constraint_pr_loss
 
             if (e := self.hparams.parser_entropy_reg) > 0:
-                entropy = self.parser.entropy(src_ids, src_lens, z, dist)
+                entropy = self.parser.entropy(src_ids, src_lens, dist)
                 src_entropy_reg = -e * entropy
                 logging_vals["src_entropy"] = entropy
             if (e := self.hparams.decoder_entropy_reg) > 0:
@@ -204,9 +203,6 @@ class PDRModule(GeneralSeq2SeqModule):
         node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
         tgt_pred = self.decoder(node_features, node_spans)
         tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-
-        if self.current_epoch < self.hparams.warmup_pcfg:
-            tgt_pred = self.decoder.get_mini(tgt_pred, batch["tgt_ids"])
 
         # # visualize pr constrained dist
         # constraint_feature = self.decoder.rule_soft_constraint.get_feature_from_pred(tgt_pred)

@@ -36,6 +36,9 @@ model:
     use_copy: false
     generation_max_length: 30
     generation_num_samples: 100
+  optimizer:
+    args:
+      lr: 1.0e-4
 
 logger:
   wandb:

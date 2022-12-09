@@ -11,6 +11,7 @@ class ResidualLayer(nn.Module):
         self.out_dim = dim
 
     def forward(self, x):
+        return F.relu(self.lin2(F.relu(self.lin1(x)))) + x
         return F.leaky_relu(self.lin2(F.leaky_relu(self.lin1(x)))) + x
 
 
