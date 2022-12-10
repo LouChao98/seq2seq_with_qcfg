@@ -203,6 +203,7 @@ class DecompBase:
             sparams = self.params
         return self.inside((sparams, other.params), KLSemiring, False)[0]
 
+    @torch.enable_grad()
     def sample_one(self, need_event=False, need_span=True):
         params = {
             k: v.detach().requires_grad_() if isinstance(v, torch.Tensor) else v for k, v in self.params.items()

@@ -22,6 +22,10 @@ trainer:
   accumulate_grad_batches: 8
   gradient_clip_val: 3
 
+model:
+  decoder:
+    use_copy: false
+
 datamodule:
   copy_mode: none
   batch_size: 4
@@ -30,9 +34,9 @@ datamodule:
 
 callbacks:
   model_checkpoint:
-    monitor: val/ppl
+    monitor: fw/val/ppl
   early_stopping:
-    monitor: val/ppl
+    monitor: fw/val/ppl
 
 logger:
   wandb:

@@ -22,14 +22,17 @@ log = logging.getLogger(__file__)
 
 class _Unidirectional(GeneralSeq2SeqModule):
     # assume pt span range=[1,1], nt span range=[2, +\infty]
-    def __init__(self, embedding, encoder, tree_encoder, parser, decoder, metric) -> None:
+    def __init__(self, embedding, encoder, tree_encoder, parser, decoder, metric, hparams) -> None:
         ModelBase.__init__(self)
+        self.hparams.update(hparams)
+        self.warmup = 0
 
         self.embedding = embedding
         self.encoder = encoder
         self.tree_encoder = tree_encoder
         self.parser: TgtParserBase = parser
         self.decoder: TgtParserBase = decoder
+        self.datamodule = self.decoder.datamodule
 
         self.dummy_node_emb = nn.Parameter(torch.randn(3, self.tree_encoder.get_output_dim()))
 
@@ -181,7 +184,7 @@ class _Unidirectional(GeneralSeq2SeqModule):
 
         if get_baseline:
             # TODO this always be ppl. but scores_on_predicted can be others
-            tgt_pred = self.decoder.observe_x(tgt_ids, tgt_lens)
+            tgt_pred = self.decoder.observe_x(tgt_qcfg_pred, tgt_ids, tgt_lens)
             baseline = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(tgt_lens)).tolist()
         else:
             baseline = None
@@ -239,6 +242,8 @@ class PPRTwoDirModule(ModelBase):
         soft_constraint_loss_rl=False,
         soft_constraint_loss_raml=False,
     ):
+
+        # real_val_every_n_epochs = 1
         assert warmup_pcfg <= warmup_qcfg
         self.warmup = warmup_pcfg
         super().__init__()
@@ -271,10 +276,10 @@ class PPRTwoDirModule(ModelBase):
         test_metric: Metric = instantiate(self.hparams.test_metric)
 
         self.fw_model = _Unidirectional(
-            embedding_src, encoder_src, tree_encoder_src, parser_src, parser_tgt, test_metric
+            embedding_src, encoder_src, tree_encoder_src, parser_src, parser_tgt, test_metric, self.hparams
         )
         self.bw_model = _Unidirectional(
-            embedding_tgt, encoder_tgt, tree_encoder_tgt, parser_tgt, parser_src, test_metric
+            embedding_tgt, encoder_tgt, tree_encoder_tgt, parser_tgt, parser_src, test_metric, self.hparams
         )
 
         with self.datamodule.forward_mode():
