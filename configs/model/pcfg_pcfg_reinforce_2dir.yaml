@@ -1,0 +1,38 @@
+defaults:
+  - encoder: yzhang_lstm
+  - tree_encoder: treelstm
+  - decoder: nodecomp
+  - test_metric: bleu1234
+
+_target_: src.models.pcfg_pcfg_reinforce_2dir.PPRTwoDirModule
+_recursive_: false
+
+param_initializer: "xavier_uniform"
+length_calibrate: false
+pr_pt_neq_reg: 0
+pr_nt_neq_reg: 0
+noisy_spans_reg: 0
+noisy_spans_num: 0
+parser_entropy_reg: 0
+decoder_entropy_reg: 0
+soft_constraint_loss_pr: 0
+soft_constraint_loss_rl: false
+soft_constraint_loss_raml: false
+
+warmup_pcfg: 0
+warmup_qcfg: 0
+
+embedding:
+  _target_: torch.nn.Embedding
+  embedding_dim: 300
+
+optimizer:
+  groups: ~
+  args:
+    _target_: torch.optim.AdamW
+    lr: 1.0e-4
+    betas: [0.75, 0.999]
+    weight_decay: 1.0e-4
+    eps: 1.0e-8
+
+scheduler: ~

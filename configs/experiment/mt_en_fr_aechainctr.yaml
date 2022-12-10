@@ -26,9 +26,9 @@ trainer:
 
 datamodule:
   copy_mode: none
-  batch_size: 2
-  eval_batch_size: 2
-  vocab_min_freq: 1
+  batch_size: 4
+  eval_batch_size: 4
+  vocab_min_freq: 2
 
 model:
   decoder:

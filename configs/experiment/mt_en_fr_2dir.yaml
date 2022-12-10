@@ -30,8 +30,6 @@ datamodule:
 
 model:
   model1:
-    warmup_pcfg: 1
-    warmup_qcfg: 2
     decoder:
       nt_states: 14
       pt_states: 14
@@ -40,8 +38,6 @@ model:
       generation_num_samples: 100
 
   model2:
-    warmup_pcfg: 1
-    warmup_qcfg: 2
     decoder:
       nt_states: 14
       pt_states: 14
@@ -58,4 +54,5 @@ callbacks:
 logger:
   wandb:
     project: "mt_en_fr"
+    tags: ["2dir"]
     offline: ${in_cluster:}

@@ -5,8 +5,8 @@
 
 defaults:
   # - /model/decoder/constraint: fp_hard_sh
-  - override /datamodule: mt_en_fr
-  - override /model: pcfg_pcfg_reinforce
+  - override /datamodule: mt_en_fr_2dir
+  - override /model: pcfg_pcfg_reinforce_2dir
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -15,7 +15,7 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "mt_en_fr_${hydra:runtime.choices.model/decoder}"
+name: "mt_en_fr_2dir"
 
 trainer:
   max_epochs: 40
@@ -24,21 +24,18 @@ trainer:
 
 datamodule:
   copy_mode: none
-  batch_size: 2
-  eval_batch_size: 2
-  vocab_min_freq: 1
-  debug_1: true
+  batch_size: 4
+  eval_batch_size: 4
+  vocab_min_freq: 2
 
-model:
-  decoder:
-    nt_states: 14
-    pt_states: 14
-    use_copy: false
-    generation_max_length: 30
-    generation_num_samples: 100
-    debug_1: true
+callbacks:
+  model_checkpoint:
+    monitor: val/ppl
+  early_stopping:
+    monitor: val/ppl
 
 logger:
   wandb:
     project: "mt_en_fr"
+    tags: ["ppr_2dir"]
     offline: ${in_cluster:}

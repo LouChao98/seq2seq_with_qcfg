@@ -10,12 +10,16 @@ constraint_strength:
 reg_method: emr
 
 model1:
+  parser_entropy_reg: 0.1
+  decoder_entropy_reg: 0.1
+  warmup_pcfg: 2
+  warmup_qcfg: 4
   encoder:
     _target_: src.models.components.encoder.VariationalLSTM
     hidden_size: 256
     bidirectional: true
     dropout: 0.2
-    num_layers: 1
+    num_layers: 2
   parser:
     _target_: src.models.src_parser.neural_pcfg.NeuralPCFGSrcParser
     dim: 256
@@ -47,16 +51,16 @@ model1:
   test_metric:
     _target_: src.utils.metric.MultiMetric
     bleu-1:
-      _target_: torchmetrics.BLEUScore
+      _target_: src.utils.metric.BLEUScore
       n_gram: 1
     bleu-2:
-      _target_: torchmetrics.BLEUScore
+      _target_: src.utils.metric.BLEUScore
       n_gram: 2
     bleu-3:
-      _target_: torchmetrics.BLEUScore
+      _target_: src.utils.metric.BLEUScore
       n_gram: 3
     bleu-4:
-      _target_: torchmetrics.BLEUScore
+      _target_: src.utils.metric.BLEUScore
       n_gram: 4
   _target_: src.models.general_seq2seq.GeneralSeq2SeqModule
   _recursive_: false
@@ -67,12 +71,16 @@ model1:
     embedding_dim: 300
 
 model2:
+  parser_entropy_reg: 0.1
+  decoder_entropy_reg: 0.1
+  warmup_pcfg: 2
+  warmup_qcfg: 4
   encoder:
     _target_: src.models.components.encoder.VariationalLSTM
     hidden_size: 256
     bidirectional: true
     dropout: 0.2
-    num_layers: 1
+    num_layers: 2
   parser:
     _target_: src.models.src_parser.neural_pcfg.NeuralPCFGSrcParser
     dim: 256
@@ -105,16 +113,16 @@ model2:
   test_metric:
     _target_: src.utils.metric.MultiMetric
     bleu-1:
-      _target_: torchmetrics.BLEUScore
+      _target_: src.utils.metric.BLEUScore
       n_gram: 1
     bleu-2:
-      _target_: torchmetrics.BLEUScore
+      _target_: src.utils.metric.BLEUScore
       n_gram: 2
     bleu-3:
-      _target_: torchmetrics.BLEUScore
+      _target_: src.utils.metric.BLEUScore
       n_gram: 3
     bleu-4:
-      _target_: torchmetrics.BLEUScore
+      _target_: src.utils.metric.BLEUScore
       n_gram: 4
   _target_: src.models.general_seq2seq.GeneralSeq2SeqModule
   _recursive_: false
@@ -128,10 +136,16 @@ optimizer:
   groups: null
   args:
     _target_: torch.optim.AdamW
-    lr: 0.0005
+    lr: 0.0001
     betas:
       - 0.75
       - 0.999
     weight_decay: 1.0e-05
     eps: 1.0e-08
-scheduler: null
+scheduler:
+  interval: step
+  frequency: 1
+  monitor: val/ppl
+  args:
+    _target_: src.utils.scheduler.get_exponential_lr_scheduler
+    gamma: 0.75**(1/10000)

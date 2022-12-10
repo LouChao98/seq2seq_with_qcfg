@@ -19,12 +19,17 @@ name: "mt_pretrain"
 datamodule:
   load_gold_tree: false
   copy_mode: "none"
-  batch_size: 16
-  eval_batch_size: 16
+  batch_size: 64
+  eval_batch_size: 64
   enable_cache: false
 
+model:
+  optimizer:
+    args:
+      lr: 1.0e-4
+
 trainer:
-  max_epochs: 5
+  max_epochs: 15
   accumulate_grad_batches: 1
   gradient_clip_val: 3
 

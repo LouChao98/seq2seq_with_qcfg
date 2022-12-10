@@ -286,7 +286,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
             if self.hparams.mini_target:
                 mini_node_features = [item[-1:].expand(2, -1) for item in node_features]
-                mini_node_spans = [[(0, 1, NO_COPY_SPAN), (0, 2, NO_COPY_SPAN)] for _ in range(len(node_spans))]
+                mini_node_spans = [[(0, 1, NO_COPY_SPAN)] for _ in range(len(node_spans))]
                 nt_range, pt_range = self.decoder.nt_span_range, self.decoder.pt_span_range
                 self.decoder.nt_span_range = self.decoder.pt_span_range = [1, 1]
                 mini_pred = self.decoder(mini_node_features, mini_node_spans)

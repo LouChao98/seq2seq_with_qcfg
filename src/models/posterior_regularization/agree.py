@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 class PTAgree:
     b: float = 0.0
     rbound: float = 10
-    num_iter: int = 5
+    num_iter: int = 3
     entropy_reg: float = 0.0
 
     def __call__(self, pred1: TgtParserPrediction, pred2: TgtParserPrediction, get_dist=False):

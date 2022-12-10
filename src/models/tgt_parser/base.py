@@ -1,6 +1,7 @@
 import logging
 import math
 import random
+from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -771,3 +772,31 @@ class TgtParserBase(nn.Module):
             "strict": self.generation_strict,
             "unk": 1,
         }
+
+    @contextmanager
+    def disable_constraint(self):
+        _hard, _soft, _reweight, _solver = (
+            self.rule_hard_constraint,
+            self.rule_soft_constraint,
+            self.rule_reweight_constraint,
+            self.rule_soft_constraint_solver,
+        )
+        (
+            self.rule_hard_constraint,
+            self.rule_soft_constraint,
+            self.rule_reweight_constraint,
+            self.rule_soft_constraint_solver,
+        ) = (None, None, None, None)
+        yield
+
+        (
+            self.rule_hard_constraint,
+            self.rule_soft_constraint,
+            self.rule_reweight_constraint,
+            self.rule_soft_constraint_solver,
+        ) = (
+            _hard,
+            _soft,
+            _reweight,
+            _solver,
+        )

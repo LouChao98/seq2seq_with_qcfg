@@ -25,9 +25,9 @@ trainer:
 
 datamodule:
   copy_mode: none
-  batch_size: 2
-  eval_batch_size: 2
-  vocab_min_freq: 1
+  batch_size: 4
+  eval_batch_size: 4
+  vocab_min_freq: 2
 
 model:
   decoder:
@@ -36,9 +36,6 @@ model:
     use_copy: false
     generation_max_length: 30
     generation_num_samples: 100
-  optimizer:
-    args:
-      lr: 1.0e-4
 
 logger:
   wandb:
