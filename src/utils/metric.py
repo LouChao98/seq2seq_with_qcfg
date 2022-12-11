@@ -26,7 +26,7 @@ class SacreBLEUScore(torchmetrics.SacreBLEUScore):
         return super().update(preds, target)
 
     def compute(self):
-        return {f"sbleu-{self.n_gram}": super().compute().item()}
+        return super().compute().item()
 
 
 class BLEUScore(torchmetrics.BLEUScore):
@@ -36,7 +36,7 @@ class BLEUScore(torchmetrics.BLEUScore):
         return super().update(preds, target)
 
     def compute(self):
-        return {f"bleu-{self.n_gram}": super().compute().item()}
+        return super().compute().item()
 
 
 class PerplexityMetric(Metric):

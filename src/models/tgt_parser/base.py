@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 from src.datamodules.datamodule import _DataModule
 from src.utils.fn import apply_to_nested_tensor
 
+from ..components.clamp import uni_dir_differentiable_clamp
 from ..constraint.base import RuleConstraintBase
 from ..struct.base import DecompBase, DecompSamplerBase, TokenType
 
@@ -221,7 +222,7 @@ class TgtParserBase(nn.Module):
             score = self.score_normalization_scale * score
 
         elif self.score_normalization_method == "clamp":
-            score = score.clamp(min=-100, max=100)
+            score = uni_dir_differentiable_clamp(score - score.mean(dims, keepdim=True), -5, 5)
         elif self.score_normalization_method == "none":
             pass
         else:

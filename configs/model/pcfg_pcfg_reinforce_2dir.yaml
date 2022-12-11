@@ -30,7 +30,7 @@ optimizer:
   groups: ~
   args:
     _target_: torch.optim.AdamW
-    lr: 1.0e-4
+    lr: 5.0e-4
     betas: [0.75, 0.999]
     weight_decay: 1.0e-4
     eps: 1.0e-8

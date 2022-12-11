@@ -30,6 +30,8 @@ datamodule:
 
 model:
   model1:
+    # warmup_pcfg: 0
+    # warmup_qcfg: 0
     decoder:
       nt_states: 14
       pt_states: 14
@@ -38,6 +40,8 @@ model:
       generation_num_samples: 100
 
   model2:
+    # warmup_pcfg: 0
+    # warmup_qcfg: 0
     decoder:
       nt_states: 14
       pt_states: 14

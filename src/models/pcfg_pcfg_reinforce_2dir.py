@@ -11,13 +11,20 @@ from hydra.utils import instantiate
 from torchmetrics import Metric, MinMetric
 
 from src.models.base import ModelBase
+from src.models.components.dynamic_hp import DynamicHyperParameter
 from src.models.tgt_parser.base import NO_COPY_SPAN, TgtParserBase, TgtParserPrediction
 from src.utils.fn import annotate_snt_with_brackets
 from src.utils.metric import PerplexityMetric
 
 from .general_seq2seq import GeneralSeq2SeqModule
+from .posterior_regularization.agree import PTAgree
 
 log = logging.getLogger(__file__)
+
+
+def smoothed_hinge_loss(d, sigma):
+    return torch.where(d.abs() < sigma, d**2 / (2 * sigma), d.abs()).flatten(1).sum(1)
+    # return torch.where(d.abs() < sigma, d ** 2 / (2 * sigma), d.abs() - sigma).flatten(1).sum(1)
 
 
 class _Unidirectional(GeneralSeq2SeqModule):
@@ -89,6 +96,7 @@ class _Unidirectional(GeneralSeq2SeqModule):
         return {
             "decoder": tgt_loss,
             "encoder": src_loss + objective,
+            "tgt_runtime": {"pred": tgt_qcfg_pred},
             "src_nll": src_nll,
             "tgt_nll": tgt_nll,
             "log": logging_vals,
@@ -229,6 +237,8 @@ class PPRTwoDirModule(ModelBase):
         real_val_every_n_epochs=5,
         export_detailed_prediction=True,
         # extension
+        train_pt_agreement=False,
+        train_pt_agreement_strength=1.0,
         warmup_pcfg=0,
         warmup_qcfg=0,
         length_calibrate=False,
@@ -245,9 +255,11 @@ class PPRTwoDirModule(ModelBase):
 
         # real_val_every_n_epochs = 1
         assert warmup_pcfg <= warmup_qcfg
-        self.warmup = warmup_pcfg
+        self.warmup = warmup_qcfg
         super().__init__()
         self.save_hyperparameters(logger=False)
+
+        self.pt_constraint_strength = DynamicHyperParameter(train_pt_agreement_strength)
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
         super().setup(stage)
@@ -282,6 +294,8 @@ class PPRTwoDirModule(ModelBase):
             embedding_tgt, encoder_tgt, tree_encoder_tgt, parser_tgt, parser_src, test_metric, self.hparams
         )
 
+        self.fw_model.trainer = self.bw_model.trainer = self.trainer
+
         with self.datamodule.forward_mode():
             self.fw_model.log = partial(self.sub_log, prefix="fw")
             self.fw_model.print = partial(self.sub_print, prefix="fw")
@@ -301,6 +315,8 @@ class PPRTwoDirModule(ModelBase):
             self.bw_model.save_detailed_predictions = partial(
                 _save_detailed_prediction, func=self.bw_model.save_detailed_predictions, prefix="bw_"
             )
+
+        self.pr_solver = PTAgree()
 
         if self.hparams.load_from_checkpoint is not None:
             state_dict = torch.load(self.hparams.load_from_checkpoint, map_location="cpu")
@@ -329,11 +345,41 @@ class PPRTwoDirModule(ModelBase):
     def sub_print(self, *args, prefix, **kwargs):
         self.print(prefix, *args, **kwargs)
 
+    def forward(self, batch1, batch2, model1_pred, model2_pred):
+        # only contain the code for the agreement constraint
+        # only support PCFG
+        # reuse the sample in submodel's forward
+        # assume PT = [1,1], NT = [2, +\infty]
+
+        if self.current_epoch < self.warmup:
+            loss = torch.zeros(1, device=model1_pred["tgt_runtime"]["pred"].device)
+        else:
+            # if self.reg_method == "pr":
+            loss = self.pr_solver(model1_pred["tgt_runtime"]["pred"], model2_pred["tgt_runtime"]["pred"])
+            # elif self.reg_method == "emr":
+            #     pred1 = model1_pred["tgt_runtime"]["pred"]
+            #     pred2 = model2_pred["tgt_runtime"]["pred"]
+            #     m_term1, m_trace1 = pred1.dist.marginal_with_grad
+            #     m_term2, m_trace2 = pred2.dist.marginal_with_grad
+            #     m_term1 = m_term1.view(pred1.batch_size, -1, pred1.pt_states, pred1.pt_num_nodes).sum(2)
+            #     m_term2 = m_term2.view(pred2.batch_size, -1, pred2.pt_states, pred2.pt_num_nodes).sum(2)
+            #     m_term2 = m_term2 / (m_term2.sum(2, keepdim=True) + 1e-9)
+            #     loss = smoothed_hinge_loss(m_term1 - m_term2.transpose(1, 2), 0.1)
+
+        return {"agreement": loss.mean()}
+
     def training_step(self, batch: Any, batch_idx: int):
         with self.datamodule.forward_mode():
-            loss1 = self.fw_model.training_step(batch[0], batch_idx)
+            out1 = self.fw_model(batch[0])
+            loss1 = self.fw_model.training_step(batch[0], batch_idx, forward_prediction=out1)
         with self.datamodule.backward_mode():
-            loss2 = self.bw_model.training_step(batch[1], batch_idx)
+            out2 = self.bw_model(batch[1])
+            loss2 = self.bw_model.training_step(batch[1], batch_idx, forward_prediction=out2)
+        if self.hparams.train_pt_agreement:
+            agreement = self(batch[0], batch[1], out1, out2)
+            cstrength = self.pt_constraint_strength.get(self.current_epoch)
+            self.log("train/agree", agreement["agreement"], prog_bar=True)
+            self.log("train/cstrength", cstrength)
         return {"loss": loss1["loss"] + loss2["loss"]}
 
     def on_validation_epoch_start(self) -> None:

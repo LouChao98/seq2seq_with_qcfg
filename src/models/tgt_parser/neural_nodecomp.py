@@ -139,7 +139,7 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         rules[~lhs_mask] = self.neg_huge
 
         # A->a
-        terms = F.log_softmax(self.vocab_out(pt_emb), dim=2)
+        terms = F.log_softmax(self.score_normalize(self.vocab_out(pt_emb), dims=2), dim=2)
 
         if filtered_spans is not None:
             roots, rules, nt_num_nodes, nt_num_nodes_list = self.filter_rules(

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from src.models.struct.base import DecompBase
 from src.utils.fn import apply_to_nested_tensor
 
 if TYPE_CHECKING:
@@ -103,4 +104,78 @@ class PTAgree:
         new_param = dist2.params["term"].view(dist2.batch_size, -1, dist2.pt_states, dist2.pt_num_nodes)
         new_param = (new_param - (lambdas * mask.transpose(1, 2)).unsqueeze(2)).flatten(2)
         cdist2 = dist2.spawn(params={"term": new_param * factor})
+        return cdist1, cdist2
+
+
+@dataclass
+class TreeAgree:
+    b: float = 0.0
+    rbound: float = 10
+    num_iter: int = 3
+    entropy_reg: float = 0.0
+
+    def __call__(self, dist1: DecompBase, dist2: DecompBase, get_dist=False):
+
+        cparams1 = apply_to_nested_tensor(dist1.params, lambda x: x.detach())
+        cparams2 = apply_to_nested_tensor(dist2.params, lambda x: x.detach())
+
+        cparams1["constraint"] = None
+        cparams2["constraint"] = None
+
+        dist1 = dist1.spawn(params=cparams1)
+        dist2 = dist2.spawn(params=cparams2)
+
+        lambdas = self.solve(dist1, dist2)
+
+        cdist1, cdist2 = self.make_constrained_dist(dist1, dist2, lambdas)
+
+        # mterm1 = cdist1.marginal["trace"].flatten(3).sum(3)
+        # mterm2 = cdist2.marginal["trace"].flatten(3).sum(3)
+        # diff1 = mterm1 - mterm2
+
+        # mterm1_orig = dist1.marginal["trace"].flatten(3).sum(3)
+        # mterm2_orig = dist2.marginal["trace"].flatten(3).sum(3)
+        # diff2 = mterm1_orig - mterm2_orig
+
+        if get_dist:
+            return dist1, dist2
+
+        return cdist1.cross_entropy(dist1) + cdist2.cross_entropy(dist2)
+
+    def get_init_lambdas(self, dist1: DecompBase, dist2: DecompBase):
+        N = dist1.params["term"].shape[1] + 1
+        assert dist1.params["term"].shape[1] == dist2.params["term"].shape[1]
+        return torch.zeros(dist1.batch_size, N, N, device=dist1.params["term"].device, requires_grad=True)
+
+    def solve(self, dist1: DecompBase, dist2: DecompBase):
+        lambdas = self.get_init_lambdas(dist1, dist2)
+
+        for itidx in range(self.num_iter):
+            cdist1, cdist2 = self.make_constrained_dist(dist1, dist2, lambdas)
+            target = -self.b * lambdas.sum() - (1 - self.entropy_reg) * (cdist1.partition + cdist2.partition).sum()
+            target.backward()
+
+            if (lambdas.grad.abs() < 1e-4).all():
+                break
+            # else:
+            #     print(lambdas.grad.norm())
+            with torch.no_grad():
+                step_size = 1.0  # 10 / (10 + itidx)
+                lambdas += step_size * lambdas.grad
+                lambdas.clamp_(min=-self.rbound, max=self.rbound)
+                lambdas.grad.zero_()
+
+        return lambdas.detach()
+
+    def make_constrained_dist(self, dist1: DecompBase, dist2: DecompBase, lambdas):
+        factor = 1 / (1 - self.entropy_reg)
+        lambdas = lambdas * factor
+
+        add_scores = [lambdas.diagonal(w, dim1=1, dim2=2).unsqueeze(-1) for w in range(2, lambdas.shape[1])]
+        cdist1 = dist1.spawn(params={"add": add_scores})
+
+        lambdas = -lambdas
+        add_scores = [lambdas.diagonal(w, dim1=1, dim2=2).unsqueeze(-1) for w in range(2, lambdas.shape[1])]
+        cdist2 = dist2.spawn(params={"add": add_scores})
+
         return cdist1, cdist2

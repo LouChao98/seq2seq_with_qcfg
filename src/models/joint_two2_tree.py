@@ -10,7 +10,7 @@ from src.models.base import ModelBase
 
 from .components.dynamic_hp import DynamicHyperParameter
 from .general_seq2seq import GeneralSeq2SeqModule
-from .posterior_regularization.agree import PTAgree
+from .posterior_regularization.agree import TreeAgree
 
 log = logging.getLogger(__file__)
 
@@ -83,7 +83,7 @@ class TwoDirectionalModule(ModelBase):
                 _save_detailed_prediction, func=self.model2.save_detailed_predictions, prefix="m2_"
             )
 
-        self.pr_solver = PTAgree()
+        self.pr_solver = TreeAgree()
 
     def sub_log(self, name, value, *args, prefix, **kwargs):
         self.log(f"{prefix}/{name}", value, *args, **kwargs)
@@ -101,9 +101,12 @@ class TwoDirectionalModule(ModelBase):
             loss = torch.zeros(1, device=model1_pred["tgt_runtime"]["pred"].device)
         else:
             if self.reg_method == "pr":
-                token_align_loss = self.pr_solver(
-                    model1_pred["tgt_runtime"]["pred"], model2_pred["tgt_runtime"]["pred"]
-                )
+                tgt_dist1 = model1_pred["tgt_runtime"]["pred"].dist
+                tgt_dist2 = model2_pred["tgt_runtime"]["pred"].dist
+                src_dist1 = model1_pred["src_runtime"]["dist"]
+                src_dist2 = model2_pred["src_runtime"]["dist"]
+
+                loss = self.pr_solver(tgt_dist1, src_dist2) + self.pr_solver(tgt_dist2, src_dist1)
             elif self.reg_method == "emr":
                 pred1 = model1_pred["tgt_runtime"]["pred"]
                 pred2 = model2_pred["tgt_runtime"]["pred"]
