@@ -1,19 +1,29 @@
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import matplotlib.pyplot as plt
 import networkx as nx
 import torch
+from allennlp.modules.span_extractors.span_extractor import SpanExtractor
 from hydra.utils import instantiate
 from torch_geometric.data import Batch, Data
 from torch_geometric.utils import to_networkx
 
+from src.models.components.allennlp_module import BucketedSpanExtractor
 from src.utils.fn import spans2tree
 
 
 class GeneralGNN(torch.nn.Module):
-    def __init__(self, nn, global_pooling, dim):
+    def __init__(self, nn, global_pooling, dim, span_extractor=None):
         super().__init__()
-        self.nn = instantiate(nn, in_channels=dim)
+        if span_extractor is not None:
+            self.span_extractor: Union[BucketedSpanExtractor, SpanExtractor] = instantiate(
+                span_extractor, input_dim=dim
+            )
+            self.nn = instantiate(nn, in_channels=self.span_extractor.get_output_dim())
+        else:
+            self.span_extractor = None
+            self.nn = instantiate(nn, in_channels=dim)
+
         self.global_pooling = instantiate(global_pooling, in_channels=self.nn.out_channels)
 
     def forward(self, x, lens, spans):
@@ -38,13 +48,25 @@ class GeneralGNN(torch.nn.Module):
             parents_item = spans2tree(spans_item)
             spans.append(spans_item)
             parents.append(parents_item)
-            for i, (span, parent) in enumerate(zip(spans_item, parents_item)):
-                # rep of span = start + end
-                vertices.append(x[bidx, span[0]] + x[bidx, span[1] - 1])
-                if parent != -1:
-                    edges.append((i, parent))
-                    edges.append((parent, i))
-            graph = Data(torch.stack(vertices, 0), torch.tensor(edges).T)
+
+            if self.span_extractor is not None:
+                span_indices = torch.tensor([(item[0], item[1] - 1) for item in spans_item])
+                span_indices = span_indices.unsqueeze(0).to(x.device)
+                vertices = self.span_extractor(x[bidx : bidx + 1], span_indices).squeeze(0)
+                for i, (span, parent) in enumerate(zip(spans_item, parents_item)):
+                    if parent != -1:
+                        edges.append((i, parent))
+                        edges.append((parent, i))
+            else:
+                for i, (span, parent) in enumerate(zip(spans_item, parents_item)):
+                    # rep of span = start + end
+                    vertices.append(x[bidx, span[0]] + x[bidx, span[1] - 1])
+                    if parent != -1:
+                        edges.append((i, parent))
+                        edges.append((parent, i))
+                    vertices = torch.stack(vertices, 0)
+
+            graph = Data(vertices, torch.tensor(edges).T)
             graph.node_label = torch.tensor([(l, r) for l, r, *_ in spans_item])
             graphs.append(graph)
 

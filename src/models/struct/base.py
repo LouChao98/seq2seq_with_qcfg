@@ -215,11 +215,13 @@ class DecompBase:
 
         if need_span:
             spans = [[] for _ in range(self.batch_size)]
-            for b, i, j, state, node in trace.grad.nonzero().tolist():
-                spans[b].append((i, j, state, node))
             for b, i, state_node in params["term"].grad.nonzero().tolist():
                 state, node = divmod(state_node, self.pt_num_nodes)
                 spans[b].append((i, i + 1, state, node))
+            for b, i, j, state, node in trace.grad.nonzero().tolist():
+                spans[b].append((i, j, state, node))
+            for spans_item in spans:
+                spans_item.sort(key=lambda x: (x[1] - x[0], x[0]))
             output["span"] = spans
 
         if need_event:
@@ -236,9 +238,13 @@ class DecompBase:
     @property
     def decoded(self):
         try:
-            return self.viterbi_decoded
+            spans = self.viterbi_decoded
         except NotImplementedError:
-            return self.mbr_decoded
+            spans = self.mbr_decoded
+
+        for spans_item in spans:
+            spans_item.sort(key=lambda x: (x[1] - x[0], x[0]))
+        return spans
 
     @lazy_property
     def viterbi_decoded(self):

@@ -107,7 +107,7 @@ class NeuralPCFGSrcParser(SrcParserBase):
         if dist is None:
             dist = self(x, lengths, extra_scores)
 
-        return dist.viterbi_decoded
+        return dist.decoded
 
     @torch.enable_grad()
     def entropy(self, x, lengths, dist: Optional[NoDecomp] = None, extra_scores=None):

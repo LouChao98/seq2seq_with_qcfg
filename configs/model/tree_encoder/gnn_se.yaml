@@ -1,0 +1,22 @@
+_target_: src.models.tree_encoder.gnn.GeneralGNN
+_recursive_: false
+nn:
+  # https://pytorch-geometric.readthedocs.io/en/2.0.4/notes/cheatsheet.html
+  _target_: torch_geometric.nn.GAT
+  hidden_channels: 128
+  num_layers: 3
+  dropout: 0.1
+  jk: lstm
+
+span_extractor:
+  _target_: src.models.components.allennlp_module.BucketedSpanExtractor
+  _recursive_: false
+
+  n_bucket: sqrt
+  module:
+    _target_: src.models.components.allennlp_module.get_span_extractor_module
+    name: self_attentive
+    num_width_embeddings: 10
+    span_width_embedding_dim: 32
+
+global_pooling: ~
