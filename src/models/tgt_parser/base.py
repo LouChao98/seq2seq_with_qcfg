@@ -331,17 +331,22 @@ class TgtParserBase(nn.Module):
         aligned_spans = []
         for b, (all_span, pt_span, nt_span) in enumerate(zip(out, pred.pt_nodes, pred.nt_nodes)):
             aligned_spans_item = []
-            try:
-                for l, r, t, state, node in all_span:
-                    if t == "p":
+            for l, r, t, state, node in all_span:
+                if t == "p":
+                    try:
                         aligned_spans_item.append(pt_span[node])
+                    except IndexError:
+                        logger.error(f"Bad alignment: {l, r, t, state, node}.\nSpans: {pt_span}")
+                        aligned_spans_item.append(pt_span[0])
+                else:
+                    if node is None:
+                        aligned_spans_item.append(None)
                     else:
-                        if node is None:
-                            aligned_spans_item.append(None)
-                        else:
+                        try:
                             aligned_spans_item.append(nt_span[node])
-            except IndexError:
-                print("bad alignment")
+                        except IndexError:
+                            logger.error(f"Bad alignment: {l, r, t, state, node}.\nSpans: {nt_span}")
+                            aligned_spans_item.append(nt_span[0])
             aligned_spans.append(aligned_spans_item)
         return out, aligned_spans, pred.pt_nodes, pred.nt_nodes
 

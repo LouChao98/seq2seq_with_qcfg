@@ -29,7 +29,5 @@ logger:
   wandb:
     project: "styleptb"
     tags:
-      - "${hydra:runtime.choices.model/parser}"
-      - "${hydra:runtime.choices.model/decoder}"
       - "gumbel"
     offline: ${in_cluster:}

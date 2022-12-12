@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Any
 
 import pytorch_lightning as pl
+import torch
 import torch.distributed as dist
 from hydra.utils import instantiate
 
@@ -21,6 +22,15 @@ class ModelBase(pl.LightningModule):
     def on_train_epoch_start(self) -> None:
         self.apply_dynamic_cfg()
         return super().on_train_epoch_start()
+
+    # def on_train_batch_start(self, batch: Any, batch_idx: int):
+    #     print(
+    #         torch.cuda.max_memory_allocated() / 1024 / 1024,
+    #         len(batch["src_lens"]),
+    #         max(batch["src_lens"]),
+    #         max(batch["tgt_lens"]),
+    #     )
+    #     torch.cuda.reset_peak_memory_stats()
 
     def add_dynamic_cfg(self, name, command):
         """name: <obj nevigation>|<cfg nevigation>"""

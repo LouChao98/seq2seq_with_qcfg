@@ -501,7 +501,7 @@ if __name__ == "__main__":
     m2 = pcfg_ref.marginals[-1]
     compare_marginal(m1["trace"], m2)
 
-    B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT = 2, 3, 1, 1, 1, 1
+    B, N, TGT_PT, SRC_PT, TGT_NT, SRC_NT = 2, 4, 2, 1, 1, 1
     NT = TGT_NT * SRC_NT
     PT = TGT_PT * SRC_PT
     VOCAB = 4
@@ -542,7 +542,7 @@ if __name__ == "__main__":
 
     print("test sample seq")
     batch = next(iter(datamodule.train_dataloader()))
-    MAX_LENGTH = 2
+    MAX_LENGTH = 3
     B = 1
     VOCAB = len(datamodule.tgt_vocab)
     spans = [[(i, i + 1, 0) for i in range(l)] + [(0, i + 1, 0) for i in range(1, l)] for l in batch["src_lens"]]

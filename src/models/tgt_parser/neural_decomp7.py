@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sqlalchemy import values
 from supar.modules.affine import Biaffine, Triaffine
 
 from ..components.common import MultiResidualLayer
@@ -133,10 +132,10 @@ class NeuralDecomp7TgtParser(TgtParserBase):
         elif num != self.nt_states:
             rj_b_nt[..., self.nt_states :] = self.neg_huge
             rk_c_nt[..., self.nt_states :] = self.neg_huge
-        rj_b_nt = rj_b_nt.softmax(-1)
-        rj_b_pt = rj_b_pt.softmax(-1)
-        rk_c_nt = rk_c_nt.softmax(-1)
-        rk_c_pt = rk_c_pt.softmax(-1)
+        rj_b_nt = rj_b_nt.log_softmax(-1)
+        rj_b_pt = rj_b_pt.log_softmax(-1)
+        rk_c_nt = rk_c_nt.log_softmax(-1)
+        rk_c_pt = rk_c_pt.log_softmax(-1)
         rule_left = torch.cat([rj_b_nt, rj_b_pt], dim=2)
         rule_right = torch.cat([rk_c_nt, rk_c_pt], dim=2)
 

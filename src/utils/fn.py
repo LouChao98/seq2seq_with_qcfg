@@ -1,8 +1,10 @@
 import gc
 import logging
+from contextlib import contextmanager
 from typing import List, Tuple
 
 import torch
+import wandb
 from nltk.tree import Tree
 
 log = logging.getLogger(__file__)
@@ -235,6 +237,16 @@ def apply_to_nested_tensor(nested, func):
     if isinstance(nested, torch.Tensor):
         return func(nested)
     return nested
+
+
+@contextmanager
+def fix_wandb_tags():
+    if wandb.run is None:
+        yield
+    else:
+        tags = wandb.run.tags
+        yield
+        wandb.run.tags = tags
 
 
 def _debug_init_tensor():

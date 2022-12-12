@@ -4,6 +4,7 @@ from typing import Any, List, Optional
 
 import torch
 import torch.nn as nn
+import wandb
 from hydra.utils import instantiate
 from torchmetrics import Metric, MinMetric
 
@@ -53,6 +54,9 @@ class PretrainPCFGModule(ModelBase):
         self.ppl_metric = PerplexityMetric()
         self.ppl_best_metric = MinMetric()
         self.uf1_metric = UnlabeledSpanF1Score()
+
+        if wandb.run is not None:
+            wandb.run.tags = wandb.run.tags + (type(self.parser).__name__,)
 
         if self.hparams.load_from_checkpoint is not None:
             state_dict = torch.load(self.hparams.load_from_checkpoint, map_location="cpu")

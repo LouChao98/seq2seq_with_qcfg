@@ -167,11 +167,7 @@ class EntropySemiring(SemiringBase):
 
     @staticmethod
     def normal_space_mul(a, b):
-        # return torch.stack((a[0] * b[0], a[1] + b[1]), dim=0)
-        out = torch.empty_like(a)
-        torch.mul(a[0], b[0], out[0])
-        torch.add(a[1], b[1], out[1])
-        return out
+        return torch.stack((a[0] * b[0], a[1] + b[1]), dim=0)
 
     @staticmethod
     def sum(a, dim):
@@ -186,7 +182,7 @@ class EntropySemiring(SemiringBase):
         dim = dim - 1 if dim > 0 else dim
         part = torch.sum(a[0], dim=dim)
         sm = a[0] / (part.unsqueeze(dim) + 1e-9)
-        return torch.stack((part, torch.sum(a[1].mul(sm) - sm.log().mul(sm), dim=dim)))
+        return torch.stack((part, torch.sum(a[1].mul(sm) - (sm + 1e-9).log().mul(sm), dim=dim)))
 
     @staticmethod
     def to_normal_space(tlist: List[torch.Tensor], dims: List[int]):
@@ -229,11 +225,7 @@ class CrossEntropySemiring(SemiringBase):
     @staticmethod
     def normal_space_mul(a, b):
         # return torch.stack((a[0] * b[0], a[1] + b[1]), dim=0)
-        out = torch.empty_like(a)
-        torch.mul(a[0], b[0], out[0])
-        torch.mul(a[1], b[1], out[1])
-        torch.add(a[2], b[2], out[2])
-        return out
+        return torch.stack([a[0] * b[0], a[1] * b[1], a[2] + b[2]], dim=0)
 
     @staticmethod
     def sum(a, dim):
@@ -252,7 +244,7 @@ class CrossEntropySemiring(SemiringBase):
         part_q = torch.sum(a[1], dim=dim)
         sm_p = a[0] / (part_p.unsqueeze(dim) + 1e-9)
         sm_q = a[1] / (part_q.unsqueeze(dim) + 1e-9)
-        return torch.stack((part_p, part_q, torch.sum(a[2].mul(sm_p) - sm_q.log().mul(sm_p), dim=dim)))
+        return torch.stack((part_p, part_q, torch.sum(a[2].mul(sm_p) - (sm_q + 1e-9).log().mul(sm_p), dim=dim)))
 
     @staticmethod
     def to_normal_space(tlist: List[torch.Tensor], dims: List[int]):
@@ -296,12 +288,7 @@ class KLSemiring(SemiringBase):
 
     @staticmethod
     def normal_space_mul(a, b):
-        # return torch.stack((a[0] * b[0], a[1] + b[1]), dim=0)
-        out = torch.empty_like(a)
-        torch.mul(a[0], b[0], out[0])
-        torch.mul(a[1], b[1], out[1])
-        torch.add(a[2], b[2], out[2])
-        return out
+        return torch.stack([a[0] * b[0], a[1] * b[1], a[2] + b[2]], dim=0)
 
     @staticmethod
     def sum(a, dim):
@@ -323,7 +310,11 @@ class KLSemiring(SemiringBase):
         sm_p = a[0] / (part_p.unsqueeze(dim) + 1e-9)
         sm_q = a[1] / (part_q.unsqueeze(dim) + 1e-9)
         return torch.stack(
-            (part_p, part_q, torch.sum(a[2].mul(sm_p) - sm_q.log().mul(sm_p) + sm_p.log().mul(sm_p), dim=dim))
+            (
+                part_p,
+                part_q,
+                torch.sum(a[2].mul(sm_p) - (sm_q + 1e-9).log().mul(sm_p) + (sm_p + 1e-9).log().mul(sm_p), dim=dim),
+            )
         )
 
     @staticmethod

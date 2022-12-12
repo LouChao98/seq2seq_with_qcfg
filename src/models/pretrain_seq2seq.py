@@ -4,6 +4,7 @@ from typing import Any, List, Optional
 
 import torch
 import torch.nn as nn
+import wandb
 from hydra.utils import instantiate
 from torchmetrics import MinMetric
 

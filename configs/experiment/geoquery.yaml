@@ -57,8 +57,4 @@ trainer:
 logger:
   wandb:
     project: "geoquery"
-    tags:
-      - "${hydra:runtime.choices.model/parser}"
-      # - "${hydra:runtime.choices.model/tree_encoder}"
-      - "${hydra:runtime.choices.model/decoder}"
     offline: ${in_cluster:}

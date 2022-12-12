@@ -5,6 +5,7 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import wandb
 from hydra.utils import instantiate
 from pytorch_lightning.profilers import PassThroughProfiler
 from pytorch_memlab import profile_every
@@ -75,6 +76,16 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
         self.test_metric: Metric = instantiate(self.hparams.test_metric)
 
         self.setup_patch(stage, datamodule)
+
+        if wandb.run is not None:
+            tags = []
+            for module in [self.encoder, self.tree_encoder, self.parser, self.decoder]:
+                tags.append(type(module).__name__)
+            if self.embedding is not None:
+                tags.append("staticEmb")
+            if self.pretrained is not None:
+                tags.append(self.pretrained.name_or_path)
+            wandb.run.tags = wandb.run.tags + tuple(tags)
 
         if self.hparams.load_from_checkpoint is not None:
             state_dict = torch.load(self.hparams.load_from_checkpoint, map_location="cpu")

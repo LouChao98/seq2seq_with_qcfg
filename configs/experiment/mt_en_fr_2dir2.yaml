@@ -19,24 +19,28 @@ name: "mt_en_fr_2dir"
 
 trainer:
   max_epochs: 40
-  accumulate_grad_batches: 8
+  accumulate_grad_batches: 16
   gradient_clip_val: 3
 
 datamodule:
   copy_mode: none
-  batch_size: 4
-  eval_batch_size: 4
+  batch_size: 2
+  eval_batch_size: 2
   vocab_min_freq: 2
 
 model:
-  load_model1_from_checkpoint: ${data_dir}/MT/en_fr_depthX/checkpoints/epoch_039.ckpt
-  load_model2_from_checkpoint: ${data_dir}/MT/fr_en_depthX/checkpoints/epoch_039.ckpt
+  load_model1_from_checkpoint: ${data_dir}/MT/en_fr_constraint2/checkpoints/epoch_039.ckpt
+  load_model2_from_checkpoint: ${data_dir}/MT/fr_en_constraint2/checkpoints/epoch_039.ckpt
   model:
     warmup_pcfg: 0
     warmup_qcfg: 0
     encoder:
       num_layers: 1
     decoder:
+      rule_hard_constraint:
+        _target_: src.models.constraint.fully_parameterized.FPSynchronous
+      pt_span_range: [1, 1000]
+      nt_span_range: [1, 1000]
       nt_states: 14
       pt_states: 14
       use_copy: false

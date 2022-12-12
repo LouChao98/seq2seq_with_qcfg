@@ -1,7 +1,7 @@
 import logging
+import math
 import pickle
 from collections import Counter
-from copy import deepcopy
 from functools import partial
 from pathlib import Path
 from typing import Any, Optional
@@ -15,7 +15,7 @@ from src import is_under_debugger
 from src.datamodules.components.vocab import Vocabulary
 from src.datamodules.datamodule import _DataModule
 
-from .components.sampler import ByLengthSampler
+from .components.sampler import BucketedSampler, ByLengthSampler, kmeans
 
 logger = logging.getLogger(__file__)
 
@@ -23,20 +23,24 @@ logger = logging.getLogger(__file__)
 class TSVDataModule(_DataModule):
     def __init__(
         self,
+        # file
         train_file,
         dev_file,
         test_file,
         prior_alignment_file: str = None,
         load_gold_tree: bool = False,
+        # preprocess
         max_src_len: int = 100,
         max_tgt_len: int = 100,
         copy_mode: str = "none",
         transformer_tokenizer_name: str = None,
         tokenize_tgt: bool = False,
-        batch_size: int = 64,
         vocab_min_freq: int = 3,
+        # sampler
+        batch_size: int = 64,
         eval_batch_size: int = 64,
         force_src_same_length: bool = False,
+        use_double_length_bucket: bool = False,
         num_workers: int = 0,
         pin_memory: bool = False,
         ###
@@ -233,12 +237,11 @@ class TSVDataModule(_DataModule):
         else:
             shuffle = not is_under_debugger()
             collator = self.collator
-        if self.hparams.force_src_same_length:
+        batch_sampler = self.get_batch_sampler(self.data_train, "train")
+        if batch_sampler is not None:
             loader = DataLoader(
                 dataset=self.data_train,
-                batch_sampler=ByLengthSampler(
-                    [len(item["src"]) for item in self.data_train], self.hparams.batch_size
-                ),
+                batch_sampler=batch_sampler,
                 num_workers=self.hparams.num_workers,
                 pin_memory=self.hparams.pin_memory,
                 collate_fn=collator,
@@ -256,10 +259,11 @@ class TSVDataModule(_DataModule):
         return loader
 
     def val_dataloader(self):
-        if self.hparams.force_src_same_length:
+        batch_sampler = self.get_batch_sampler(self.data_val, "val")
+        if batch_sampler is not None:
             loader = DataLoader(
                 dataset=self.data_val,
-                batch_sampler=ByLengthSampler([len(item["src"]) for item in self.data_val], self.hparams.batch_size),
+                batch_sampler=batch_sampler,
                 num_workers=self.hparams.num_workers,
                 pin_memory=self.hparams.pin_memory,
                 collate_fn=self.collator,
@@ -277,10 +281,11 @@ class TSVDataModule(_DataModule):
         return loader
 
     def test_dataloader(self):
-        if self.hparams.force_src_same_length:
+        batch_sampler = self.get_batch_sampler(self.data_test, "test")
+        if batch_sampler is not None:
             loader = DataLoader(
                 dataset=self.data_test,
-                batch_sampler=ByLengthSampler([len(item["src"]) for item in self.data_test], self.hparams.batch_size),
+                batch_sampler=batch_sampler,
                 num_workers=self.hparams.num_workers,
                 pin_memory=self.hparams.pin_memory,
                 collate_fn=self.collator,
@@ -296,6 +301,26 @@ class TSVDataModule(_DataModule):
             )
         logger.info(f"Test dataloader: {len(loader)}")
         return loader
+
+    def get_batch_sampler(self, dataset, phase):
+        if self.hparams.force_src_same_length:
+            size = self.hparams.batch_size if phase == "train" else self.hparams.eval_batch_size
+            return ByLengthSampler([len(item["src"]) for item in dataset], size)
+
+        if self.hparams.use_double_length_bucket:
+            buckets = dict(
+                zip(
+                    *kmeans(
+                        [len((item["tgt"]) * len(item["src"])) ** 1.1 for item in dataset],
+                        math.ceil(math.log2(len(dataset))),
+                    )
+                )
+            )
+            size = self.hparams.batch_size if phase == "train" else self.hparams.eval_batch_size
+            assert size > 100, f"Current size({size}) is too small."
+            return BucketedSampler(buckets, size, shuffle=phase == "train" and not is_under_debugger())
+
+        return None  # fallback to instance samplers
 
     def collator(self, data, sort=True):
         if sort:

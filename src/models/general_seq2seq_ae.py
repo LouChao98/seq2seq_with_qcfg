@@ -2,6 +2,7 @@ import logging
 from typing import Any, List, Optional
 
 import torch
+import wandb
 from hydra.utils import instantiate
 from pytorch_memlab import profile_every
 from torch.autograd import grad
@@ -30,6 +31,9 @@ class GeneralSeq2SeqAutoencoderModule(GeneralSeq2SeqModule):
             loadedkeys = self.reconstructor.load_state_dict(state_dict, strict=False)
             if len(loadedkeys.unexpected_keys) > 0:
                 log.warning(f"Unexpected keys: {loadedkeys.unexpected_keys}")
+
+        if wandb.run is not None:
+            wandb.run.tags = wandb.run.tags + (type(self.reconstructor).__name__,)
 
     def setup_patch(self, stage: Optional[str] = None, datamodule=None):
         self.reconstructor = instantiate(

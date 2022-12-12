@@ -25,8 +25,6 @@ trainer:
 
 datamodule:
   copy_mode: none
-  batch_size: 2
-  eval_batch_size: 2
 
 model:
   real_val_every_n_epochs: 1

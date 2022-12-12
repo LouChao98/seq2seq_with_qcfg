@@ -1,0 +1,7 @@
+# @package model.decoder
+
+defaults:
+  - none
+
+rule_hard_constraint:
+  _target_: src.models.constraint.folded.FSimpleHierarchy

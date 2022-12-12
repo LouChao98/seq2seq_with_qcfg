@@ -10,7 +10,7 @@ from pytorch_lightning.profilers import PassThroughProfiler
 from torch_struct.distributions import SentCFG
 
 from src.models.base import ModelBase
-from src.utils.fn import apply_to_nested_tensor, extract_parses_span_only
+from src.utils.fn import apply_to_nested_tensor, extract_parses_span_only, fix_wandb_tags
 
 from .components.dynamic_hp import DynamicHyperParameter
 from .general_seq2seq import GeneralSeq2SeqModule
@@ -50,7 +50,7 @@ class TwoDirectionalCompleteModule(ModelBase):
         self.model1.print = partial(self.sub_print, prefix="m1")
         self.model1.save_predictions = partial(self.model1.save_predictions, path="m1_predict_on_test.txt")
 
-        with self.datamodule.inverse_mode():
+        with self.datamodule.inverse_mode(), fix_wandb_tags():
             self.model2.setup(stage, datamodule)
         self.model2.log = partial(self.sub_log, prefix="m2")
         self.model2.print = partial(self.sub_print, prefix="m2")

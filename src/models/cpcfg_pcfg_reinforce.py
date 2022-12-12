@@ -8,6 +8,7 @@ from typing import Any, List, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import wandb
 from hydra.utils import instantiate
 from pytorch_lightning.profilers import PassThroughProfiler
 from pytorch_memlab import profile_every
@@ -102,6 +103,16 @@ class CPRModule(GeneralSeq2SeqModule):
                     init_func(param)
                 elif "norm" not in name.lower():
                     nn.init.zeros_(param)
+
+        if wandb.run is not None:
+            tags = []
+            for module in [self.encoder, self.tree_encoder, self.parser, self.decoder]:
+                tags.append(type(module).__name__)
+            if self.embedding is not None:
+                tags.append("staticEmb")
+            if self.pretrained is not None:
+                tags.append(self.pretrained.name_or_path)
+            wandb.run.tags = wandb.run.tags + tuple(tags)
 
         if self.hparams.load_src_parser_from_checkpoint is not None:
             ...

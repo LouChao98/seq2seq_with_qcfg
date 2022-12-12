@@ -7,6 +7,7 @@ from hydra.utils import instantiate
 from pytorch_lightning.profilers import PassThroughProfiler
 
 from src.models.base import ModelBase
+from src.utils.fn import fix_wandb_tags
 
 from .components.dynamic_hp import DynamicHyperParameter
 from .general_seq2seq import GeneralSeq2SeqModule
@@ -40,18 +41,19 @@ class TwoDirectionalModule(ModelBase):
     # model1 is the primary model
     def __init__(
         self,
-        model1,
-        model2,
+        model,
         constraint_strength,
         reg_method,
         optimizer,
         scheduler,
+        load_model1_from_checkpoint,
+        load_model2_from_checkpoint,
         warmup=0,
     ):
         assert reg_method in ("pr", "emr")
         super().__init__()
-        self.model1: GeneralSeq2SeqModule = instantiate(model1)
-        self.model2: GeneralSeq2SeqModule = instantiate(model2)
+        self.model1: GeneralSeq2SeqModule = instantiate(model)
+        self.model2: GeneralSeq2SeqModule = instantiate(model)
         self.warmup = max(self.model1.hparams.warmup_qcfg, warmup)
         self.reg_method = reg_method
         self.save_hyperparameters(logger=False)
@@ -74,7 +76,7 @@ class TwoDirectionalModule(ModelBase):
                 _save_detailed_prediction, func=self.model1.save_detailed_predictions, prefix="m1_"
             )
 
-        with self.datamodule.backward_mode():
+        with self.datamodule.backward_mode(), fix_wandb_tags():
             self.model2.setup(stage, datamodule)
             self.model2.log = partial(self.sub_log, prefix="m2")
             self.model2.print = partial(self.sub_print, prefix="m2")
@@ -84,6 +86,18 @@ class TwoDirectionalModule(ModelBase):
             )
 
         self.pr_solver = PTAgree()
+
+        if self.hparams.load_model1_from_checkpoint is not None:
+            state_dict = torch.load(self.hparams.load_model1_from_checkpoint, map_location="cpu")
+            if "state_dict" in state_dict:
+                state_dict = state_dict["state_dict"]
+            self.model1.load_state_dict(state_dict)
+
+        if self.hparams.load_model2_from_checkpoint is not None:
+            state_dict = torch.load(self.hparams.load_model2_from_checkpoint, map_location="cpu")
+            if "state_dict" in state_dict:
+                state_dict = state_dict["state_dict"]
+            self.model2.load_state_dict(state_dict)
 
     def sub_log(self, name, value, *args, prefix, **kwargs):
         self.log(f"{prefix}/{name}", value, *args, **kwargs)

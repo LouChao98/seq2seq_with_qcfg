@@ -7,6 +7,7 @@ from typing import Any, List, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import wandb
 from hydra.utils import instantiate
 from torchmetrics import Metric, MinMetric
 
@@ -317,6 +318,16 @@ class PPRTwoDirModule(ModelBase):
             )
 
         self.pr_solver = PTAgree()
+
+        if wandb.run is not None:
+            tags = []
+            for module in [self.fw_model.encoder, self.fw_model.tree_encoder, self.fw_model.decoder]:
+                tags.append(type(module).__name__)
+            if self.fw_model.embedding is not None:
+                tags.append("staticEmb")
+            if self.fw_model.pretrained is not None:
+                tags.append(self.fw_model.pretrained.name_or_path)
+            wandb.run.tags = wandb.run.tags + tuple(tags)
 
         if self.hparams.load_from_checkpoint is not None:
             state_dict = torch.load(self.hparams.load_from_checkpoint, map_location="cpu")
