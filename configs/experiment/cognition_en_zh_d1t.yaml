@@ -7,7 +7,7 @@ defaults:
   # - /model/decoder/constraint: fp_hard_sh
   - override /datamodule: cognition_en_zh
   - override /model: pcfg_pcfg_reinforce
-  - override /model/parser: tnpcfg
+  # - override /model/parser: tnpcfg
   - override /model/decoder: decomp1_copy_as_t
   - override /model/test_metric: sbleu_zh
   - override /callbacks: default
@@ -27,9 +27,7 @@ trainer:
 
 datamodule:
   copy_mode: none
-  batch_size: 4
-  eval_batch_size: 4
-  force_src_same_length: true
+  # force_src_same_length: true
   vocab_min_freq: 6
 
 model:

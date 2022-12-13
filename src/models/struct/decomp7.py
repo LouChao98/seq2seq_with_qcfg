@@ -50,6 +50,9 @@ class Decomp7(DecompBase):
         merge_h2 = checkpoint(partial(g_merge_h2, semiring=semiring), use_reentrant=use_reentrant)
         merge_h3 = checkpoint(partial(g_merge_h3, semiring=semiring), use_reentrant=use_reentrant)
 
+        # params['head'] = params['head'].log()
+        # params['slr'] = params['slr'].log()
+
         head = params["head"]  # (batch, nt, r), A[i] -> R
         term = params["term"]  # (batch, seq_len, PT)
         root = params["root"]  # (batch, NT)
@@ -176,17 +179,17 @@ class Decomp7(DecompBase):
         pt = tgt_pt * src_pt
         src = src_nt + src_pt
         slr = (
-            torch.randn(bsz, r, src_nt, src_nt + src_pt, src_nt + src_pt)
+            (5 * torch.randn(bsz, r, src_nt, src_nt + src_pt, src_nt + src_pt))
             .flatten(3)
             .softmax(-1)
             .view(bsz, r, src_nt, src_nt + src_pt, src_nt + src_pt)
         )
         return {
-            "term": torch.randn(bsz, max_len, pt).log_softmax(-1).requires_grad_(True),
-            "root": torch.randn(bsz, nt).log_softmax(-1).requires_grad_(True),
-            "head": torch.randn(bsz, nt, r).softmax(-1).requires_grad_(True),
-            "left": torch.randn(bsz, r, src, max(tgt_nt, tgt_pt)).log_softmax(-1).requires_grad_(True),
-            "right": torch.randn(bsz, r, src, max(tgt_nt, tgt_pt)).log_softmax(-1).requires_grad_(True),
+            "term": (5 * torch.randn(bsz, max_len, pt)).log_softmax(-1).requires_grad_(True),
+            "root": (5 * torch.randn(bsz, nt)).log_softmax(-1).requires_grad_(True),
+            "head": (5 * torch.randn(bsz, nt, r)).softmax(-1).requires_grad_(True),
+            "left": (5 * torch.randn(bsz, r, src, max(tgt_nt, tgt_pt))).log_softmax(-1).requires_grad_(True),
+            "right": (5 * torch.randn(bsz, r, src, max(tgt_nt, tgt_pt))).log_softmax(-1).requires_grad_(True),
             "slr": slr,
         }
 

@@ -2,13 +2,14 @@ import io
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
+import wandb
 from pytorch_lightning.callbacks import RichProgressBar, TQDMProgressBar
 from pytorch_lightning.loggers.wandb import WandbLogger
 from tqdm import tqdm
 
-import wandb
 from src.utils.log_utils import rich_theme
 
 log = logging.getLogger("callback")
@@ -119,7 +120,13 @@ class CustomWandbLogger(WandbLogger):
         super().__init__(*args, **kwargs)
 
     def finalize(self, status: str) -> None:
-        for fname in ["predict_on_test.txt", "train.log", "test.log"]:
-            if os.path.exists(fname):
+        for fname in Path(".").glob("*.txt"):
+            _fname = str(fname)
+            if (
+                "predict_on_test" in _fname
+                or "predict_on_val" in _fname
+                or "train.log" in _fname
+                or "test.log" in _fname
+            ):
                 wandb.save(fname)
         return super().finalize(status)

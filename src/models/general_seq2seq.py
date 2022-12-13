@@ -533,6 +533,8 @@ class GeneralSeq2SeqModule(ModelBase):
 
         if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0 and self.current_epoch > self.warmup:
             acc = self.test_metric.compute()
+            if not isinstance(acc, dict):
+                acc = {"result": acc}
             self.log_dict({"val/" + k: v for k, v in acc.items()})
             self.print(acc)
             self.save_predictions(outputs, f"predict_on_val_epoch{self.current_epoch}")
@@ -599,6 +601,8 @@ class GeneralSeq2SeqModule(ModelBase):
 
     def test_epoch_end(self, outputs) -> None:
         acc = self.test_metric.compute()
+        if not isinstance(acc, dict):
+            acc = {"result": acc}
         d = {"test/" + k: v for k, v in acc.items()}
         d["step"] = self.global_step
         self.log_dict(d)

@@ -64,7 +64,7 @@ class GeneralGNN(torch.nn.Module):
                     if parent != -1:
                         edges.append((i, parent))
                         edges.append((parent, i))
-                    vertices = torch.stack(vertices, 0)
+                vertices = torch.stack(vertices, 0)
 
             graph = Data(vertices, torch.tensor(edges).T)
             graph.node_label = torch.tensor([(l, r) for l, r, *_ in spans_item])

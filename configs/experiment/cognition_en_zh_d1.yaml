@@ -20,17 +20,15 @@ defaults:
 name: "cognition_en_zh_${hydra:runtime.choices.model/decoder}"
 
 trainer:
-  max_epochs: 16
+  max_epochs: 20
   accumulate_grad_batches: 16
   gradient_clip_val: 3
 
 datamodule:
   copy_mode: none
-  batch_size: 4
-  eval_batch_size: 4
 
 model:
-  real_val_every_n_epochs: 4
+  real_val_every_n_epochs: 5
 
   decoder:
     nt_states: 14
