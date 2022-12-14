@@ -1,6 +1,7 @@
 import logging
 import math
 import random
+import warnings
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass
@@ -373,6 +374,7 @@ class TgtParserBase(nn.Module):
             preds = self.choose_samples_by_constrastive(preds, pred, **kwargs)
         elif self.generation_criteria == "none":
             preds = [({"tgt": [item["tgt"] for item in batch]}, None) for batch in preds]
+
         return preds
 
     def expand_preds_using_copy(self, src, preds, pt_spans, nt_spans, max_len):
@@ -436,7 +438,7 @@ class TgtParserBase(nn.Module):
     def choose_samples_by_ppl(self, preds, pred: TgtParserPrediction, **kwargs):
 
         # JUST FOR ANALYSIS. REMOVE IF REPORTING FINAL RESULTS
-        tgt_lens = kwargs.get("tgt_lens")
+        tgt_lens = None  # kwargs.get("tgt_lens")
 
         new_preds = []
         pred = copy(pred).clear()
@@ -626,9 +628,7 @@ class TgtParserBase(nn.Module):
         prior_alignment=None,
     ):
         batch_size, n = tgt.shape[:2]
-        term = term.unsqueeze(1).expand(batch_size, n, pt, term.size(2))
-        tgt_expand = tgt.unsqueeze(2).expand(batch_size, n, pt).unsqueeze(3)
-        term = torch.gather(term, 3, tgt_expand).squeeze(3)
+        term = self.build_term_rules_given_tgt(term, batch_size, n, pt, tgt)
 
         constraint_scores = None
         lse_scores = None
@@ -671,6 +671,12 @@ class TgtParserBase(nn.Module):
             term = self.build_pt_prior_alignment_soft_constraint(term, prior_alignment)
 
         return {"term": term, "root": root, "constraint": constraint_scores, "lse": lse_scores, "add": add_scores}
+
+    def build_term_rules_given_tgt(self, term, batch_size, n, pt, tgt):
+        term = term.unsqueeze(1).expand(batch_size, n, pt, term.size(2))
+        tgt_expand = tgt.unsqueeze(2).expand(batch_size, n, pt).unsqueeze(3)
+        term = torch.gather(term, 3, tgt_expand).squeeze(3)
+        return term
 
     def build_pt_copy_constraint(self, terms, constraint):
         batch_size, n = terms.shape[:2]

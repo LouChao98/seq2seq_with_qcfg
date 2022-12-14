@@ -6,9 +6,7 @@
 defaults:
   # - /model/decoder/constraint: fp_hard_sh
   - override /datamodule: cognition_en_zh
-  - override /model: pcfg_pcfg_struatt
-  - override /model/parser: tnpcfg_fast
-  - override /model/decoder: decomp1_struatt
+  - override /model: tnpcfg_pcfg_struatt
   - override /model/test_metric: sbleu_zh
   - override /callbacks: default
   - override /logger: wandb
@@ -31,6 +29,8 @@ datamodule:
 
 model:
   real_val_every_n_epochs: 5
+  use_label_encoder: true
+  label_encoder_inp_dim: ${.parser.cpd_rank}
 
   decoder:
     use_fast: true

@@ -332,6 +332,79 @@ class NoDecompSampler(DecompSamplerBase):
         return samples, types, status
 
 
+class NoDecompNATSampler(DecompSamplerBase):
+    # Experimental
+
+    @torch.no_grad()
+    def process_params(self, params: Dict[str, Tensor]):
+        assert not self.use_copy
+        terms = params["term"].exp().cumsum(3).cpu().numpy()
+        roots = params["root"].exp().cumsum(1).cpu().numpy()
+        rule = self.threshold(params["rule"].exp()).flatten(2).cumsum(2).cpu().numpy()
+        return terms, rule, roots
+
+    @staticmethod
+    # @jit(nopython=True)
+    def sample_impl(
+        terms: np.ndarray,
+        rules: np.ndarray,
+        roots: np.ndarray,
+        nt_states: int,
+        nt_num_nodes: int,
+        pt_states: int,
+        pt_num_nodes: int,
+        use_copy=True,
+        num_samples=1,
+        max_length=100,
+        max_actions=100,
+        unk=1,
+    ):
+        NT = rules.shape[0]
+        PT = terms.shape[1]
+        S = NT + PT
+        samples = [[0] for _ in range(num_samples)]
+        types = [[0] for _ in range(num_samples)]
+        status = [_OK for _ in range(num_samples)]
+
+        for i in range(num_samples):
+            nonterminals: List[int] = []
+            preterminals: List[int] = []
+            actions = 0
+            try:
+                sample = weighted_random_v2(roots)
+                nonterminals.append(sample)
+
+                while len(nonterminals) > 0 and len(preterminals) < max_length and actions < max_actions:
+                    s = nonterminals.pop()  # get the last element
+                    if s < NT:
+                        actions += 1
+                        sample = weighted_random_v2(rules[s])
+                        left, right = divmod(sample, S)
+                        nonterminals.extend([right, left])
+                    else:
+                        preterminals.append(s - NT)
+
+            except Exception:
+                status[i] = _SONMASK
+
+            if actions == max_actions or (len(preterminals) == max_length and len(nonterminals) > 0):
+                status[i] = _REACHLIMIT
+
+            terminals: List[int] = []
+            terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
+            try:
+                for s in preterminals:
+                    sample = weighted_random_v2(terms[len(terminals), s])
+                    terminals.append(sample)
+                    terminal_type.append(_VOCAB)
+            except Exception:
+                status[i] = _SONMASK
+
+            samples[i] = terminals
+            types[i] = terminal_type
+        return samples, types, status
+
+
 def g_merge(y, z, ptpt, semiring):
     # y: c, bsz, n, 1, pt
     # z: c, bsz, n, 1, pt

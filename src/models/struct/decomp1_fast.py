@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from numba import jit
 from torch import Tensor
+from torch.autograd import grad
 from torch.distributions.utils import lazy_property
 
 from src.models.struct.semiring import EntropySemiring, LogSemiring
@@ -35,6 +36,15 @@ class Decomp1Fast(DecompBase):
         super().__init__(*args, **kwargs)
         self._trace_rank = False
 
+    @contextmanager
+    def trace_rank(self):
+        self._trace_rank = True
+        # reset lazy property
+        if hasattr(self, "marginal"):
+            delattr(self, "marginal")
+        yield
+        self._trace_rank = False
+
     def inside(self, params, semiring, trace=False, use_reentrant=True) -> Tuple[Tensor, Tensor]:
         assert semiring == LogSemiring
         return self.inside_log_semiring(params, trace, use_reentrant)
@@ -57,17 +67,6 @@ class Decomp1Fast(DecompBase):
         TRNT = R[:, :NT]
         TRPT = R[:, NT:]
 
-        if trace:
-            if self._trace_rank:
-                _span_indicator = term.new_ones(batch, N, N, rank, requires_grad=True)
-                span_indicator = _span_indicator
-            else:
-                _span_indicator = term.new_ones(batch, N, N, requires_grad=True)
-                span_indicator = _span_indicator.unsqueeze(-1)
-            span_indicator_running = span_indicator
-        else:
-            _span_indicator = None
-
         sn = term.new_full((batch, N, N), -1e9)
         norm: Tensor = term.max(-1)[0]
         sn.diagonal(1, 1, 2).copy_(norm)
@@ -75,17 +74,31 @@ class Decomp1Fast(DecompBase):
 
         s = term.new_zeros(batch, N, N, rank)
 
-        # b n pt x b pt r -> b n r
-        left_term = torch.matmul(term, TLPT)
-        right_term = torch.matmul(term, TRPT)
-
-        s.diagonal(1, 1, 2).copy_(left_term.transpose(1, 2))
-        s.diagonal(-1, 1, 2).copy_(right_term.transpose(1, 2))
-
         H = H.transpose(-1, -2)
         # (m_A, r_A) + (m_B, r_B) -> (r_A, r_B)
         H_L = torch.matmul(H, TLNT)
         H_R = torch.matmul(H, TRNT)
+
+        # b n pt x b pt r -> b n r
+        left_term = torch.matmul(term, TLPT)
+        right_term = torch.matmul(term, TRPT)
+
+        if trace:
+            if self._trace_rank:
+                _span_indicator = term.new_ones(batch, N, N, rank, requires_grad=True)
+                span_indicator = _span_indicator
+                term_indicator = torch.ones_like(left_term, requires_grad=True)
+                left_term = left_term * term_indicator
+                right_term = right_term * term_indicator
+            else:
+                _span_indicator = term.new_ones(batch, N, N, requires_grad=True)
+                span_indicator = _span_indicator.unsqueeze(-1)
+            span_indicator_running = span_indicator
+        else:
+            _span_indicator = None
+
+        s.diagonal(1, 1, 2).copy_(left_term.transpose(1, 2))
+        s.diagonal(-1, 1, 2).copy_(right_term.transpose(1, 2))
 
         # prepare length, same as the batch_size in PackedSequence
         n_at_position = (torch.arange(2, N + 1).unsqueeze(1) <= self.lens.cpu().unsqueeze(0)).sum(1)
@@ -147,7 +160,51 @@ class Decomp1Fast(DecompBase):
         final = torch.matmul(final, H)
         final = (final + 1e-9).squeeze(1).log() + root
         logZ = final.logsumexp(-1) + final_normalizer.squeeze(-1)
-        return logZ, _span_indicator
+
+        if trace and self._trace_rank:
+            return logZ, (_span_indicator, term_indicator)
+        else:
+            return logZ, _span_indicator
+
+    @lazy_property
+    def marginal(self):
+        params = {}
+        for key, value in self.params.items():
+            if key in self.KEYS:
+                params[key] = value.detach().requires_grad_()
+            else:
+                params[key] = value
+        logZ, trace = self.inside(params, LogSemiring, trace=True)
+        logZ.sum().backward()
+        output = {}
+        for k, is_in_log_space in zip(self.KEYS, self.LOGSPACE):
+            g = params[k].grad
+            if is_in_log_space:
+                output[k] = g
+            else:
+                output[k] = g * params[k].detach()
+        if isinstance(trace, tuple):
+            output["trace"] = trace[0].grad
+            output["term"] = trace[1].grad
+        else:
+            output["trace"] = trace.grad
+        return output
+
+    @lazy_property
+    def marginal_with_grad(self):
+        params = {}
+        # TODO only check term should be enough
+        for key, value in self.params.items():
+            if key in self.KEYS and not value.requires_grad:
+                params[key] = value.requires_grad_()
+            else:
+                params[key] = value
+        logZ, trace = self.inside(self.params, LogSemiring, trace=True, use_reentrant=False)
+        if isinstance(trace, tuple):
+            grads = grad(logZ.sum(), [trace[1], trace[0]], create_graph=True)
+        else:
+            grads = grad(logZ.sum(), [self.params["term"], trace], create_graph=True)
+        return grads
 
     # NOTE: entropy, cross_entropy and kl are slower than the normal version but save memory
     # because we need marginals here
@@ -209,6 +266,18 @@ def convert_decomp1_to_pcfg(p, tgt_nt):
     if "lse" in p:
         output["lse"] = p["lse"]
     return output
+
+
+class Decomp1FastSampler(Decomp1Sampler):
+    # not faster than Decomp1Sampler. just match the name
+    @torch.no_grad()
+    def process_params(self, params: Dict[str, Tensor]):
+        terms = params["term"].exp().cumsum(2).cpu().numpy()
+        roots = params["root"].exp().cumsum(1).cpu().numpy()
+        H = params["head"].cumsum(2).cpu().numpy()
+        L = params["left"].cumsum(2).cpu().numpy()
+        R = params["right"].cumsum(2).cpu().numpy()
+        return terms, H, L, R, roots
 
 
 # @torch.jit.script

@@ -1,9 +1,11 @@
 /vendor
+/fairseq
 *.sh
 benchmark*.py
 play*.py
 wrong*.py
 !eval.sh
+!create.sh
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -147,7 +149,7 @@ dmypy.json
 
 # Lightning-Hydra-Template
 configs/local/default.yaml
-data/
+/data/
 logs/
 wandb/
 .env

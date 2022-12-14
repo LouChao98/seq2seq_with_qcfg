@@ -8,6 +8,7 @@ cache/
 .idea/
 .vscode/
 wandb/
+/fairseq/
 
 /data/
 
