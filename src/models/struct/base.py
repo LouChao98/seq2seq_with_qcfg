@@ -176,6 +176,7 @@ class DecompBase:
     @lazy_property
     def marginal_with_grad(self):
         params = {}
+        # TODO only check term should be enough
         for key, value in self.params.items():
             if key in self.KEYS and not value.requires_grad:
                 params[key] = value.requires_grad_()
@@ -184,6 +185,24 @@ class DecompBase:
         logZ, trace = self.inside(self.params, LogSemiring, trace=True, use_reentrant=False)
         grads = grad(logZ.sum(), [self.params["term"], trace], create_graph=True)
         return grads
+
+    @lazy_property
+    def rule_marginal_with_grad(self):
+        params = {}
+        for key, value in self.params.items():
+            if key in self.KEYS and not value.requires_grad:
+                params[key] = value.requires_grad_()
+            else:
+                params[key] = value
+        logZ, trace = self.inside(self.params, LogSemiring, trace=False, use_reentrant=False)
+        grads = grad(logZ.sum(), [self.params[key] for key in self.KEYS], create_graph=True)
+        output = {}
+        for k, is_in_log_space, g in zip(self.KEYS, self.LOGSPACE, grads):
+            if is_in_log_space:
+                output[k] = g
+            else:
+                output[k] = g * self.params[k]
+        return output
 
     @lazy_property
     def entropy(self):

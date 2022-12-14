@@ -7,13 +7,25 @@ from torch.nn.utils.rnn import pad_sequence
 
 from ..components.common import MultiResidualLayer
 from ..struct.decomp1 import Decomp1, Decomp1Sampler
+from ..struct.decomp1_fast import Decomp1Fast
 from .base import TgtParserBase, TgtParserPrediction
 
 log = logging.getLogger(__file__)
 
 
 class NeuralDecomp1StruAttTgtParser(TgtParserBase):
-    def __init__(self, cpd_rank=32, vocab=100, dim=256, num_layers=3, src_dim=256, ignore_weight=False, **kwargs):
+    def __init__(
+        self,
+        cpd_rank=32,
+        vocab=100,
+        dim=256,
+        num_layers=3,
+        src_dim=256,
+        ignore_weight=False,
+        tie_r=False,
+        use_fast=False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
 
         assert self.rule_hard_constraint is None, "Do not support any constraint."
@@ -25,6 +37,8 @@ class NeuralDecomp1StruAttTgtParser(TgtParserBase):
         self.num_layers = num_layers
         self.cpd_rank = cpd_rank
         self.ignore_weight = ignore_weight
+        self.tie_r = tie_r
+        self.use_fast = use_fast
 
         self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -37,6 +51,13 @@ class NeuralDecomp1StruAttTgtParser(TgtParserBase):
         self.rule_mlp_parent = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
         self.rule_mlp_left = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
         self.rule_mlp_right = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
+
+        if tie_r:
+            _w, _b = self.rule_mlp_parent.out_linear.weight, self.rule_mlp_parent.out_linear.bias
+            self.rule_mlp_left.out_linear.weight = _w
+            self.rule_mlp_left.out_linear.bias = _b
+            self.rule_mlp_right.out_linear.weight = _w
+            self.rule_mlp_right.out_linear.bias = _b
 
         self.reset_parameters()
 
@@ -164,9 +185,14 @@ class NeuralDecomp1StruAttTgtParser(TgtParserBase):
         rule_left[~mask] = self.neg_huge
         rule_right[~mask] = self.neg_huge
 
-        rule_head = rule_head.log_softmax(-1)
-        rule_left = rule_left.transpose(1, 2).log_softmax(-1)
-        rule_right = rule_right.transpose(1, 2).log_softmax(-1)
+        if self.use_fast:
+            rule_head = rule_head.softmax(-1)
+            rule_left = rule_left.transpose(1, 2).softmax(-1)
+            rule_right = rule_right.transpose(1, 2).softmax(-1)
+        else:
+            rule_head = rule_head.log_softmax(-1)
+            rule_left = rule_left.transpose(1, 2).log_softmax(-1)
+            rule_right = rule_right.transpose(1, 2).log_softmax(-1)
 
         # A->a
         terms = self.vocab_out(pt_emb)
@@ -198,7 +224,10 @@ class NeuralDecomp1StruAttTgtParser(TgtParserBase):
 
     def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:
         pred = super().observe_x(pred, x, lengths, inplace, **kwargs)
-        pred.dist = Decomp1(pred.posterior_params, pred.lengths, **pred.common())
+        if self.use_fast:
+            pred.dist = Decomp1Fast(pred.posterior_params, pred.lengths, **pred.common())
+        else:
+            pred.dist = Decomp1(pred.posterior_params, pred.lengths, **pred.common())
         return pred
 
     def prepare_sampler(self, pred: TgtParserPrediction, src, src_ids, inplace=True) -> TgtParserPrediction:

@@ -36,6 +36,7 @@ class _Unidirectional(GeneralSeq2SeqModule):
         self.warmup = 0
 
         self.embedding = embedding
+        self.pretrained = None
         self.encoder = encoder
         self.tree_encoder = tree_encoder
         self.parser: TgtParserBase = parser

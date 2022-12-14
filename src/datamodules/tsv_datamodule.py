@@ -1,8 +1,8 @@
 import logging
 import math
 import pickle
-from collections import Counter
-from functools import partial
+from collections import Counter, defaultdict
+from functools import partial, reduce
 from pathlib import Path
 from typing import Any, Optional
 
@@ -303,22 +303,52 @@ class TSVDataModule(_DataModule):
         return loader
 
     def get_batch_sampler(self, dataset, phase):
-        if self.hparams.force_src_same_length:
-            size = self.hparams.batch_size if phase == "train" else self.hparams.eval_batch_size
-            return ByLengthSampler([len(item["src"]) for item in dataset], size)
 
         if self.hparams.use_double_length_bucket:
-            buckets = dict(
-                zip(
-                    *kmeans(
-                        [len((item["tgt"]) * len(item["src"])) ** 1.1 for item in dataset],
-                        math.ceil(math.log2(len(dataset))),
+
+            if self.hparams.force_src_same_length:
+                length_bucket = defaultdict(list)
+                for i, item in enumerate(dataset):
+                    length_bucket[len(item["src"])].append(i)
+                buckets = {}
+                for length, ids in length_bucket.items():
+                    costs = [len((dataset[i]["tgt"]) * len(dataset[i]["src"])) ** 1.1 for i in ids]
+                    num_clusters = math.ceil(math.log2(len(ids)))
+
+                    if len(ids) == 1:
+                        k = costs[0]
+                        while k in buckets:
+                            k += 1e-9
+                        buckets[k] = ids
+                    else:
+                        _centroids, _clusters = kmeans(costs, num_clusters)
+                        assert sum(len(item) for item in _clusters) == len(ids)
+                        for k, c in zip(_centroids, _clusters):
+                            while k in buckets:
+                                k += 1e-9
+                            buckets[k] = [ids[i] for i in c]
+
+                assert len(reduce(lambda x, y: set(x) | set(y), buckets.values(), set())) == len(dataset)
+                for c in buckets.values():
+                    l = len(dataset[c[0]]["src"])
+                    for i in c[1:]:
+                        assert l == len(dataset[i]["src"])
+            else:
+                buckets = dict(
+                    zip(
+                        *kmeans(
+                            [len((item["tgt"]) * len(item["src"])) ** 1.1 for item in dataset],
+                            math.ceil(math.log2(len(dataset))),
+                        )
                     )
                 )
-            )
             size = self.hparams.batch_size if phase == "train" else self.hparams.eval_batch_size
             assert size > 100, f"Current size({size}) is too small."
             return BucketedSampler(buckets, size, shuffle=phase == "train" and not is_under_debugger())
+
+        if self.hparams.force_src_same_length:
+            size = self.hparams.batch_size if phase == "train" else self.hparams.eval_batch_size
+            return ByLengthSampler([len(item["src"]) for item in dataset], size)
 
         return None  # fallback to instance samplers
 

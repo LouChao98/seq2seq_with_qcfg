@@ -81,6 +81,7 @@ class BucketedSpanExtractor(nn.Module):
                 n_bucket = math.ceil(math.sqrt(sequence_tensor.shape[1]))
             else:
                 raise ValueError(f"Bad n_bucket: {self.n_bucket}")
+            assert n_bucket >= 1
             # a segment such that in each block, padding size is similar
             segment = get_simple_seg((span_indices[0, :, 1] - span_indices[0, :, 0]).cpu().numpy(), n_bucket)
         assert sum(segment) == span_indices.shape[1], f"{sum(segment)}, {span_indices.shape[1]}"

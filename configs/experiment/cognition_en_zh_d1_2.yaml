@@ -5,8 +5,11 @@
 
 defaults:
   # - /model/decoder/constraint: fp_hard_sh
-  - override /datamodule: mt_en_fr_2dir
-  - override /model: pcfg_pcfg_reinforce_2dir
+  - override /datamodule: cognition_en_zh
+  - override /model: pcfg_pcfg_struatt
+  - override /model/parser: tnpcfg_fast
+  - override /model/decoder: decomp1_struatt
+  - override /model/test_metric: sbleu_zh
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -15,35 +18,29 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "mt_en_fr_2dir"
+name: "cognition_en_zh"
 
 trainer:
-  max_epochs: 40
-  accumulate_grad_batches: 8
+  max_epochs: 20
+  accumulate_grad_batches: 16
   gradient_clip_val: 3
-
-model:
-  decoder:
-    use_copy: false
-  optimizer:
-    groups:
-      - pattern: '.*\.dummy_node_emb'
-        lr: 5.0e-5
 
 datamodule:
   copy_mode: none
-  batch_size: 4
-  eval_batch_size: 4
-  vocab_min_freq: 2
+  force_src_same_length: true
 
-callbacks:
-  model_checkpoint:
-    monitor: fw/val/ppl
-  early_stopping:
-    monitor: fw/val/ppl
+model:
+  real_val_every_n_epochs: 5
+
+  decoder:
+    use_fast: true
+    nt_states: 14
+    pt_states: 14
+    use_copy: false
+    generation_max_length: 30
+    generation_num_samples: 100
 
 logger:
   wandb:
-    project: "mt_en_fr"
-    tags: ["ppr_2dir"]
+    project: "cognition_en_zh"
     offline: ${in_cluster:}

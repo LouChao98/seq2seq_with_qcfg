@@ -119,6 +119,15 @@ def compare_marginal(m1, m2):
             assert False
 
 
+def compare_unlabeled_marginal(m1, m2):
+    # m1: (l, r, t)
+    # m2: (w, l, t)
+    m2 = m2.sum(3)
+    for i in range(m1.shape[1] - 2):
+        if not torch.allclose(m1.diagonal(2 + i, dim1=1, dim2=2), m2[:, i, : -i - 1], rtol=1e-4, atol=1e-6):
+            assert False
+
+
 def check_full_marginal(term_m, trace_m, lens):
     if term_m.ndim == 3:
         assert torch.allclose(term_m.flatten(1).sum(1), torch.tensor(lens, dtype=torch.float))

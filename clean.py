@@ -14,7 +14,7 @@ for fname in Path("logs").glob("*/runs/*"):
         if fdate + datetime.timedelta(days=2) < now:
             to_remove.append(fname)
             print(str(fname) + " ... [too old]")
-        elif not (fname / "checkpoints").exists():
+        elif not (fname / "checkpoints").exists() and fdate + datetime.timedelta(hours=4) < now:
             to_remove.append(fname)
             print(str(fname) + " ... [no ckpt]")
 

@@ -120,7 +120,7 @@ class CustomWandbLogger(WandbLogger):
         super().__init__(*args, **kwargs)
 
     def finalize(self, status: str) -> None:
-        for fname in Path(".").glob("*.txt"):
+        for fname in Path(".").glob("*"):
             _fname = str(fname)
             if (
                 "predict_on_test" in _fname
@@ -128,5 +128,5 @@ class CustomWandbLogger(WandbLogger):
                 or "train.log" in _fname
                 or "test.log" in _fname
             ):
-                wandb.save(fname)
+                wandb.save(str(fname))
         return super().finalize(status)

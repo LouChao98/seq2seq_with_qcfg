@@ -14,6 +14,7 @@ from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
 
 from src.models.src_parser.base import SrcParserBase
+from src.models.struct.decomp1_fast import Decomp1Fast
 from src.models.tgt_parser.base import TgtParserBase
 from src.utils.fn import annotate_snt_with_brackets, report_ids_when_err
 from src.utils.metric import PerplexityMetric
@@ -24,7 +25,7 @@ log = logging.getLogger(__file__)
 
 
 class GeneralSeq2SeqEnd2EndStruAttModule(GeneralSeq2SeqModule):
-    def __init__(self, use_label_encoder=False, label_normalization=True, **kwargs):
+    def __init__(self, use_label_encoder=False, label_encoder_inp_dim=None, label_normalization=True, **kwargs):
         super().__init__(**kwargs)
         self.save_hyperparameters(logger=False)
 
@@ -60,8 +61,12 @@ class GeneralSeq2SeqEnd2EndStruAttModule(GeneralSeq2SeqModule):
         self.parser: SrcParserBase = instantiate(self.hparams.parser, vocab=len(self.datamodule.src_vocab))
 
         if self.hparams.use_label_encoder:
-            assert self.parser.pt_states == self.parser.nt_states, "Not implemented"
-            self.label_encoder = nn.Linear(self.parser.pt_states, self.encoder.get_output_dim())
+            if self.hparams.label_encoder_inp_dim is None:
+                assert self.parser.pt_states == self.parser.nt_states, "Not implemented"
+                label_encoder_inp_dim = self.parser.pt_states
+            else:
+                label_encoder_inp_dim = self.hparams.label_encoder_inp_dim
+            self.label_encoder = nn.Linear(label_encoder_inp_dim, self.encoder.get_output_dim())
 
         self.decoder: TgtParserBase = instantiate(
             self.hparams.decoder,
@@ -156,7 +161,8 @@ class GeneralSeq2SeqEnd2EndStruAttModule(GeneralSeq2SeqModule):
             if self.hparams.label_normalization:
                 span_label = span_label / (span_label.sum(3, keepdim=True) + 1e-9)
         term_m = term_m.sum(2)
-        span_m = span_m.sum((3, 4))
+        if span_m.ndim > 3:
+            span_m = span_m.flatten(3).sum(3)
         for bidx in range(len(x)):
             index_list = [(j, j + w + 1, -1) for w in range(src_lens[bidx]) for j in range(0, src_lens[bidx] - w)]
             index = torch.tensor(index_list)

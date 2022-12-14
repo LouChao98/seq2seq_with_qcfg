@@ -50,7 +50,7 @@ class TwoDirectionalModule(ModelBase):
         load_model2_from_checkpoint,
         warmup=0,
     ):
-        assert reg_method in ("pr", "emr")
+        assert reg_method in ("pr", "emr", None)
         super().__init__()
         self.model1: GeneralSeq2SeqModule = instantiate(model)
         self.model2: GeneralSeq2SeqModule = instantiate(model)
@@ -85,7 +85,7 @@ class TwoDirectionalModule(ModelBase):
                 _save_detailed_prediction, func=self.model2.save_detailed_predictions, prefix="m2_"
             )
 
-        self.pr_solver = PTAgree()
+        self.pt_pr_solver = PTAgree()
 
         if self.hparams.load_model1_from_checkpoint is not None:
             state_dict = torch.load(self.hparams.load_model1_from_checkpoint, map_location="cpu")
@@ -115,7 +115,7 @@ class TwoDirectionalModule(ModelBase):
             loss = torch.zeros(1, device=model1_pred["tgt_runtime"]["pred"].device)
         else:
             if self.reg_method == "pr":
-                loss = self.pr_solver(model1_pred["tgt_runtime"]["pred"], model2_pred["tgt_runtime"]["pred"])
+                loss = self.pt_pr_solver(model1_pred["tgt_runtime"]["pred"], model2_pred["tgt_runtime"]["pred"])
             elif self.reg_method == "emr":
                 pred1 = model1_pred["tgt_runtime"]["pred"]
                 pred2 = model2_pred["tgt_runtime"]["pred"]

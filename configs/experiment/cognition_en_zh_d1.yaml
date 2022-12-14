@@ -31,6 +31,7 @@ model:
   real_val_every_n_epochs: 5
 
   decoder:
+    use_fast: true
     nt_states: 14
     pt_states: 14
     use_copy: false

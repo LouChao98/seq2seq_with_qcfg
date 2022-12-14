@@ -10,63 +10,59 @@ from pytorch_lightning.profilers import PassThroughProfiler
 from torch_struct.distributions import SentCFG
 
 from src.models.base import ModelBase
-from src.utils.fn import apply_to_nested_tensor, extract_parses_span_only, fix_wandb_tags
+from src.utils.fn import apply_to_nested_tensor, extract_parses_span_only
 
 from .components.dynamic_hp import DynamicHyperParameter
 from .general_seq2seq import GeneralSeq2SeqModule
+from .joint_two2 import TwoDirectionalModule as _TwoDir
+from .joint_two2 import smoothed_hinge_loss
 
 log = logging.getLogger(__file__)
 
 
-class TwoDirectionalCompleteModule(ModelBase):
-    # model1 is the primary model
+class TwoDirectionalModule(_TwoDir):
     def __init__(
         self,
-        model1,
-        model2,
+        model,
         constraint_strength,
-        constraint_estimation_strategy,
+        reg_method,
         optimizer,
         scheduler,
+        load_model1_from_checkpoint,
+        load_model2_from_checkpoint,
+        warmup=0,
     ):
-        assert constraint_estimation_strategy in ("sample", "argmax")
-        super().__init__()
-        self.model1: GeneralSeq2SeqModule = instantiate(model1)
-        self.model2: GeneralSeq2SeqModule = instantiate(model2)
-        self.save_hyperparameters(logger=False)
-
-        self.constraint_strength = DynamicHyperParameter(constraint_strength)
+        assert reg_method in ("sample", "argmax")
+        super().__init__(
+            model,
+            constraint_strength,
+            None,
+            optimizer,
+            scheduler,
+            load_model1_from_checkpoint,
+            load_model2_from_checkpoint,
+            warmup,
+        )
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
-        super().setup(stage)
-        assert isinstance(self.trainer.profiler, PassThroughProfiler), "not implemented"
-        self.model1.trainer = self.model2.trainer = self.trainer
-        assert datamodule is not None or self.trainer.datamodule is not None
-        self.datamodule = datamodule or self.trainer.datamodule
-
-        with self.datamodule.normal_mode():
-            self.model1.setup(stage, datamodule)
-        self.model1.log = partial(self.sub_log, prefix="m1")
-        self.model1.print = partial(self.sub_print, prefix="m1")
-        self.model1.save_predictions = partial(self.model1.save_predictions, path="m1_predict_on_test.txt")
-
-        with self.datamodule.inverse_mode(), fix_wandb_tags():
-            self.model2.setup(stage, datamodule)
-        self.model2.log = partial(self.sub_log, prefix="m2")
-        self.model2.print = partial(self.sub_print, prefix="m2")
-        self.model2.save_predictions = partial(self.model2.save_predictions, path="m2_predict_on_test.txt")
-
-    def sub_log(self, name, value, *args, prefix, **kwargs):
-        self.log(f"{prefix}/{name}", value, *args, **kwargs)
-
-    def sub_print(self, *args, prefix, **kwargs):
-        self.print(prefix, *args, **kwargs)
+        super().setup(stage, datamodule)
 
     def forward(self, batch1, batch2, model1_pred, model2_pred):
         # only contain the code for the agreement constraint
         # only support PCFG
         # reuse the sample in submodel's forward
         # assume PT = [1,1], NT = [2, +\infty]
+
+        # TODO better key in runtime
+        src_tree = model1_pred["src_runtime"]["event"]["event"]
+        tgt_tree = model2_pred["src_runtime"]["event"]["event"]
+
+        src_constraint = self.get_constraint_list_from_event(src_tree)
+        tgt_constraint = self.get_constraint_list_from_event(tgt_tree)
+
+        m1_src_constraint = self.expand_constraint(t1_constraint, -1, m1nt)
+        m2_src_constraint = self.expand_constraint(t1_constraint, -1, m2nt)
+
         device = batch1["src_ids"].device
         bsz = len(batch1["src_lens"])
         event_key = "event" if self.hparams.constraint_estimation_strategy == "sample" else "argmax_event"
@@ -218,39 +214,3 @@ class TwoDirectionalCompleteModule(ModelBase):
         t = [-1] * (tensor.ndim + 1)
         t[dim] = size
         return tensor.unsqueeze(dim).expand(*t)
-
-    def training_step(self, batch: Any, batch_idx: int):
-        out1 = self.model1(batch[0])
-        out2 = self.model2(batch[1])
-        loss1 = self.model1.training_step(batch[0], batch_idx, forward_prediction=out1)
-        loss2 = self.model2.training_step(batch[1], batch_idx, forward_prediction=out2)
-        agreement = self(batch[0], batch[1], out1, out2)
-        self.log("train/agree", agreement["agreement"], prog_bar=True)
-        cstrength = self.constraint_strength.get(self.current_epoch)
-        return {"loss": loss1["loss"] + loss2["loss"] + cstrength * agreement["agreement"]}
-
-    def on_validation_epoch_start(self) -> None:
-        self.model1.on_validation_epoch_start()
-        self.model2.on_validation_epoch_start()
-
-    def validation_step(self, batch: Any, batch_idx: int):
-        loss1 = self.model1.validation_step(batch[0], batch_idx)["loss"]
-        loss2 = self.model2.validation_step(batch[1], batch_idx)["loss"]
-        return {"loss": loss1 + loss2}
-
-    def validation_epoch_end(self, outputs: List[Any]):
-        self.model1.validation_epoch_end(None)
-        self.model2.validation_epoch_end(None)
-
-    def on_test_epoch_start(self) -> None:
-        self.model1.on_test_epoch_start()
-        self.model2.on_test_epoch_start()
-
-    def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = None):
-        output1 = self.model1.test_step(batch[0], batch_idx)
-        output2 = self.model2.test_step(batch[1], batch_idx)
-        return output1, output2
-
-    def test_epoch_end(self, outputs) -> None:
-        self.model1.test_epoch_end([item[0] for item in outputs])
-        self.model2.test_epoch_end([item[1] for item in outputs])

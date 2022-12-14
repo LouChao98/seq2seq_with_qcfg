@@ -23,8 +23,16 @@ trainer:
   gradient_clip_val: 3
 
 model:
+  optimizer:
+    groups:
+      - pattern: '.*\.dummy_node_emb'
+        lr: 5.0e-5
   decoder:
+    nt_states: 14
+    pt_states: 14
     use_copy: false
+    generation_max_length: 30
+    generation_num_samples: 100
 
 datamodule:
   copy_mode: none
