@@ -35,4 +35,3 @@ logger:
     project: "styleptb"
     tags:
       - "nt_align"
-    offline: ${in_cluster:}

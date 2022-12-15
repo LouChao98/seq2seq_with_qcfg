@@ -41,4 +41,3 @@ callbacks:
 logger:
   wandb:
     project: "styleptb"
-    offline: ${in_cluster:}

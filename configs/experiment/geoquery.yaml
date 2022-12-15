@@ -57,4 +57,3 @@ trainer:
 logger:
   wandb:
     project: "geoquery"
-    offline: ${in_cluster:}

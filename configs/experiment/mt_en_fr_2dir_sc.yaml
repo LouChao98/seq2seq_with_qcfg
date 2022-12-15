@@ -73,4 +73,3 @@ logger:
   wandb:
     project: "mt_en_fr"
     tags: ["2dir"]
-    offline: ${in_cluster:}

@@ -31,6 +31,7 @@ model:
   real_val_every_n_epochs: 5
   use_label_encoder: true
   label_encoder_inp_dim: ${.parser.cpd_rank}
+  label_normalization: true
 
   decoder:
     use_fast: true
@@ -43,4 +44,3 @@ model:
 logger:
   wandb:
     project: "cognition_en_zh"
-    offline: ${in_cluster:}

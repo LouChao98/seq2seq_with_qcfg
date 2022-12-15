@@ -41,4 +41,3 @@ model:
 logger:
   wandb:
     project: "cognition_en_zh"
-    offline: ${in_cluster:}

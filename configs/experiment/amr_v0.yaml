@@ -45,4 +45,3 @@ logger:
   wandb:
     project: "amr"
     tags: ["v0"]
-    offline: ${in_cluster:}

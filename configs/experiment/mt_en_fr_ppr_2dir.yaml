@@ -50,4 +50,3 @@ logger:
   wandb:
     project: "mt_en_fr"
     tags: ["ppr_2dir"]
-    offline: ${in_cluster:}

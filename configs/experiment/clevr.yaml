@@ -43,4 +43,3 @@ trainer:
 logger:
   wandb:
     project: "clevr"
-    offline: ${in_cluster:}

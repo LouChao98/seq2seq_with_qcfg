@@ -444,7 +444,12 @@ class TgtParserBase(nn.Module):
         pred = copy(pred).clear()
         for bidx, preds_batch in enumerate(preds):
             batch_size = pred.batch_size if self.generation_ppl_batch_size is None else self.generation_ppl_batch_size
-            loader = DataLoader(dataset=preds_batch, batch_size=batch_size, collate_fn=self.datamodule.collator)
+            loader = DataLoader(
+                dataset=preds_batch,
+                batch_size=batch_size,
+                collate_fn=self.datamodule.collator,
+                num_workers=self.datamodule.hparams.num_worker,
+            )
             ppl = np.full((len(preds_batch),), 1e9)
 
             for batch in loader:

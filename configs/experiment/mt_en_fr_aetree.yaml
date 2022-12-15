@@ -46,4 +46,3 @@ model:
 logger:
   wandb:
     project: "mt_en_fr"
-    offline: ${in_cluster:}

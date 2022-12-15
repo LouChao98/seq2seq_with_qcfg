@@ -35,4 +35,3 @@ trainer:
 logger:
   wandb:
     project: arithmetic
-    offline: ${in_cluster:}

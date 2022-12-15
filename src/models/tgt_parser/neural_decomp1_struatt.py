@@ -7,7 +7,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from ..components.common import MultiResidualLayer
 from ..struct.decomp1 import Decomp1, Decomp1Sampler
-from ..struct.decomp1_fast import Decomp1Fast
+from ..struct.decomp1_fast import Decomp1Fast, Decomp1FastSampler
 from .base import TgtParserBase, TgtParserPrediction
 
 log = logging.getLogger(__file__)
@@ -224,13 +224,12 @@ class NeuralDecomp1StruAttTgtParser(TgtParserBase):
 
     def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:
         pred = super().observe_x(pred, x, lengths, inplace, **kwargs)
-        if self.use_fast:
-            pred.dist = Decomp1Fast(pred.posterior_params, pred.lengths, **pred.common())
-        else:
-            pred.dist = Decomp1(pred.posterior_params, pred.lengths, **pred.common())
+        pred.dist = (Decomp1Fast if self.use_fast else Decomp1)(pred.posterior_params, pred.lengths, **pred.common())
         return pred
 
     def prepare_sampler(self, pred: TgtParserPrediction, src, src_ids, inplace=True) -> TgtParserPrediction:
         pred = super().prepare_sampler(pred, src, src_ids, inplace)
-        pred.sampler = Decomp1Sampler(pred.params, **pred.common(), **self.sampler_common())
+        pred.sampler = (Decomp1FastSampler if self.use_fast else Decomp1Sampler)(
+            pred.params, **pred.common(), **self.sampler_common()
+        )
         return pred

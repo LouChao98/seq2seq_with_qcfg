@@ -30,4 +30,3 @@ logger:
     project: "styleptb"
     tags:
       - "gumbel"
-    offline: ${in_cluster:}

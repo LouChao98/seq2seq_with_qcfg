@@ -47,4 +47,3 @@ trainer:
 logger:
   wandb:
     project: scan
-    offline: ${in_cluster:}
