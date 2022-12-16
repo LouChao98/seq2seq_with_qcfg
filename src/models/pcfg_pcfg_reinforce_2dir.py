@@ -18,7 +18,7 @@ from src.utils.fn import annotate_snt_with_brackets
 from src.utils.metric import PerplexityMetric
 
 from .general_seq2seq import GeneralSeq2SeqModule
-from .posterior_regularization.agree import PTAgree
+from .posterior_regularization.agree import PTAlignmentAgree
 
 log = logging.getLogger(__file__)
 
@@ -318,7 +318,7 @@ class PPRTwoDirModule(ModelBase):
                 _save_detailed_prediction, func=self.bw_model.save_detailed_predictions, prefix="bw_"
             )
 
-        self.pr_solver = PTAgree()
+        self.pr_solver = PTAlignmentAgree()
 
         if wandb.run is not None:
             tags = []

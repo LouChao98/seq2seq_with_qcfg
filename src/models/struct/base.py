@@ -91,9 +91,17 @@ class DecompBase:
                         for (value, mask), (value2, mask2) in zip(params[0]["constraint"], params[1]["constraint"]):
                             converted.append((semiring.convert(value, value2), mask))
                         new_params[key] = converted
-                elif key in ("add", "lse"):
-                    if params[0][key] is not None:
+                    else:
+                        assert params[1].get("constraint") is None
+                elif key == "add":
+                    if params[0].get(key) is not None or params[1].get(key) is not None:
                         converted = []
+
+                        if params[0].get(key) is None:
+                            params[0][key] = [torch.zeros_like(item) for item in params[1][key]]
+                        elif params[1].get(key) is None:
+                            params[1][key] = [torch.zeros_like(item) for item in params[0][key]]
+
                         for value1, value2 in zip(params[0][key], params[1][key]):
                             converted.append(semiring.convert(value1, value2))
                         new_params[key] = converted
@@ -244,7 +252,7 @@ class DecompBase:
             output["span"] = spans
 
         if need_event:
-            output["event"] = {k: params[k].grad for k in self.KEYS} | {"trace": trace.grad[0]}
+            output["event"] = {k: params[k].grad for k in self.KEYS} | {"trace": trace.grad}
 
         return output
 

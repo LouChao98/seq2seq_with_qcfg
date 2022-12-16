@@ -187,7 +187,7 @@ class Decomp9(DecompBase):
             output["span"] = spans
 
         if need_event:
-            output["event"] = {k: params[k].grad for k in self.KEYS} | {"trace": trace.grad[0]}
+            output["event"] = {k: params[k].grad for k in self.KEYS} | {"trace": trace.grad}
 
         return output
 

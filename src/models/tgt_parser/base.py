@@ -448,7 +448,7 @@ class TgtParserBase(nn.Module):
                 dataset=preds_batch,
                 batch_size=batch_size,
                 collate_fn=self.datamodule.collator,
-                num_workers=self.datamodule.hparams.num_worker,
+                num_workers=self.datamodule.hparams.get("num_workers", 0),
             )
             ppl = np.full((len(preds_batch),), 1e9)
 

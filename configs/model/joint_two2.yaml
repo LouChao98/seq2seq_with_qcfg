@@ -1,13 +1,32 @@
 _target_: src.models.joint_two2.TwoDirectionalModule
 _recursive_: false
 
-constraint_strength:
-  1
-  # - 0@0
-  # - 0@9
-  # - 0.5@10
+pt_agreement:
+  reg_method: pr
+  strength: 1.0
+  solver:
+    b: 0
+    rbound: 10
+    num_iter: 3
+    entropy_reg: 0.
 
-reg_method: pr
+nt_agreement:
+  reg_method: pr
+  strength: 1.0
+  solver:
+    b: 0
+    rbound: 10
+    num_iter: 3
+    entropy_reg: 0.
+
+tree_agreement:
+  reg_method: pr
+  strength: 1.0
+  solver:
+    b: 0
+    rbound: 10
+    num_iter: 3
+    entropy_reg: 0.
 
 model:
   parser_entropy_reg: 0.1
@@ -80,6 +99,7 @@ optimizer:
       - 0.999
     weight_decay: 1.0e-05
     eps: 1.0e-08
+
 scheduler:
   interval: step
   frequency: 1
