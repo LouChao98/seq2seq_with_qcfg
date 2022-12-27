@@ -99,13 +99,21 @@ class TwoDirectionalModule(ModelBase):
             state_dict = torch.load(self.hparams.load_model1_from_checkpoint, map_location="cpu")
             if "state_dict" in state_dict:
                 state_dict = state_dict["state_dict"]
-            self.model1.load_state_dict(state_dict)
+            incompt_params = self.model1.load_state_dict(state_dict, strict=False)
+            if len(incompt_params.unexpected_keys) > 0:
+                log.warning(f"Unexpected keys: {incompt_params.unexpected_keys}")
+            if len(incompt_params.missing_keys) > 0:
+                log.warning(f"Missing keys: {incompt_params.missing_keys}")
 
         if self.hparams.load_model2_from_checkpoint is not None:
             state_dict = torch.load(self.hparams.load_model2_from_checkpoint, map_location="cpu")
             if "state_dict" in state_dict:
                 state_dict = state_dict["state_dict"]
-            self.model2.load_state_dict(state_dict)
+            incompt_params = self.model2.load_state_dict(state_dict, strict=False)
+            if len(incompt_params.unexpected_keys) > 0:
+                log.warning(f"Unexpected keys: {incompt_params.unexpected_keys}")
+            if len(incompt_params.missing_keys) > 0:
+                log.warning(f"Missing keys: {incompt_params.missing_keys}")
 
     def sub_log(self, name, value, *args, prefix, **kwargs):
         self.log(f"{prefix}/{name}", value, *args, **kwargs)
@@ -119,11 +127,12 @@ class TwoDirectionalModule(ModelBase):
         # reuse the sample in submodel's forward
         # assume PT = [1,1], NT = [2, +\infty]
 
+        device = model1_pred["tgt_runtime"]["pred"].device
         logging_vals = {}
-        loss = 0
+        loss = torch.zeros(1, device=device)
 
         if self.current_epoch < self.warmup:
-            return torch.zeros(1, device=model1_pred["tgt_runtime"]["pred"].device), logging_vals
+            return torch.zeros(1, device=device), logging_vals
 
         pt_agree_weight = self.pt_alignment_reg_strength.get(self.current_epoch)
         logging_vals["pt_agree_weight"] = pt_agree_weight
@@ -139,7 +148,7 @@ class TwoDirectionalModule(ModelBase):
             logging_vals["nt_agree_loss"] = _loss
             loss += nt_agree_weight * _loss
 
-        tree_weight = self.nt_alignment_reg_strength.get(self.current_epoch)
+        tree_weight = self.tree_reg_strength.get(self.current_epoch)
         logging_vals["tree_weight"] = tree_weight
         if tree_weight > 0:
             _loss = self.get_tree_agreement_loss(batch1, batch2, model1_pred, model2_pred)

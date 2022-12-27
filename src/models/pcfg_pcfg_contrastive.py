@@ -85,6 +85,7 @@ class PPCModule(GeneralSeq2SeqModule):
 
                 # tgt_loss = (tgt_nll - negative_nll + 1).clamp(0)
                 tgt_loss = torch.where(tgt_nll > -np.log(0.2), tgt_nll, (tgt_nll - negative_nll + 1).clamp(0))
+                # tgt_loss = torch.where(tgt_nll > -np.log(0.2), tgt_nll,  0.)
 
         if self.current_epoch < self.hparams.warmup_pcfg:
             objective = 0.0

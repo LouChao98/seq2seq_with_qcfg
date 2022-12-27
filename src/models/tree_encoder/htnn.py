@@ -355,7 +355,7 @@ class LayerwiseTreeLSTM_new(nn.Module):
                     hyperedges_inst.append((pj, b, a))
 
             hyperedges.append(torch.tensor(hyperedges_inst, device=x.device))
-            spans_processed.append(torch.tensor([(l, r) for l, r, *_ in spans_item], device=x.device))
+            spans_processed.append(torch.tensor([(l, r - 1) for l, r, *_ in spans_item], device=x.device))
             spans_list.append(spans_item)
 
         spans = pad_sequence(spans_processed, batch_first=True).flatten(1)

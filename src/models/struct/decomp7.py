@@ -195,6 +195,10 @@ class Decomp7(DecompBase):
 
 
 class Decomp7Sampler(DecompSamplerBase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.threshold = torch.nn.Threshold(0.001, 0)
+
     @torch.no_grad()
     def process_params(self, params: Dict[str, Tensor]):
         terms = params["term"].exp().cumsum(2).cpu().numpy()
@@ -202,18 +206,22 @@ class Decomp7Sampler(DecompSamplerBase):
         H = params["head"].cumsum(2).cpu().numpy()
         L = params["left"].exp().cumsum(3).cpu().numpy()
         R = params["right"].exp().cumsum(3).cpu().numpy()
-
         SLR = params["slr"].flatten(3).cumsum(3).cpu().numpy()
+
+        # SLR_debug = self.threshold(params["slr"]).flatten(3).cpu().numpy()
+
         return terms, H, L, R, SLR, roots
+        # return terms, H, L, R, SLR, SLR_debug, roots
 
     @staticmethod
-    @jit(nopython=True)
+    # @jit(nopython=True)
     def sample_impl(
         terms: np.ndarray,  # seqlen x pt, in normal space
         rules_head: np.ndarray,  # nt x r, in normal space
         rules_left: np.ndarray,  # (nt+pt) x r, in normal space
         rules_right: np.ndarray,  # (nt+pt) x r, in normal space
         rules_slr: np.ndarray,
+        # rules_slr_debug,
         roots: np.ndarray,
         nt_num_nodes: int,
         nt_states: int,

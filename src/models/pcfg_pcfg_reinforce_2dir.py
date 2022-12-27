@@ -322,7 +322,7 @@ class PPRTwoDirModule(ModelBase):
 
         if wandb.run is not None:
             tags = []
-            for module in [self.fw_model.encoder, self.fw_model.tree_encoder, self.fw_model.decoder]:
+            for module in [self.fw_model.encoder, self.fw_model.tree_encoder, self.fw_model.decoder, self]:
                 tags.append(type(module).__name__)
             if self.fw_model.embedding is not None:
                 tags.append("staticEmb")

@@ -45,6 +45,7 @@ class TSVDataModule(_DataModule):
         pin_memory: bool = False,
         ###
         debug_1=False,  # set target sequence to even length.
+        debug_2=False,
         **kwargs,
     ):
         assert copy_mode in ("none", "token", "phrase")
@@ -128,6 +129,10 @@ class TSVDataModule(_DataModule):
         if self.hparams.debug_1:
             if len(tgt) % 2 == 1:
                 tgt.append("<dbg1>")
+
+        if self.hparams.debug_2:
+            tgt = tgt[::-1]
+
         inst = {"src": src, "tgt": tgt}
         return inst
 

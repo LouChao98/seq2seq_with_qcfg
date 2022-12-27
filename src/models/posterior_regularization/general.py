@@ -63,10 +63,64 @@ class NeqNT(PrTask):
         dist = pred.dist
         cparams = {**dist.params}
         field = "rule" if "rule" in cparams else "head"
-        cparams[field] = (
-            cparams[field].view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1)
-            - (lambdas * constraints)[:, None, :, None]
-        ).view(cparams[field].shape)
+        if pred.dist.is_log_param(field):
+            cparams[field] = (
+                cparams[field].view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1)
+                - (lambdas * constraints)[:, None, :, None]
+            ).view(cparams[field].shape)
+        else:
+            cparams[field] = (
+                (
+                    cparams[field].view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1).clamp(1e-9).log()
+                    - (lambdas * constraints)[:, None, :, None]
+                )
+                .view(cparams[field].shape)
+                .exp()
+            )
+        if entropy_reg is not None and entropy_reg > 0:
+            factor = 1 / (1 - entropy_reg)
+            for key, is_log_param in zip(dist.KEYS, dist.LOGSPACE):
+                if is_log_param:
+                    cparams[key] = cparams[key] * factor
+                else:
+                    cparams[key] = torch.pow(cparams[key], factor)
+        return dist.spawn(params=cparams)
+
+    def calc_e(self, pred: TgtParserPrediction, constraints):
+        m = pred.dist.marginal
+        m = m["rule"] if "rule" in m else m["head"]
+        return m.view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1).sum((1, 3)) * constraints
+
+
+class NoManyToOneNT(PrTask):
+    def get_b(self, pred: TgtParserPrediction):
+        return torch.ones(pred.batch_size, pred.nt_num_nodes, device=pred.device)
+
+    def get_init_lambdas(self, pred: TgtParserPrediction):
+        return torch.full((pred.batch_size, pred.nt_num_nodes), 0.5, device=pred.device, requires_grad=True)
+
+    def process_constraint(self, pred: TgtParserPrediction, constraints: Optional[torch.Tensor] = None):
+        assert constraints is None
+        return torch.ones((pred.batch_size, pred.nt_num_nodes), device=pred.device)
+
+    def build_constrained_dist(self, pred: TgtParserPrediction, lambdas, constraints, entropy_reg=None):
+        dist = pred.dist
+        cparams = {**dist.params}
+        field = "rule" if "rule" in cparams else "head"
+        if pred.dist.is_log_param(field):
+            cparams[field] = (
+                cparams[field].view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1)
+                - (lambdas * constraints)[:, None, :, None]
+            ).view(cparams[field].shape)
+        else:
+            cparams[field] = (
+                (
+                    cparams[field].view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1).clamp(1e-9).log()
+                    - (lambdas * constraints)[:, None, :, None]
+                )
+                .view(cparams[field].shape)
+                .exp()
+            )
         if entropy_reg is not None and entropy_reg > 0:
             factor = 1 / (1 - entropy_reg)
             for key, is_log_param in zip(dist.KEYS, dist.LOGSPACE):

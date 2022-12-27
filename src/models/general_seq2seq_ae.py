@@ -72,11 +72,15 @@ class GeneralSeq2SeqAutoencoderModule(GeneralSeq2SeqModule):
 
         with self.profiler.profile("compute_tgt_nll"):
             tgt_pred_orig = self.decoder(node_features, node_spans)
-            use_copy, self.decoder.use_copy = self.decoder.use_copy, False
-            tgt_pred_uc = self.decoder.observe_x(tgt_pred_orig, tgt_ids, tgt_lens, inplace=False)
-            self.decoder.use_copy = use_copy
             tgt_pred = self.decoder.observe_x(tgt_pred_orig, **observed, inplace=False)
             tgt_loss = tgt_nll = tgt_pred.dist.nll
+
+            if self.decoder.use_copy:
+                use_copy, self.decoder.use_copy = self.decoder.use_copy, False
+                tgt_pred_uc = self.decoder.observe_x(tgt_pred_orig, tgt_ids, tgt_lens, inplace=False)
+                self.decoder.use_copy = use_copy
+            else:
+                tgt_pred_uc = tgt_pred
 
         if self.current_epoch < self.hparams.warmup_pcfg:
             objective = 0.0

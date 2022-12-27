@@ -3,7 +3,9 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence
+from vector_quantize_pytorch import ResidualVQ, VectorQuantize
 
 from ..components.common import MultiResidualLayer
 from ..components.sparse_activations import entmax15, sparsemax
@@ -22,7 +24,16 @@ normalize_func = {
 
 class NeuralNoDecompTgtParser(TgtParserBase):
     def __init__(
-        self, vocab=100, dim=256, num_layers=3, src_dim=256, normalize_mode="softmax", debug_1=False, **kwargs
+        self,
+        vocab=100,
+        dim=256,
+        num_layers=3,
+        src_dim=256,
+        normalize_mode="softmax",
+        vector_quantize=None,
+        vector_quantize_pt=None,
+        debug_1=False,
+        **kwargs,
     ):
         # debug_1: maskout -> NT PT or -> PT NT
         super().__init__(**kwargs)
@@ -45,6 +56,12 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         self.rule_mlp_left = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.rule_mlp_right = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_child = nn.Linear(dim, 1, bias=False)
+
+        self.vector_quantizer = instantiate(vector_quantize, dim=src_dim)
+        if vector_quantize_pt == "shared":
+            self.vector_quantizer_pt = self.vector_quantizer
+        else:
+            self.vector_quantizer_pt = instantiate(vector_quantize_pt, dim=src_dim)
 
         self.reset_parameters()
 
@@ -71,6 +88,14 @@ class NeuralNoDecompTgtParser(TgtParserBase):
             pt_num_nodes,
             pt_node_features,
         ) = self.build_src_features(spans, node_features)
+
+        commit_loss = 0
+        if self.vector_quantizer is not None:
+            nt_node_features, _indices, _loss = self.vector_quantizer(nt_node_features)
+            commit_loss += _loss
+        if self.vector_quantizer_pt is not None:
+            pt_node_features, _indices, _loss = self.vector_quantizer_pt(pt_node_features)
+            commit_loss += _loss
 
         nt = self.nt_states * nt_num_nodes
         pt = self.pt_states * pt_num_nodes
@@ -166,6 +191,10 @@ class NeuralNoDecompTgtParser(TgtParserBase):
             params=params,
             device=device,
         )
+
+        if self.vector_quantizer is not None:
+            pred.vq_commit_loss = commit_loss
+
         return pred
 
     def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:

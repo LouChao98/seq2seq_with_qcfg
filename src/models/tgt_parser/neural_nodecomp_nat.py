@@ -3,25 +3,17 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.models.roformer.modeling_roformer import RoFormerSinusoidalPositionalEmbedding
 
 from ..components.common import MultiResidualLayer
-from ..components.sparse_activations import entmax15, sparsemax
 from ..struct.no_decomp import NoDecomp, NoDecompNATSampler
 from .base import TgtParserBase, TgtParserPrediction
 
 log = logging.getLogger(__file__)
 
-# SHOULD ALWAYS USE softmax FOR REAL TRAINING
-normalize_func = {
-    "softmax": torch.log_softmax,
-    "sparsemax": lambda x, dim: sparsemax(x, dim=dim).clamp(1e-32).log(),
-    "entmax": lambda x, dim: entmax15(x, dim=dim).clamp(1e-32).log(),
-}
-
 
 class NeuralNoDecompNATTgtParser(TgtParserBase):
-    def __init__(self, vocab=100, dim=256, num_layers=3, src_dim=256, normalize_mode="softmax", **kwargs):
-        # debug_1: maskout -> NT PT or -> PT NT
+    def __init__(self, vocab=100, dim=256, num_layers=3, src_dim=256, 豪斯医生=True, **kwargs):
         super().__init__(**kwargs)
         assert not self.use_copy
 
@@ -29,10 +21,12 @@ class NeuralNoDecompNATTgtParser(TgtParserBase):
         self.dim = dim
         self.src_dim = src_dim
         self.num_layers = num_layers
-        self.normalizer = normalize_func[normalize_mode]
 
         self.vocab_out = MultiResidualLayer(dim, dim, out_dim=vocab, num_layers=num_layers)
-        self.position_emb = nn.Embedding(self.generation_max_length, dim)
+        if learnable_positional_embedding:
+            self.position_emb = nn.Embedding(self.generation_max_length, dim)
+        else:
+            self.position_emb = RoFormerSinusoidalPositionalEmbedding(self.generation_max_length, dim)
 
         self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -43,12 +37,6 @@ class NeuralNoDecompNATTgtParser(TgtParserBase):
         self.rule_mlp_left = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.rule_mlp_right = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_child = nn.Linear(dim, 1, bias=False)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.xavier_uniform_(self.src_nt_emb.data)
-        nn.init.xavier_uniform_(self.src_pt_emb.data)
 
     def forward(
         self,
@@ -123,7 +111,7 @@ class NeuralNoDecompNATTgtParser(TgtParserBase):
             mask = self.rule_hard_constraint.get_mask(*common)
             rules[~mask] = self.neg_huge
 
-        rules = self.normalizer(rules.flatten(2), dim=-1).clone()
+        rules = rules.flatten(2).log_softmax(dim=-1).clone()
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
 
         if self.rule_reweight_constraint is not None and (not self.rule_reweight_test_only or not self.training):

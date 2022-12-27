@@ -110,7 +110,7 @@ def compute_pr(pred: TgtParserPrediction, constraints, task: PrTask, get_dist=Fa
         if (e < b).all():
             logger.warning("Skipping PR.")
             if get_dist:  # do nothing
-                return copy(pred)
+                return pred.dist
             return torch.zeros(pred.batch_size, device=pred.device)
 
     lambdas = pgd_solver(pred, constraints, task, **kwargs)

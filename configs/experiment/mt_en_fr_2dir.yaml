@@ -24,13 +24,13 @@ trainer:
 
 datamodule:
   copy_mode: none
-  batch_size: 4
-  eval_batch_size: 4
+  batch_size: 5
+  eval_batch_size: 5
   vocab_min_freq: 2
 
 model:
-  load_model1_from_checkpoint: ${data_dir}/MT/en_fr_depthX/checkpoints/epoch_039.ckpt
-  load_model2_from_checkpoint: ${data_dir}/MT/fr_en_depthX/checkpoints/epoch_039.ckpt
+  # load_model1_from_checkpoint: ${data_dir}/MT/en_fr_depthX/checkpoints/epoch_039.ckpt
+  # load_model2_from_checkpoint: ${data_dir}/MT/fr_en_depthX/checkpoints/epoch_039.ckpt
   model:
     warmup_pcfg: 0
     warmup_qcfg: 0

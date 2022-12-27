@@ -84,7 +84,7 @@ class TPSModule(GeneralSeq2SeqModule):
 
         if wandb.run is not None:
             tags = []
-            for module in [self.encoder, self.parser, self.decoder]:
+            for module in [self.encoder, self.parser, self.decoder, self]:
                 tags.append(type(module).__name__)
             if self.embedding is not None:
                 tags.append("staticEmb")
@@ -244,6 +244,9 @@ class TPSModule(GeneralSeq2SeqModule):
                 entropy = tgt_pred.dist.entropy
                 tgt_entropy_reg = -e * entropy
                 logging_vals["tgt_entropy"] = entropy
+            if hasattr(tgt_pred, "vq_commit_loss"):
+                tgt_loss = tgt_loss + tgt_pred.vq_commit_loss
+                logging_vals["commit_loss"] = tgt_pred.vq_commit_loss
 
         return {
             "decoder": tgt_loss + soft_constraint_pr_loss + tgt_entropy_reg,

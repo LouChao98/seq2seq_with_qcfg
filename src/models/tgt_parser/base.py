@@ -2,10 +2,11 @@ import logging
 import math
 import random
 import warnings
+from collections import defaultdict
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Counter, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -13,6 +14,7 @@ import torch.nn as nn
 from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
+from vector_quantize_pytorch import VectorQuantize
 
 from src.datamodules.datamodule import _DataModule
 from src.utils.fn import apply_to_nested_tensor
@@ -196,7 +198,7 @@ class TgtParserBase(nn.Module):
         self.score_normalization_method = score_normalization_method
         self.score_normalization_scale = score_normalization_scale
 
-        assert generation_criteria in ("ppl", "likelihood", "contrastive", "none")
+        assert generation_criteria in ("ppl", "likelihood", "contrastive", "freq", "none")
 
         self.generation_criteria = generation_criteria
         self.generation_max_length = generation_max_length
@@ -372,6 +374,8 @@ class TgtParserBase(nn.Module):
             preds = self.choose_samples_by_likelihood(preds, pred, **kwargs)
         elif self.generation_criteria == "contrastive":
             preds = self.choose_samples_by_constrastive(preds, pred, **kwargs)
+        elif self.generation_criteria == "freq":
+            preds = self.choose_samples_by_freq(preds, pred, **kwargs)
         elif self.generation_criteria == "none":
             preds = [({"tgt": [item["tgt"] for item in batch]}, None) for batch in preds]
 
@@ -547,6 +551,26 @@ class TgtParserBase(nn.Module):
             if criteria[chosen] > 1e6:
                 logger.warning(f"The minimum criteria is {criteria[chosen]}")
             new_preds.append((preds_batch[chosen], criteria[chosen]))
+        return new_preds
+
+    @torch.no_grad()
+    def choose_samples_by_freq(self, preds, pred: TgtParserPrediction, **kwargs):
+        new_preds = []
+        pred = copy(pred).clear()
+        for bidx, preds_batch in enumerate(preds):
+            cnt = Counter()
+            str2id = {}
+
+            for i, item in enumerate(preds_batch):
+                key = " ".join(item["tgt"])
+                cnt.update([key])
+                if key not in str2id:
+                    str2id[key] = i
+
+            chosen, freq = cnt.most_common(1)[0]
+            if freq == 1:
+                logger.warning(f"The most common pred only occurs once.")
+            new_preds.append((preds_batch[str2id[chosen]], freq))
         return new_preds
 
     def to_str_tokens(self, preds, src):

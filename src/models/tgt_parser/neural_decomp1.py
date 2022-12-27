@@ -3,6 +3,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from hydra.utils import instantiate
 
 from ..components.common import MultiResidualLayer
 from ..struct.decomp1 import Decomp1, Decomp1Sampler
@@ -14,7 +15,16 @@ log = logging.getLogger(__file__)
 
 class NeuralDecomp1TgtParser(TgtParserBase):
     def __init__(
-        self, cpd_rank=32, vocab=100, dim=256, num_layers=3, src_dim=256, tie_r=False, use_fast=False, **kwargs
+        self,
+        cpd_rank=32,
+        vocab=100,
+        dim=256,
+        num_layers=3,
+        src_dim=256,
+        tie_r=False,
+        use_fast=False,
+        vector_quantize=None,
+        **kwargs,
     ):
         super().__init__(**kwargs)
 
@@ -48,6 +58,7 @@ class NeuralDecomp1TgtParser(TgtParserBase):
             self.rule_mlp_right.out_linear.weight = _w
             self.rule_mlp_right.out_linear.bias = _b
 
+        self.vector_quantizer = instantiate(vector_quantize, dim=src_dim)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -68,6 +79,11 @@ class NeuralDecomp1TgtParser(TgtParserBase):
             pt_num_nodes,
             pt_node_features,
         ) = self.build_src_features(spans, node_features)
+
+        commit_loss = 0
+        if self.vector_quantizer is not None:
+            nt_node_features, _indices, _loss = self.vector_quantizer(nt_node_features)
+            commit_loss += _loss
 
         nt = self.nt_states * nt_num_nodes
         pt = self.pt_states * pt_num_nodes
@@ -143,6 +159,10 @@ class NeuralDecomp1TgtParser(TgtParserBase):
             params=params,
             device=device,
         )
+
+        if self.vector_quantizer is not None:
+            pred.vq_commit_loss = commit_loss
+
         return pred
 
     def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:

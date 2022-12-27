@@ -78,7 +78,7 @@ def get_actions(tree, SHIFT=0, REDUCE=1, OPEN="(", CLOSE=")"):
     return actions
 
 
-def get_tree(actions, sent=None, SHIFT=0, REDUCE=1):
+def get_tree(actions, sent=None, SHIFT=0, REDUCE=1, LB="[", RB="]"):
     # input action and sent (lists), e.g. S S R S S R R, A B C D
     # output tree ((A B) (C D))
     stack = []
@@ -87,7 +87,7 @@ def get_tree(actions, sent=None, SHIFT=0, REDUCE=1):
         sent = list(map(str, range((len(actions) + 1) // 2)))
     #  assert(len(actions) == 2*len(sent) - 1)
     if len(sent) == 1:
-        return "[" + sent[0] + "]"
+        return LB + sent[0] + RB
     for action in actions:
         if action == SHIFT:
             word = sent[pointer]
@@ -96,12 +96,12 @@ def get_tree(actions, sent=None, SHIFT=0, REDUCE=1):
         elif action == REDUCE:
             right = stack.pop()
             left = stack.pop()
-            stack.append("[" + left + " " + right + "]")
+            stack.append(LB + left + " " + right + RB)
     assert len(stack) == 1
     return stack[-1]
 
 
-def annotate_snt_with_brackets(tokens: List[str], span: List[Tuple[int, int]]):
+def annotate_snt_with_brackets(tokens: List[str], span: List[Tuple[int, int]], LB="[", RB="]"):
     pre_tokens = [0 for _ in range(len(tokens))]
     post_tokens = [0 for _ in range(len(tokens))]
 
@@ -115,10 +115,10 @@ def annotate_snt_with_brackets(tokens: List[str], span: List[Tuple[int, int]]):
     for pre, token, post in zip(pre_tokens, tokens, post_tokens):
         output_token = []
         if pre > 0:
-            output_token.append("[" * pre)
+            output_token.append(LB * pre)
         output_token.append(token)
         if post > 0:
-            output_token.append("]" * post)
+            output_token.append(RB * post)
         output.append("".join(output_token))
     return " ".join(output)
 
@@ -173,7 +173,7 @@ def spans2tree(spans: List[Tuple[int, int]]):
     return reordered_parent
 
 
-def convert_annotated_str_to_nltk_str(annotated, prefix="x"):
+def convert_annotated_str_to_nltk_str(annotated, prefix="x", label_mapping=None):
     # convert (I (love nlp)) to (S (NN I) (VP (V love) (NP nlp)))
     # TODO allow escape ( and )
 
@@ -191,13 +191,15 @@ def convert_annotated_str_to_nltk_str(annotated, prefix="x"):
         elif c == ")":
             start = left_brace_position.pop()
             children = buffer[start:]
-            tree = Tree((children[0].label()[0], children[-1].label()[1]), buffer[start:])
+            label = (children[0].label()[0], children[-1].label()[1])
+            tree = Tree(label, buffer[start:])
             buffer[start:] = [tree]
         else:
-            j = i + 1
+            j = i
             while j < len(annotated) and annotated[j] not in " ()":
                 j += 1
-            buffer.append(Tree((num_token, num_token + 1), [annotated[i - 1 : j]]))
+            label = (num_token, num_token + 1)
+            buffer.append(Tree(label, [annotated[i - 1 : j]]))
             num_token += 1
             i = j
     assert len(buffer) == 1
@@ -208,9 +210,16 @@ def convert_annotated_str_to_nltk_str(annotated, prefix="x"):
             if isinstance(subtree, Tree):
                 apply_to_tree(subtree, func)
 
-    def relabel_node(tree: Tree):
-        s, e = tree._label
-        tree._label = f"{prefix}{s}to{e}"
+    if label_mapping is None:
+
+        def relabel_node(tree: Tree):
+            s, e = tree._label
+            tree._label = f"{prefix}{s}to{e}"
+
+    else:
+
+        def relabel_node(tree: Tree):
+            tree._label = label_mapping[tree._label]
 
     apply_to_tree(buffer[0], relabel_node)
     return buffer[0]

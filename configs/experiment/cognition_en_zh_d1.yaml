@@ -17,7 +17,7 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 # name of the run determines folder name in logs
-name: "cognition_en_zh_${hydra:runtime.choices.model/decoder}"
+name: "cognition_en_zh"
 
 trainer:
   max_epochs: 20

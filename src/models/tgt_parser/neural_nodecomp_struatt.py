@@ -14,33 +14,24 @@ from .base import TgtParserBase, TgtParserPrediction
 log = logging.getLogger(__file__)
 
 
-class NeuralDecomp1StruAttTgtParser(TgtParserBase):
+class NeuralNoDecompStruAttTgtParser(TgtParserBase):
     def __init__(
         self,
-        cpd_rank=32,
         vocab=100,
         dim=256,
         num_layers=3,
         src_dim=256,
         ignore_weight=False,
-        tie_r=False,
-        use_fast=False,
         vector_quantize=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
-        assert self.rule_hard_constraint is None, "Do not support any constraint."
-        assert self.rule_soft_constraint is None, "Do not support any constraint."
-
         self.vocab = vocab
         self.dim = dim
         self.src_dim = src_dim
         self.num_layers = num_layers
-        self.cpd_rank = cpd_rank
         self.ignore_weight = ignore_weight
-        self.tie_r = tie_r
-        self.use_fast = use_fast
 
         self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -54,12 +45,6 @@ class NeuralDecomp1StruAttTgtParser(TgtParserBase):
         self.rule_mlp_left = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
         self.rule_mlp_right = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
 
-        if tie_r:
-            _w, _b = self.rule_mlp_parent.out_linear.weight, self.rule_mlp_parent.out_linear.bias
-            self.rule_mlp_left.out_linear.weight = _w
-            self.rule_mlp_left.out_linear.bias = _b
-            self.rule_mlp_right.out_linear.weight = _w
-            self.rule_mlp_right.out_linear.bias = _b
         self.vector_quantizer = instantiate(vector_quantize, dim=src_dim)
         self.reset_parameters()
 

@@ -1,0 +1,51 @@
+defaults:
+  - encoder: yzhang_lstm
+  - parser: pcfg
+  - decoder: decomp1_struatt
+  - test_metric: bleu1234
+
+_target_: src.models.pcfg_pcfgrnng_struatt_reinforce.PcfgPcfgrnngReinforceModel
+_recursive_: false
+
+depth_reg: 0.
+debug_1: false
+
+param_initializer: "xavier_uniform"
+parser_entropy_reg: 0
+decoder_entropy_reg: 0.1
+soft_constraint_loss_pr: 0
+soft_constraint_loss_rl: false
+soft_constraint_loss_raml: false
+
+embedding:
+  _target_: torch.nn.Embedding
+  embedding_dim: 300
+
+optimizer:
+  groups: ~
+  args:
+    _target_: torch.optim.AdamW
+    lr: 5.0e-4
+    betas: [0.75, 0.999]
+    weight_decay: 1.0e-5
+    eps: 1.0e-8
+
+rnng:
+  _target_: src.models.rnng.rnng.GeneralRNNG
+  strategy: top_down
+  fixed_stack: true
+  w_dim: 256
+  h_dim: 256
+  num_layers: 2
+  composition: attention
+  not_swap_in_order_stack: true
+  dropout: 0.3
+
+scheduler:
+  ~
+  # interval: step
+  # frequency: 1
+  # monitor: val/ppl
+  # args:
+  #   _target_: src.utils.scheduler.get_exponential_lr_scheduler
+  #   gamma: 0.75**(1/10000)

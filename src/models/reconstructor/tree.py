@@ -91,7 +91,6 @@ class TreeReconstructor(ReconstructorBase):
         loss_lm = self.criterion_lm(output_flat, target_flat)
 
         m_term, m_trace = tgt_pred.dist.marginal_with_grad
-
         m_term = m_term.view(batch_size, -1, tgt_pred.pt_states, tgt_pred.pt_num_nodes).sum(2)
         m_term = m_term.transpose(1, 2)
         linked_pt = F.gumbel_softmax((m_term + 1e-9).log(), tau=1.0, hard=True, dim=2)

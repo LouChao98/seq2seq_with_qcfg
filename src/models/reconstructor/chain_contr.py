@@ -16,6 +16,7 @@ logger = logging.getLogger(__file__)
 
 
 class ChainContrastiveReconstructor(ReconstructorBase):
+    # sample
     def __init__(
         self,
         lm,

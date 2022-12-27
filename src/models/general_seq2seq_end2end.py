@@ -79,7 +79,7 @@ class GeneralSeq2SeqEnd2EndModule(GeneralSeq2SeqModule):
 
         if wandb.run is not None:
             tags = []
-            for module in [self.encoder, self.tree_encoder, self.parser, self.decoder]:
+            for module in [self.encoder, self.tree_encoder, self.parser, self.decoder, self]:
                 tags.append(type(module).__name__)
             if self.embedding is not None:
                 tags.append("staticEmb")

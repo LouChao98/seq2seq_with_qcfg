@@ -23,8 +23,16 @@ datamodule:
   eval_batch_size: 16
   enable_cache: false
 
+model:
+  parser:
+    pt_states: 30
+    nt_states: 30
+  optimizer:
+    args:
+      lr: 5.0e-3
+
 trainer:
-  max_epochs: 5
+  max_epochs: 15
   accumulate_grad_batches: 1
   gradient_clip_val: 3
 

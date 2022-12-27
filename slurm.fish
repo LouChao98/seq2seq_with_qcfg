@@ -6,6 +6,23 @@ function envsource
   end
 end
 
+function sbatch48
+    envsource ./.env
+    echo project=$PROJECT
+    sbatch --job-name $PROJECT \
+        --partition critical_a40 \
+        --nodes 1 \
+        --time 1-0:0:0 \
+        --cpus-per-task 6 \
+        --mail-type all \
+        --mail-user louchao@shanghaitech.edu.cn \
+        --gres=gpu:NVIDIAA40:1 \
+        --output logs/slurm/%j.out \
+        --error logs/slurm/%j.err \
+        --exclude=ai_gpu34 \
+        --wrap "source $HOME/.local/share/slurm_python_env.sh && python3 $argv"
+end
+
 function sbatch24
     envsource ./.env
     echo project=$PROJECT
