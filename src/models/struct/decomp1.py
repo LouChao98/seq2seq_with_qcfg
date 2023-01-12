@@ -247,6 +247,105 @@ class Decomp1Sampler(DecompSamplerBase):
         return samples, types, status
 
 
+class Decomp1NATSampler(DecompSamplerBase):
+    @torch.no_grad()
+    def process_params(self, params: Dict[str, Tensor]):
+        terms = params["term"].exp().cumsum(3).cpu().numpy()
+        roots = params["root"].exp().cumsum(1).cpu().numpy()
+        H = params["head"].exp().cumsum(2).cpu().numpy()
+        L = params["left"].exp().cumsum(2).cpu().numpy()
+        R = params["right"].exp().cumsum(2).cpu().numpy()
+        return terms, H, L, R, roots
+
+    @staticmethod
+    @jit(nopython=True)
+    def sample_impl(
+        terms: np.ndarray,  # seqlen x pt, in normal space
+        rules_head: np.ndarray,  # nt x r, in normal space
+        rules_left: np.ndarray,  # (nt+pt) x r, in normal space
+        rules_right: np.ndarray,  # (nt+pt) x r, in normal space
+        roots: np.ndarray,  # nt, in normal space
+        nt_states: int,
+        nt_num_nodes: int,
+        pt_states: int,
+        pt_num_nodes: int,
+        use_copy=True,
+        num_samples=1,
+        max_length=100,
+        max_actions=100,
+        unk=1,
+    ):
+        NT = rules_head.shape[0]
+        COPY_NT = nt_states - 1
+        COPY_PT = pt_states - 1
+        samples = [[0] for _ in range(num_samples)]
+        types = [[0] for _ in range(num_samples)]
+        status = [_OK for _ in range(num_samples)]
+
+        for i in range(num_samples):
+            nonterminals: List[int] = []
+            preterminals: List[int] = []
+            is_copy_pt: List[bool] = []
+            actions = 0
+            try:
+                sample = weighted_random_v2(roots)
+                nonterminals.append(sample)
+
+                while len(nonterminals) > 0 and len(preterminals) < max_length and actions < max_actions:
+                    s = nonterminals.pop()
+                    if s < NT:
+                        if use_copy:
+                            nt_state = s // nt_num_nodes
+                            if nt_state == COPY_NT:
+                                nt_node = s % nt_num_nodes
+                                preterminals.append(nt_node)
+                                is_copy_pt.append(True)
+                                continue
+                        actions += 1
+                        head = weighted_random_v2(rules_head[s])
+                        left = weighted_random_v2(rules_left[head])
+                        right = weighted_random_v2(rules_right[head])
+                        nonterminals.extend([right, left])
+                    else:
+                        preterminals.append(s - NT)
+                        is_copy_pt.append(False)
+            except Exception:
+                status[i] = _SONMASK
+
+            if actions == max_actions or (len(preterminals) == max_length and len(nonterminals) > 0):
+                status[i] = _REACHLIMIT
+
+            terminals: List[int] = []
+            terminal_type: List[int] = []  # 0=vocab, 1=nt span, 2=pt span
+            try:
+                for s, flag in zip(preterminals, is_copy_pt):
+                    if flag:
+                        terminals.append(s)
+                        terminal_type.append(_COPY_NT)
+                    else:
+                        src_pt_state = s // pt_num_nodes
+                        if use_copy and src_pt_state == COPY_PT:
+                            src_node = s % pt_num_nodes
+                            terminals.append(src_node)
+                            terminal_type.append(_COPY_PT)
+                        else:
+                            sample = weighted_random_v2(terms[len(terminals), s])
+                            if use_copy and sample == unk:
+                                # force <unk> tokens to copy
+                                src_node = s % pt_num_nodes
+                                terminals.append(src_node)
+                                terminal_type.append(_COPY_PT)
+                            else:
+                                terminals.append(sample)
+                                terminal_type.append(_VOCAB)
+            except Exception:
+                status[i] = _SONMASK
+
+            samples[i] = terminals
+            types[i] = terminal_type
+        return samples, types, status
+
+
 def convert_decomp1_to_pcfg(p, tgt_nt):
     rule = torch.einsum("xar,xrb,xrc->xabc", p["head"].exp(), p["left"].exp(), p["right"].exp())
     rule = (rule + 1e-9).log()
@@ -351,6 +450,46 @@ if __name__ == "__main__":
 
     m2 = pcfg_ref.marginals[-1]
     compare_marginal(m1["trace"], m2)
+
+    m1_head, m1_left, m1_right = m1["head"], m1["left"], m1["right"]
+
+    merge = torch.einsum(
+        "qar,qrb,qrc->qrabc", params["head"].exp(), params["left"].exp(), params["right"].exp()
+    ) / torch.einsum(
+        "qar,qrb,qrc->qabc", params["head"].exp(), params["left"].exp(), params["right"].exp()
+    ).unsqueeze(
+        1
+    )
+    m3 = torch.einsum("qabc,qrabc->qar", pcfg_ref.marginals[1], merge)
+    # merge = merge / m1_head.transpose(1, 2)[..., None, None]
+
+    # h = params["head"].exp().view(B, TGT_NT, SRC_NT, r).sum(1)
+    # lnt, lpt = params["left"].exp().split([NT, PT], 2)
+    # rnt, rpt = params["right"].exp().split([NT, PT], 2)
+    # lnt = lnt.view(B, r, TGT_NT, SRC_NT).sum(2)
+    # lpt = lpt.view(B, r, TGT_PT, SRC_PT).sum(2)
+    # rnt = rnt.view(B, r, TGT_NT, SRC_NT).sum(2)
+    # rpt = rpt.view(B, r, TGT_PT, SRC_PT).sum(2)
+    # trace = torch.empty(B, SRC_NT, SRC_NT + SRC_PT, SRC_NT + SRC_PT)
+    # t = pcfg_ref.marginals[1]
+    # trace[:, :, :SRC_NT, :SRC_NT] = (
+    #     t[:, :, :NT, :NT].reshape(B, TGT_NT, SRC_NT, TGT_NT, SRC_NT, TGT_NT, SRC_NT).sum((1, 3, 5))
+    # )
+    # trace[:, :, :SRC_NT, SRC_NT:] = (
+    #     t[:, :, :NT, NT:].reshape(B, TGT_NT, SRC_NT, TGT_NT, SRC_NT, TGT_PT, SRC_PT).sum((1, 3, 5))
+    # )
+    # trace[:, :, SRC_NT:, :SRC_NT] = (
+    #     t[:, :, NT:, :NT].reshape(B, TGT_NT, SRC_NT, TGT_PT, SRC_PT, TGT_NT, SRC_NT).sum((1, 3, 5))
+    # )
+    # trace[:, :, SRC_NT:, SRC_NT:] = (
+    #     t[:, :, NT:, NT:].reshape(B, TGT_NT, SRC_NT, TGT_PT, SRC_PT, TGT_PT, SRC_PT).sum((1, 3, 5))
+    # )
+    # merge2 = torch.einsum("qar,qrb,qrc->qrabc", h, torch.cat([lnt, lpt], 2), torch.cat([rnt, rpt], 2)) / torch.einsum(
+    #     "qar,qrb,qrc->qabc", h, torch.cat([lnt, lpt], 2), torch.cat([rnt, rpt], 2)
+    # ).unsqueeze(1)
+    # m4 = torch.einsum("qabc,qrabc->qar", trace, merge2)
+    # m4_ref = m1_head.view(B, TGT_NT, SRC_NT, r).sum(1)
+    # breakpoint()
 
     # print('test mbr decoding')
     # decoded = pcfg.mbr_decoded

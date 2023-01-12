@@ -203,6 +203,7 @@ class StandardLSTM(nn.Module):
         num_layers: int = 1,
         bidirectional: bool = False,
         dropout: float = 0.0,
+        output_size: int = 0,
     ):
         super().__init__()
 
@@ -212,6 +213,12 @@ class StandardLSTM(nn.Module):
         self.bidirectional = bidirectional
         self.dropout = dropout
         self.num_directions = 1 + self.bidirectional
+        if output_size > 0:
+            self.output_size = output_size
+        elif self.bidirectional:
+            self.output_size = 2 * self.hidden_size
+        else:
+            self.output_size = self.hidden_size
 
         self.nn = nn.LSTM(
             input_size=input_dim,
@@ -222,16 +229,25 @@ class StandardLSTM(nn.Module):
             bidirectional=bidirectional,
         )
 
+        if output_size > 0:
+            self.out = nn.Linear(hidden_size * (2 if self.bidirectional else 1), output_size)
+        else:
+            self.out = None
+
     def forward(self, hidden, seq_len):
         total_length = hidden.shape[1]
         hidden = pack_padded_sequence(hidden, seq_len, batch_first=True, enforce_sorted=False)
         hidden = self.nn(hidden)[0]
         hidden = pad_packed_sequence(hidden, batch_first=True, total_length=total_length)[0]
-        hidden = hidden.contiguous()
+        if self.out is not None:
+            hidden = self.out(hidden)
+        else:
+            hidden = hidden.contiguous()
+
         return hidden
 
     def get_output_dim(self):
-        return 2 * self.hidden_size if self.bidirectional else self.hidden_size
+        return self.output_size
 
 
 class EmptyModule(nn.Module):

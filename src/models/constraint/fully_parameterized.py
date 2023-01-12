@@ -1,3 +1,4 @@
+from copy import deepcopy
 from logging import getLogger
 
 import numpy as np
@@ -35,7 +36,9 @@ def intersect(span1, span2):
 
 class FPSimpleHierarchy(RuleConstraintBase):
     def get_mask(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
-        pt_spans[0] += [(0, 0, -999)] * (pt_num_nodes - len(pt_spans[0]))  # TODO any issue here?
+        nt_spans = deepcopy(nt_spans)
+        pt_spans = deepcopy(pt_spans)
+        pt_spans[0] += [(0, 0, -999)] * (pt_num_nodes - len(pt_spans[0]))
         nt_spans[0] += [(0, 0, -999)] * (nt_num_nodes - len(nt_spans[0]))
         pt_spans = pad_sequence(
             [torch.tensor([(l, r) for l, r, t in item]) for item in pt_spans],
@@ -227,13 +230,16 @@ class FPPenaltyDepthAndNonIntersection(FPPenaltyDepth):
         )
 
         for b, (pt_span, nt_span) in enumerate(zip(pt_spans, nt_spans)):
+            min_span = min(span[1] - span[0] for span in nt_span)
             for j, child1 in enumerate(nt_span):
                 for k, child2 in enumerate(nt_span):
                     if intersect(child1, child2):
                         nt_ntnt[b, :, :, :, j, :, k] += self.intersect_score
-                        if j == k:
+                        if j == k and child1[1] - child1[0] == min_span:
                             nt_ntnt[b, :, j, :, j, :, k] -= self.intersect_score
             for j, child1 in enumerate(nt_span):
+                if child1[1] - child1[0] == min_span:
+                    continue
                 for k, child2 in enumerate(pt_span):
                     if intersect(child1, child2):
                         nt_ntpt[b, :, :, :, j, :, k] += self.intersect_score
@@ -242,6 +248,8 @@ class FPPenaltyDepthAndNonIntersection(FPPenaltyDepth):
                 for k, child2 in enumerate(pt_span):
                     if intersect(child1, child2):
                         nt_ptpt[b, :, :, :, j, :, k] += self.intersect_score
+        # ref_mask = FPSynchronous().get_mask(batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device)
+        # bugs = torch.where(~((node_score[0].abs() < 1e-5) == ref_mask[0]))
         return node_score
 
 

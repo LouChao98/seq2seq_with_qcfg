@@ -36,11 +36,13 @@ class TSVDataModule(_DataModule):
         transformer_tokenizer_name: str = None,
         tokenize_tgt: bool = False,
         vocab_min_freq: int = 3,
+        emphasize: bool = False,  # for StylePTB's AEM VEM
         # sampler
         batch_size: int = 64,
         eval_batch_size: int = 64,
         force_src_same_length: bool = False,
         use_double_length_bucket: bool = False,
+        double_length_bucket_rate: bool = 1.1,
         num_workers: int = 0,
         pin_memory: bool = False,
         ###
@@ -105,6 +107,7 @@ class TSVDataModule(_DataModule):
         data_test = self.process_pair(data_test)
 
         self.src_vocab, self.tgt_vocab = self.build_vocab(data_train)
+        logger.info(f"src vocab size: {len(self.src_vocab)}. tgt vocab size: {len(self.tgt_vocab)}")
 
         self.data_train = self.apply_vocab(data_train)
         self.data_val = self.apply_vocab(data_val)
@@ -115,13 +118,22 @@ class TSVDataModule(_DataModule):
         for i, d in enumerate(open(fpath, "r")):
             inst = self.process_line(d)
             inst["id"] = i
-            data.append(inst)
+            if len(inst["src"]) > 0 and len(inst["tgt"]) > 0:
+                data.append(inst)
         return data
 
     def process_line(self, line: str):
         src, tgt = line.split("\t")
         src = src.strip().split()
         tgt = tgt.strip().split()
+
+        if self.hparams.emphasize:
+            assert src[-2] == ";"
+            *src, _, emp_word = src
+            emp = [item == emp_word for item in src]
+            assert sum(emp) >= 1, (src, emp_word)
+            emp = [int(item) + 1 for item in emp]
+
         if len(src) == 1 or len(tgt) == 1:
             src = src + src
             tgt = tgt + tgt
@@ -133,8 +145,10 @@ class TSVDataModule(_DataModule):
         if self.hparams.debug_2:
             tgt = tgt[::-1]
 
-        inst = {"src": src, "tgt": tgt}
-        return inst
+        if self.hparams.emphasize:
+            return {"src": src, "tgt": tgt, "emp": emp}
+        else:
+            return {"src": src, "tgt": tgt}
 
     def process_pair(self, data):
         # none = do nothing
@@ -317,7 +331,10 @@ class TSVDataModule(_DataModule):
                     length_bucket[len(item["src"])].append(i)
                 buckets = {}
                 for length, ids in length_bucket.items():
-                    costs = [len((dataset[i]["tgt"]) * len(dataset[i]["src"])) ** 1.1 for i in ids]
+                    costs = [
+                        len((dataset[i]["tgt"]) * len(dataset[i]["src"])) ** self.hparams.double_length_bucket_rate
+                        for i in ids
+                    ]
                     num_clusters = math.ceil(math.log2(len(ids)))
 
                     if len(ids) == 1:
@@ -417,6 +434,13 @@ class TSVDataModule(_DataModule):
                 item = torch.from_numpy(item["prior_alignment"]).to(torch.float32)
                 prior_alignment[i, : item.shape[0], : item.shape[1]] = item
             batched["prior_alignment"] = prior_alignment
+
+        if "emp" in data[0]:
+            emp = torch.zeros(len(src), max_src_len, dtype=torch.long)
+            for i, item in enumerate(data):
+                item = torch.tensor(item["emp"], dtype=torch.long)
+                emp[i, : item.shape[0]] = item
+            batched["emphasize"] = emp
 
         return batched
 

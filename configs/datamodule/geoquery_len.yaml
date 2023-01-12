@@ -1,6 +1,7 @@
 _target_: src.datamodules.semantic_parsing_datamodule.SemanticParsingDataModule
 
 train_file: ${data_dir}/geo/funql/train_len.json
+# dev_file: ${data_dir}/geo/funql/test_len.json
 dev_file: ${data_dir}/geo/funql/dev_len.json
 test_file: ${data_dir}/geo/funql/test_len.json
 

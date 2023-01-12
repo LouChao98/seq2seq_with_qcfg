@@ -1,0 +1,22 @@
+_target_: src.datamodules.tsv_datamodule.TSVDataModule
+
+train_file: ${data_dir}/wmt17_en_de/train_en-de_small30_bpe.txt
+dev_file: ${data_dir}/wmt17_en_de/valid_en-de_bpe.txt
+test_file: ${data_dir}/wmt17_en_de/test_en-de_bpe.txt
+
+copy_mode: "none"
+max_src_len: 20
+vocab_min_freq: 10
+
+# batch_size: 8
+# eval_batch_size: 8 # ${in_debugger:2,6}
+
+use_double_length_bucket: true
+batch_size: 50000
+eval_batch_size: 50000
+
+num_workers: ${in_debugger:0,4}
+pin_memory: false
+
+cache_dir: ${data_dir}/cache
+enable_cache: false

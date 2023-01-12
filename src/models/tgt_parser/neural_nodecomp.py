@@ -1,5 +1,6 @@
 import logging
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -33,6 +34,7 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         vector_quantize=None,
         vector_quantize_pt=None,
         debug_1=False,
+        always_apply_reward=False,
         **kwargs,
     ):
         # debug_1: maskout -> NT PT or -> PT NT
@@ -45,6 +47,7 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         self.normalizer = normalize_func[normalize_mode]
 
         self.debug_1 = debug_1
+        self.always_apply_reward = always_apply_reward
 
         self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -62,6 +65,8 @@ class NeuralNoDecompTgtParser(TgtParserBase):
             self.vector_quantizer_pt = self.vector_quantizer
         else:
             self.vector_quantizer_pt = instantiate(vector_quantize_pt, dim=src_dim)
+
+        self.temperature = None
 
         self.reset_parameters()
 
@@ -118,6 +123,8 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         allowed = (torch.tensor(nt_num_nodes_list, device=device) - 1).view(-1, 1, 1)
         roots = torch.where(mask == allowed, roots, roots.new_tensor(self.neg_huge))
         roots = roots.view(batch_size, -1)
+        if self.temperature is not None:
+            roots = roots * self.temperature
         roots = F.log_softmax(roots, dim=1)
 
         # A->BC
@@ -131,6 +138,8 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         rule_emb_child = rule_emb_child.view(batch_size, (nt + pt) ** 2, self.dim)
 
         rules = torch.matmul(rule_emb_parent, rule_emb_child.transpose(1, 2))
+        if self.temperature is not None:
+            rules = rules * self.temperature
         rules = rules.view(batch_size, nt, nt + pt, nt + pt)
 
         # fmt: off
@@ -164,7 +173,10 @@ class NeuralNoDecompTgtParser(TgtParserBase):
         rules[~lhs_mask] = self.neg_huge
 
         # A->a
-        terms = F.log_softmax(self.score_normalize(self.vocab_out(pt_emb), dims=2), dim=2)
+        terms = self.score_normalize(self.vocab_out(pt_emb), dims=2)
+        if self.temperature is not None:
+            terms = terms * self.temperature
+        terms = F.log_softmax(terms, dim=2)
 
         if filtered_spans is not None:
             roots, rules, nt_num_nodes, nt_num_nodes_list = self.filter_rules(
@@ -200,10 +212,20 @@ class NeuralNoDecompTgtParser(TgtParserBase):
     def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:
         pred = super().observe_x(pred, x, lengths, inplace, **kwargs)
         pred.dist = NoDecomp(pred.posterior_params, pred.lengths, **pred.common())
+
+        if self.always_apply_reward:
+            reward = self.rule_soft_constraint.get_weight_from_pred(pred)
+            pred.dist = pred.dist.spawn(params={"rule": pred.dist.params["rule"] + reward})
+
         return pred
 
     def prepare_sampler(self, pred: TgtParserPrediction, src, src_ids, inplace=True) -> TgtParserPrediction:
         pred = super().prepare_sampler(pred, src, src_ids, inplace)
+
+        if self.always_apply_reward:
+            reward = self.rule_soft_constraint.get_weight_from_pred(pred)
+            pred.params["rule"] = pred.params["rule"] + reward
+
         pred.sampler = NoDecompSampler(pred.params, **pred.common(), **self.sampler_common())
         return pred
 

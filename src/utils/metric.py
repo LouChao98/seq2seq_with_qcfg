@@ -12,17 +12,25 @@ logger = logging.getLogger(__file__)
 
 
 class SacreBLEUScore(torchmetrics.SacreBLEUScore):
-    def __init__(self, lang="en") -> None:
+    def __init__(self, lang="en", has_subword=False) -> None:
         super().__init__(tokenize="zh" if lang == "zh" else "13a")
         self.lang = lang
+        self.has_subword = has_subword
 
     def update(self, preds: Sequence[str], target: Sequence[Sequence[str]]) -> None:
         if self.lang == "zh":
             preds = ["".join(item) for item in preds]
             target = [["".join(item)] for item in target]
+            if self.has_subword:
+                preds = [item.replace("@@", "") for item in preds]
+                target = [[item.replace("@@", "") for item in t] for t in target]
         else:
             preds = [" ".join(item) for item in preds]
             target = [[" ".join(item)] for item in target]
+
+            if self.has_subword:
+                preds = [item.replace("@@ ", " ") for item in preds]
+                target = [[item.replace("@@ ", " ") for item in t] for t in target]
         return super().update(preds, target)
 
     def compute(self):
@@ -30,9 +38,16 @@ class SacreBLEUScore(torchmetrics.SacreBLEUScore):
 
 
 class BLEUScore(torchmetrics.BLEUScore):
+    def __init__(self, n_gram, has_subword=False) -> None:
+        super().__init__(n_gram)
+        self.has_subword = has_subword
+
     def update(self, preds: Sequence[str], target: Sequence[Sequence[str]]) -> None:
         preds = [" ".join(item) for item in preds]
         target = [[" ".join(item)] for item in target]
+        if self.has_subword:
+            preds = [item.replace("@@ ", " ") for item in preds]
+            target = [[item.replace("@@ ", " ") for item in t] for t in target]
         return super().update(preds, target)
 
     def compute(self):

@@ -22,13 +22,14 @@ trainer:
   max_epochs: 20
   accumulate_grad_batches: 16
   gradient_clip_val: 3
+  max_time: "01:16:00:00"
 
 datamodule:
   copy_mode: none
   force_src_same_length: true
 
 model:
-  real_val_every_n_epochs: 5
+  real_val_every_n_epochs: 30
   use_label_encoder: true
   label_encoder_inp_dim: ${.parser.cpd_rank}
   label_normalization: true

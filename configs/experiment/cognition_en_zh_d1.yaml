@@ -23,12 +23,13 @@ trainer:
   max_epochs: 20
   accumulate_grad_batches: 16
   gradient_clip_val: 3
+  max_time: "01:16:00:00"
 
 datamodule:
   copy_mode: none
 
 model:
-  real_val_every_n_epochs: 5
+  real_val_every_n_epochs: 30
 
   decoder:
     use_fast: true

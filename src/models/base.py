@@ -36,15 +36,16 @@ class ModelBase(pl.LightningModule):
         """name: <obj nevigation>|<cfg nevigation>"""
         if name in self._dynamic_cfg:
             log.warning(f"Overwriting {name} with {command}")
-        self._dynamic_cfg[name] = DynamicHyperParameter(command, idx_getter=lambda: self.current_epoch)
+        self._dynamic_cfg[name] = DynamicHyperParameter(command)
 
     def apply_dynamic_cfg(self):
-        params = {key: next(value) for key, value in self._dynamic_cfg.items()}
+        params = {key: value.get(self.current_epoch) for key, value in self._dynamic_cfg.items()}
         for key, value in params.items():
             obj_nev, cfg_nev = key.split("|")
             o = self.hparams
-            for attr_name in obj_nev.split("."):
-                o = getattr(o, attr_name)
+            if len(obj_nev) > 0:
+                for attr_name in obj_nev.split("."):
+                    o = getattr(o, attr_name)
             s = o
             cfg_nev = cfg_nev.split(".")
             for k in cfg_nev[:-1]:

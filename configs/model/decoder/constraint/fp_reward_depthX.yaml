@@ -6,7 +6,7 @@ defaults:
 rule_soft_constraint:
   _target_: src.models.constraint.fully_parameterized.FPPenaltyDepthAndNonIntersection
   upwards_score: 1e-4
-  stay_score: 0.9
-  intersect_score: 0.8
+  stay_score: 1.0
+  intersect_score: 0.2
   nt_temperature: 1.
   pt_temperature: 1.

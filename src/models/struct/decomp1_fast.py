@@ -23,18 +23,19 @@ from ._utils import (
     weighted_random_v2,
 )
 from .base import DecompBase
-from .decomp1 import Decomp1Sampler
+from .decomp1 import Decomp1, Decomp1NATSampler, Decomp1Sampler
 
 log = logging.getLogger(__file__)
 
 
-class Decomp1Fast(DecompBase):
+class Decomp1Fast(Decomp1):
     KEYS = ("term", "head", "left", "right", "root")
     LOGSPACE = (True, False, False, False, True)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, impl2=False, **kwargs):
         super().__init__(*args, **kwargs)
         self._trace_rank = False
+        self.impl2 = impl2
 
     @contextmanager
     def trace_rank(self):
@@ -46,8 +47,17 @@ class Decomp1Fast(DecompBase):
         self._trace_rank = False
 
     def inside(self, params, semiring, trace=False, use_reentrant=True) -> Tuple[Tensor, Tensor]:
-        assert semiring == LogSemiring
-        return self.inside_log_semiring(params, trace, use_reentrant)
+        if semiring == LogSemiring:
+            if not self.impl2:
+                return self.inside_log_semiring(params, trace, use_reentrant)
+            else:
+                return self.inside_log_semiring2(params, trace, use_reentrant)
+        else:
+            params = {**params}
+            params["head"] = params["head"].clamp(1e-9).log()
+            params["left"] = params["left"].clamp(1e-9).log()
+            params["right"] = params["right"].clamp(1e-9).log()
+            return super().inside(params, semiring, trace)
 
     def inside_log_semiring(self, params, trace=False, use_reentrant=True):
         merge = checkpoint(g_merge, use_reentrant=use_reentrant)
@@ -160,6 +170,118 @@ class Decomp1Fast(DecompBase):
         final = torch.matmul(final, H)
         final = (final + 1e-9).squeeze(1).log() + root
         logZ = final.logsumexp(-1) + final_normalizer.squeeze(-1)
+
+        if trace and self._trace_rank:
+            return logZ, (_span_indicator, term_indicator)
+        else:
+            return logZ, _span_indicator
+
+    def inside_log_semiring2(self, params, trace=False, use_reentrant=True):
+        # slight faster, but use more memory at peak
+
+        merge = checkpoint(g_merge2, use_reentrant=use_reentrant)
+        term: Tensor = params["term"]  # (batch, seq_len, PT)
+        root: Tensor = params["root"]  # (batch, NT)
+        H: Tensor = params["head"]  # (batch, NT, r), A[i] -> R
+        L: Tensor = params["left"].transpose(1, 2)  # (batch, r, NT + T), r->L
+        R: Tensor = params["right"].transpose(1, 2)  # (batch, r, NT + T), r->R
+
+        batch, N, PT = term.shape
+        NT = root.shape[1]
+        N += 1
+        rank = L.shape[2]
+
+        TLNT = L[:, :NT]
+        TLPT = L[:, NT:]
+        TRNT = R[:, :NT]
+        TRPT = R[:, NT:]
+
+        norm: Tensor = term.max(-1, keepdim=True)[0]
+        term = (term - norm).exp()
+
+        H = H.transpose(-1, -2)
+        # (m_A, r_A) + (m_B, r_B) -> (r_A, r_B)
+        H_L = torch.matmul(H, TLNT)
+        H_R = torch.matmul(H, TRNT)
+
+        # b n pt x b pt r -> b n r
+        left_term = (torch.matmul(term, TLPT) + 1e-9).log() + norm
+        right_term = (torch.matmul(term, TRPT) + 1e-9).log() + norm
+
+        s = term.new_full((batch, N, N, rank), -1e9)
+        s.diagonal(1, 1, 2).copy_(left_term.transpose(1, 2))
+        s.diagonal(-1, 1, 2).copy_(right_term.transpose(1, 2))
+
+        if trace:
+            if self._trace_rank:
+                _span_indicator = term.new_ones(batch, N, N, rank, requires_grad=True)
+                span_indicator = _span_indicator
+                term_indicator = torch.ones_like(left_term, requires_grad=True)
+                left_term = left_term * term_indicator
+                right_term = right_term * term_indicator
+            else:
+                _span_indicator = term.new_ones(batch, N, N, requires_grad=True)
+                span_indicator = _span_indicator.unsqueeze(-1)
+            span_indicator_running = span_indicator
+        else:
+            _span_indicator = None
+
+        # prepare length, same as the batch_size in PackedSequence
+        n_at_position = (torch.arange(2, N + 1).unsqueeze(1) <= self.lens.cpu().unsqueeze(0)).sum(1)
+
+        # w: span width
+        final = []
+        final_normalizer = []
+        for step, w in enumerate(range(2, N)):
+
+            # n: the number of spans of width w.
+            n = N - w
+            y = stripe(s, n, w - 1, (0, 1))
+            z = stripe(s, n, w - 1, (w, 1))
+
+            if y.requires_grad:
+                y = y.clone()  # due to checkpoint
+                z = z.clone()
+
+            x, xn = merge(y, z)
+
+            if trace:
+                indicator = span_indicator_running.diagonal(w, 1, 2).movedim(-1, 1)
+                x = x * indicator
+
+            unfinished = n_at_position[step + 1]
+            current_bsz = n_at_position[step]
+
+            if current_bsz - unfinished > 0:
+                final.insert(0, x[unfinished:current_bsz, :1])
+                final_normalizer.insert(0, xn[unfinished:current_bsz, :1])
+
+            if unfinished > 0:
+                if current_bsz > unfinished:
+                    x = x[:unfinished]
+                    s = s[:unfinished]
+
+                    H_L = H_L[:unfinished]
+                    H_R = H_R[:unfinished]
+                    sn = sn[:unfinished]
+                    xn = xn[:unfinished]
+                    if trace:
+                        span_indicator_running = span_indicator_running[:unfinished]
+
+                left_x = (torch.matmul(x, H_L) + 1e-9).log() + xn
+                right_x = (torch.matmul(x, H_R) + 1e-9).log() + xn
+
+                s.diagonal(w, 1, 2).copy_(left_x.transpose(1, 2))
+                s.diagonal(-w, 1, 2).copy_(right_x.transpose(1, 2))
+
+            if unfinished == 0:
+                break
+
+        final = torch.cat(final, dim=0)
+        final_normalizer = torch.cat(final_normalizer, dim=0)
+        final = torch.matmul(final, H)
+        final = (final + 1e-9).squeeze(1).log() + root
+        logZ = final.logsumexp(-1) + final_normalizer.view(-1)
 
         if trace and self._trace_rank:
             return logZ, (_span_indicator, term_indicator)
@@ -280,6 +402,18 @@ class Decomp1FastSampler(Decomp1Sampler):
         return terms, H, L, R, roots
 
 
+class Decomp1FastNATSampler(Decomp1NATSampler):
+    # not faster than Decomp1Sampler. just match the name
+    @torch.no_grad()
+    def process_params(self, params: Dict[str, Tensor]):
+        terms = params["term"].exp().cumsum(3).cpu().numpy()
+        roots = params["root"].exp().cumsum(1).cpu().numpy()
+        H = params["head"].cumsum(2).cpu().numpy()
+        L = params["left"].cumsum(2).cpu().numpy()
+        R = params["right"].cumsum(2).cpu().numpy()
+        return terms, H, L, R, roots
+
+
 # @torch.jit.script
 def g_merge(y, z, yn, zn):
     # contract dimension w.
@@ -288,6 +422,13 @@ def g_merge(y, z, yn, zn):
     b_n_r = (y + z).logsumexp(-2)
     normalizer = b_n_r.max(-1)[0]
     b_n_r = (b_n_r - normalizer.unsqueeze(-1)).exp()
+    return b_n_r, normalizer
+
+
+def g_merge2(y, z):
+    b_n_r = (y + z).logsumexp(-2)
+    normalizer = b_n_r.max(-1, keepdim=True)[0]
+    b_n_r = (b_n_r - normalizer).exp()
     return b_n_r, normalizer
 
 
@@ -332,8 +473,8 @@ if __name__ == "__main__":
     m1 = pcfg.marginal
     check_full_marginal(m1["term"], m1["trace"].sum(-1), lens)
 
-    m2 = pcfg_ref.marginals[-1]
-    compare_unlabeled_marginal(m1["trace"].sum(-1), m2)
+    # m2 = pcfg_ref.marginals[-1]
+    # compare_unlabeled_marginal(m1["trace"].sum(-1), m2)
 
     print("test entropy")
     print(pcfg.entropy)

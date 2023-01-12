@@ -1,0 +1,48 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: scan
+  - override /model: pcfg_pcfg_reinforce
+  - override /model/encoder: empty
+  - override /model/decoder: decomp1
+  - override /model/test_metric: bleu1234_and_exact
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "scan"
+
+datamodule:
+  # batch_size: 1
+  # eval_batch_size: 1
+  batch_size: 4
+  eval_batch_size: 4
+  max_src_len: 100
+
+model:
+  embedding:
+    _target_: torch.nn.Embedding
+    embedding_dim: 256
+
+  decoder:
+    dim: 256
+    nt_states: 10 # src_nt_states in origin impl
+    pt_states: 1 # src_pt_states in origin impl
+    use_copy: false
+    generation_max_length: 60
+
+trainer:
+  max_epochs: 20
+  accumulate_grad_batches: 1
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: scan

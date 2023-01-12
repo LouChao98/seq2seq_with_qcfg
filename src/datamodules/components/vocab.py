@@ -14,7 +14,10 @@ class Vocabulary:
         if add_pad:
             self.pad_token_id = len(self.id2word)
             self.id2word.append("<pad>")
-        self.id2word += sorted(list(count.keys()))
+        keys = sorted(list(count.keys()))
+        for key in keys:
+            if self.count[key] >= threshold:
+                self.id2word.append(key)
         self.word2id = {word: i for i, word in enumerate(self.id2word)}
 
     def convert_ids_to_tokens(self, ids):

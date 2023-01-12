@@ -1,0 +1,15 @@
+# @package model.decoder
+
+defaults:
+  - none
+
+rule_soft_constraint:
+  _target_: src.models.constraint.folded.FPenaltyDepthAndNonIntersection
+  upwards_score: 1e-4
+  stay_score: 1.0
+  intersect_score: 0.01
+  nt_temperature: 0.1
+  pt_temperature: 0.1
+
+rule_hard_constraint:
+  _target_: src.models.constraint.folded.FSimpleHierarchy

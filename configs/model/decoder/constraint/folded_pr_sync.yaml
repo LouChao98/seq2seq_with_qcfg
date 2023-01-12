@@ -1,0 +1,14 @@
+# @package model.decoder
+
+defaults:
+  - none
+
+rule_soft_constraint:
+  _target_: src.models.constraint.folded.FSynchronous
+rule_soft_constraint_solver:
+  _target_: src.models.posterior_regularization.linear.UngroundedPRLineSearchSolver
+  b: 0
+  field: slr
+
+pt_span_range: [1, 1000]
+nt_span_range: [1, 1000]

@@ -209,7 +209,6 @@ class Decomp7Sampler(DecompSamplerBase):
         SLR = params["slr"].flatten(3).cumsum(3).cpu().numpy()
 
         # SLR_debug = self.threshold(params["slr"]).flatten(3).cpu().numpy()
-
         return terms, H, L, R, SLR, roots
         # return terms, H, L, R, SLR, SLR_debug, roots
 

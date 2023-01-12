@@ -93,6 +93,8 @@ class NeqNT(PrTask):
 
 
 class NoManyToOneNT(PrTask):
+    # this pushes count of alignment <= 1
+
     def get_b(self, pred: TgtParserPrediction):
         return torch.ones(pred.batch_size, pred.nt_num_nodes, device=pred.device)
 
@@ -134,3 +136,41 @@ class NoManyToOneNT(PrTask):
         m = pred.dist.marginal
         m = m["rule"] if "rule" in m else m["head"]
         return m.view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1).sum((1, 3)) * constraints
+
+
+class NoManyToOnePT(PrTask):
+    # this pushes count of alignment <= 1
+
+    def get_b(self, pred: TgtParserPrediction):
+        return torch.ones(pred.batch_size, pred.pt_num_nodes, device=pred.device)
+
+    def get_init_lambdas(self, pred: TgtParserPrediction):
+        return torch.full((pred.batch_size, pred.pt_num_nodes), 0.5, device=pred.device, requires_grad=True)
+
+    def process_constraint(self, pred: TgtParserPrediction, constraints: Optional[torch.Tensor] = None):
+        # constraints: bsz x n or None
+        if constraints is None:
+            return torch.ones(
+                (pred.batch_size, pred.posterior_params["term"].shape[1], pred.pt_num_nodes), device=pred.device
+            )
+        return constraints.unsqueeze(-1).expand(-1, -1, pred.pt_num_nodes)
+
+    def build_constrained_dist(self, pred: TgtParserPrediction, lambdas, constraints, entropy_reg=None):
+        dist = pred.dist
+        cparams = {**dist.params}
+        cparams["term"] = (
+            cparams["term"].view(*cparams["term"].shape[:2], dist.pt_states, dist.pt_num_nodes)
+            - (lambdas[:, None] * constraints).unsqueeze(2)
+        ).flatten(2)
+        if entropy_reg is not None and entropy_reg > 0:
+            factor = 1 / (1 - entropy_reg)
+            for key, is_log_param in zip(dist.KEYS, dist.LOGSPACE):
+                if is_log_param:
+                    cparams[key] = cparams[key] * factor
+                else:
+                    cparams[key] = torch.pow(cparams[key], factor)
+        return dist.spawn(params=cparams)
+
+    def calc_e(self, pred: TgtParserPrediction, constraints):
+        m = pred.dist.marginal["term"]
+        return (m.view(*m.shape[:2], pred.pt_states, pred.pt_num_nodes) * constraints.unsqueeze(2)).sum((1, 2))

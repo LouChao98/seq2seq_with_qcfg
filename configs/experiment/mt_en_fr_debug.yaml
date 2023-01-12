@@ -1,0 +1,43 @@
+# @package _global_
+
+defaults:
+  - /model/decoder/constraint: fp_hard_sync
+  - override /datamodule: mt_en_fr
+  - override /model: pcfg_pcfg_reinforce
+  - override /model/encoder: lstm
+  - override /callbacks: default
+  - override /logger: tensorboard
+  - override /trainer: default
+
+name: "mt_en_fr"
+
+trainer:
+  max_epochs: 40
+  accumulate_grad_batches: 32
+  gradient_clip_val: 3
+  val_check_interval: 1000
+
+datamodule:
+  copy_mode: none
+  batch_size: 1
+  eval_batch_size: 1
+  vocab_min_freq: 2
+
+model:
+  encoder:
+    dropout: 0.
+    hidden_size: 512
+    output_size: 512
+
+  decoder:
+    nt_states: 14
+    pt_states: 14
+    use_copy: false
+    generation_max_length: 30
+    generation_num_samples: 100
+    generation_ppl_batch_size: 4
+
+  optimizer:
+    args:
+      lr: 5.0e-4
+      _target_: torch.optim.Adam

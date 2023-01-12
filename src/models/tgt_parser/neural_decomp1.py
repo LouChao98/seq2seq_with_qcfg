@@ -4,10 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from hydra.utils import instantiate
+from torch_struct import SentCFG
 
 from ..components.common import MultiResidualLayer
 from ..struct.decomp1 import Decomp1, Decomp1Sampler
-from ..struct.decomp1_fast import Decomp1Fast, Decomp1FastSampler
+from ..struct.decomp1_fast import Decomp1Fast, Decomp1FastSampler, convert_decomp1_to_pcfg
 from .base import TgtParserBase, TgtParserPrediction
 
 log = logging.getLogger(__file__)
@@ -29,7 +30,7 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         super().__init__(**kwargs)
 
         assert self.rule_hard_constraint is None, "Do not support any constraint."
-        assert self.rule_soft_constraint is None, "Do not support any constraint."
+        # assert self.rule_soft_constraint is None, "Do not support any constraint."  # need folded, use mask
 
         self.vocab = vocab
         self.dim = dim
@@ -114,6 +115,12 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         rule_left = self.rule_mlp_left(all_emb)
         rule_right = self.rule_mlp_right(all_emb)
 
+        if self.score_regularziation > 0:
+            reg = torch.norm(rule_head) + torch.norm(rule_left) + torch.norm(rule_right)
+            reg = reg * self.score_regularziation
+            rule_left = rule_left.clone()
+            rule_right = rule_right.clone()
+
         # fmt: off
         device = all_emb.device
         nt_mask = torch.arange(nt_num_nodes, device=device).unsqueeze(0) \
@@ -163,6 +170,9 @@ class NeuralDecomp1TgtParser(TgtParserBase):
         if self.vector_quantizer is not None:
             pred.vq_commit_loss = commit_loss
 
+        if self.score_regularziation > 0:
+            pred.score_reg_loss = reg
+
         return pred
 
     def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:
@@ -176,3 +186,119 @@ class NeuralDecomp1TgtParser(TgtParserBase):
             pred.params, **pred.common(), **self.sampler_common()
         )
         return pred
+
+    # def get_soft_constraint_loss(self, pred: TgtParserPrediction):
+    #     assert self.use_fast
+    #     mask = self.rule_soft_constraint.get_mask_from_pred(pred)
+    #     head = pred.params["head"].view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1).sum(1)
+    #     left_nt, left_pt = pred.params["left"].split([pred.nt, pred.pt], 2)
+    #     right_nt, right_pt = pred.params["right"].split([pred.nt, pred.pt], 2)
+    #     left_nt = left_nt.view(pred.batch_size, -1, pred.nt_states, pred.nt_num_nodes).sum(2)
+    #     left_pt = left_pt.view(pred.batch_size, -1, pred.pt_states, pred.pt_num_nodes).sum(2)
+    #     right_nt = right_nt.view(pred.batch_size, -1, pred.nt_states, pred.nt_num_nodes).sum(2)
+    #     right_pt = right_pt.view(pred.batch_size, -1, pred.pt_states, pred.pt_num_nodes).sum(2)
+    #     x1 = torch.einsum(
+    #         "qar,qrb,qrc->qrabc", head, torch.cat([left_nt, left_pt], 2), torch.cat([right_nt, right_pt], 2)
+    #     )
+
+    #     m_head = (
+    #         pred.dist.rule_marginal_with_grad["head"]
+    #         .view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1)
+    #         .sum(1)
+    #     )
+    #     breakpoint()
+    #     x1_inv = torch.linalg.inv(x1 + torch.randn_like(x1) * 0.001)
+    #     score = torch.einsum("qrabc,qar->qabc", x1_inv, m_head)
+    #     breakpoint()
+
+    #     nt_mask = (
+    #         torch.arange(pred.nt_num_nodes).unsqueeze(0)
+    #         < torch.tensor([len([i for i in item if i[2] != -999]) for item in pred.nt_nodes]).unsqueeze(1)
+    #     ).to(pred.device)
+    #     pt_mask = (
+    #         torch.arange(pred.pt_num_nodes).unsqueeze(0)
+    #         < torch.tensor([len([i for i in item if i[2] != -999]) for item in pred.pt_nodes]).unsqueeze(1)
+    #     ).to(pred.device)
+    #     nt_pt_mask = torch.cat([nt_mask, pt_mask], 1)
+    #     valid_mask = nt_mask[:, :, None, None] & nt_pt_mask[:, None, :, None] & nt_pt_mask[:, None, None, :]
+    #     score[~valid_mask] = 0.0
+
+    #     # params_ref = convert_decomp1_to_pcfg(pred.dist.params, pred.nt_states)
+    #     # pcfg_ref = SentCFG((params_ref["term"], params_ref["rule"], params_ref["root"]), pred.lengths)
+    #     # SRC_NT = pred.nt_num_nodes
+    #     # SRC_PT = pred.pt_num_nodes
+    #     # NT = pred.nt
+    #     # B = pred.batch_size
+    #     # TGT_NT = pred.nt_states
+    #     # TGT_PT = pred.pt_states
+    #     # trace = torch.empty(B, SRC_NT, SRC_NT + SRC_PT, SRC_NT + SRC_PT)
+    #     # t = pcfg_ref.marginals[1]
+    #     # trace[:, :, :SRC_NT, :SRC_NT] = t[:, :, :NT, :NT].reshape(B, TGT_NT, SRC_NT, TGT_NT, SRC_NT, TGT_NT, SRC_NT).sum((1,3,5))
+    #     # trace[:, :, :SRC_NT, SRC_NT:] = t[:, :, :NT, NT:].reshape(B, TGT_NT, SRC_NT, TGT_NT, SRC_NT, TGT_PT, SRC_PT).sum((1,3,5))
+    #     # trace[:, :, SRC_NT:, :SRC_NT] = t[:, :, NT:, :NT].reshape(B, TGT_NT, SRC_NT, TGT_PT, SRC_PT, TGT_NT, SRC_NT).sum((1,3,5))
+    #     # trace[:, :, SRC_NT:, SRC_NT:] = t[:, :, NT:, NT:].reshape(B, TGT_NT, SRC_NT, TGT_PT, SRC_PT, TGT_PT, SRC_PT).sum((1,3,5))
+    #     # obj = trace[~mask].sum()
+    #     # print(score.max(), merge.max())
+    #     # print(obj, trace[mask].sum())
+
+    #     return -(score * (~mask).float()).clamp(max=100).flatten(1).sum(1) * 0.01
+
+    # def get_soft_constraint_loss(self, pred: TgtParserPrediction):
+    #     assert self.use_fast
+    #     mask = self.rule_soft_constraint.get_mask_from_pred(pred)
+    #     head = pred.params["head"].view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1).sum(1)
+    #     left_nt, left_pt = pred.params["left"].split([pred.nt, pred.pt], 2)
+    #     right_nt, right_pt = pred.params["right"].split([pred.nt, pred.pt], 2)
+    #     left_nt = left_nt.view(pred.batch_size, -1, pred.nt_states, pred.nt_num_nodes).sum(2)
+    #     left_pt = left_pt.view(pred.batch_size, -1, pred.pt_states, pred.pt_num_nodes).sum(2)
+    #     right_nt = right_nt.view(pred.batch_size, -1, pred.nt_states, pred.nt_num_nodes).sum(2)
+    #     right_pt = right_pt.view(pred.batch_size, -1, pred.pt_states, pred.pt_num_nodes).sum(2)
+    #     x1 = torch.einsum(
+    #         "qar,qrb,qrc->qrabc", head, torch.cat([left_nt, left_pt], 2), torch.cat([right_nt, right_pt], 2)
+    #     )
+    #     x2 = torch.einsum(
+    #         "qar,qrb,qrc->qabc", head, torch.cat([left_nt, left_pt], 2), torch.cat([right_nt, right_pt], 2)
+    #     )
+    #     merge = x1 / x2.unsqueeze(1).clamp(1e-6)
+    #     m_head = (
+    #         pred.dist.rule_marginal_with_grad["head"]
+    #         .view(pred.batch_size, pred.nt_states, pred.nt_num_nodes, -1)
+    #         .sum(1)
+    #     )
+    #     m_left_nt, m_left_pt = pred.dist.rule_marginal_with_grad["left"].split([pred.nt, pred.pt], 2)
+    #     m_right_nt, m_right_pt = pred.dist.rule_marginal_with_grad["right"].split([pred.nt, pred.pt], 2)
+    #     m_left_nt = m_left_nt.view(pred.batch_size, -1, pred.nt_states, pred.nt_num_nodes).sum(2)
+    #     m_left_pt = m_left_pt.view(pred.batch_size, -1, pred.pt_states, pred.pt_num_nodes).sum(2)
+    #     m_right_nt = m_right_nt.view(pred.batch_size, -1, pred.nt_states, pred.nt_num_nodes).sum(2)
+    #     m_right_pt = m_right_pt.view(pred.batch_size, -1, pred.pt_states, pred.pt_num_nodes).sum(2)
+    #     m_left = torch.cat([m_left_nt, m_left_pt], dim=2)
+    #     m_right = torch.cat([m_right_nt, m_right_pt], dim=2)
+    #     score = (merge / m_head.transpose(1, 2)[..., None, None].clamp(1e-6)).sum(1) + \
+    #         (merge / m_left[:, :, None, :, None].clamp(1e-6)).sum(1) + \
+    #         (merge / m_right[:, :, None, None, :].clamp(1e-6)).sum(1)
+
+    #     nt_mask = (torch.arange(pred.nt_num_nodes).unsqueeze(0) < torch.tensor([len([i for i in item if i[2] != -999]) for item in pred.nt_nodes]).unsqueeze(1)).to(pred.device)
+    #     pt_mask = (torch.arange(pred.pt_num_nodes).unsqueeze(0) < torch.tensor([len([i for i in item if i[2] != -999]) for item in pred.pt_nodes]).unsqueeze(1)).to(pred.device)
+    #     nt_pt_mask = torch.cat([nt_mask, pt_mask], 1)
+    #     valid_mask = nt_mask[:, :, None, None] & nt_pt_mask[:, None, :, None] & nt_pt_mask[:, None, None, :]
+    #     score[~valid_mask] = 0.
+
+    #     # params_ref = convert_decomp1_to_pcfg(pred.dist.params, pred.nt_states)
+    #     # pcfg_ref = SentCFG((params_ref["term"], params_ref["rule"], params_ref["root"]), pred.lengths)
+    #     # SRC_NT = pred.nt_num_nodes
+    #     # SRC_PT = pred.pt_num_nodes
+    #     # NT = pred.nt
+    #     # B = pred.batch_size
+    #     # TGT_NT = pred.nt_states
+    #     # TGT_PT = pred.pt_states
+    #     # trace = torch.empty(B, SRC_NT, SRC_NT + SRC_PT, SRC_NT + SRC_PT)
+    #     # t = pcfg_ref.marginals[1]
+    #     # trace[:, :, :SRC_NT, :SRC_NT] = t[:, :, :NT, :NT].reshape(B, TGT_NT, SRC_NT, TGT_NT, SRC_NT, TGT_NT, SRC_NT).sum((1,3,5))
+    #     # trace[:, :, :SRC_NT, SRC_NT:] = t[:, :, :NT, NT:].reshape(B, TGT_NT, SRC_NT, TGT_NT, SRC_NT, TGT_PT, SRC_PT).sum((1,3,5))
+    #     # trace[:, :, SRC_NT:, :SRC_NT] = t[:, :, NT:, :NT].reshape(B, TGT_NT, SRC_NT, TGT_PT, SRC_PT, TGT_NT, SRC_NT).sum((1,3,5))
+    #     # trace[:, :, SRC_NT:, SRC_NT:] = t[:, :, NT:, NT:].reshape(B, TGT_NT, SRC_NT, TGT_PT, SRC_PT, TGT_PT, SRC_PT).sum((1,3,5))
+    #     # obj = trace[~mask].sum()
+    #     # print(score.max(), merge.max())
+    #     # print(obj, trace[mask].sum())
+
+    #     return -(score * (~mask).float()).clamp(max=100).flatten(1).sum(1) * 0.01

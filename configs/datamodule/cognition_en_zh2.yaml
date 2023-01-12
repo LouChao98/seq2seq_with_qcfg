@@ -1,0 +1,24 @@
+_target_: src.datamodules.tsv_datamodule.TSVDataModule
+
+train_file: ${data_dir}/CoGnition/train_en-zh_bpe.txt
+dev_file: ${data_dir}/CoGnition/valid_en-zh_bpe.txt
+test_file: ${data_dir}/CoGnition/test_en-zh_bpe.txt
+
+copy_mode: "none"
+max_src_len: 60
+vocab_min_freq: 10
+
+# batch_size: 8
+# eval_batch_size: 8 # ${in_debugger:2,6}
+
+use_double_length_bucket: true
+# batch_size: 1000  # 24GB for no decomp
+# eval_batch_size: 600
+batch_size: 2000
+eval_batch_size: 4000
+
+num_workers: ${in_debugger:0,4}
+pin_memory: false
+
+cache_dir: ${data_dir}/cache
+enable_cache: false

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
-from .fixed_stack_models import BeamItems, FixedStack, FixedStackRNNG, StackState
+from .fixed_stack_models import BeamItems, ExpandableStorage, FixedStack, FixedStackRNNG, StackState
 
 
 class FixedInOrderStack(FixedStack):
@@ -203,3 +203,85 @@ class FixedStackInOrderRNNG(FixedStackRNNG):
 
     def _parse_finish_mask(self, beam, action_id, beam_id):
         return action_id == self.action_dict.finish_action()
+
+    def invalid_action_mask_generate(self, beam: BeamItems, max_length, subword_end_mask):
+        action_order = torch.arange(self.num_actions, device=beam.nopen_parens.device)
+
+        nopen_parens = beam.nopen_parens
+        ncons_nts = beam.ncons_nts
+        pointer = beam.stack.pointer
+        top_position = beam.stack.top_position
+        prev_actions = beam.prev_actions()
+        sent_lengths = sent_lengths.unsqueeze(-1)  # add beam dim
+
+        # For in-order, cons_nts is accumuated by the loop of nt->reduce.
+        # Except sentence final, we prohibit reduce to break this loop. Otherwise,
+        # we fall into the state of one element in the stack, which prohibits following
+        # shift (-> no way to escape).
+        #
+        # We instead prohibit nt for sentence final, because we need to close all
+        # incomplete brackets.
+        # This mask is a precondition used both for reduce_mask and reduce_nt
+        # (depending on sentence final or not).
+        pre_nt_reduce_mask = (nopen_parens > self.max_open_nts - 1) + (ncons_nts > self.max_cons_nts - 1)
+
+        prev_pointer = beam.stack.pointer - 1
+        prev_prev_pointer = beam.stack.pointer - 2
+        prev_pointer[prev_pointer < 0] = 0
+        prev_prev_pointer[prev_prev_pointer < 0] = 0
+        prev_is_subword_mask = (beam.stack.pointer > 0) * (subword_end_mask.gather(1, prev_pointer) == 0)
+        prev_is_subword_end_mask = (beam.stack.pointer > 0) * subword_end_mask.gather(1, prev_pointer)
+
+        # reduce_mask[i,j,k]=True means k is a not allowed reduce action for (i,j).
+        reduce_mask = (action_order == self.action_dict.a2i["REDUCE"]).view(1, 1, -1)
+        reduce_mask = (
+            (nopen_parens == 0)
+            + (pre_nt_reduce_mask * (pointer < sent_lengths))
+            +
+            # reduce is only allowed when prev is not subword
+            prev_is_subword_mask
+        ).unsqueeze(-1) * reduce_mask
+
+        finish_mask = (action_order == self.action_dict.finish_action()).view(1, 1, -1)
+        finish_mask = ((nopen_parens != 0) + (top_position != 1)).unsqueeze(-1) * finish_mask
+
+        shift_mask = (action_order == self.action_dict.a2i["SHIFT"]).view(1, 1, -1)
+        shift_mask = (
+            (pointer == sent_lengths)
+            + ((pointer > 0) * (nopen_parens == 0) * prev_is_subword_end_mask)
+            +
+            # when nopen=0, shift accompanies nt, thus requires two.
+            ((nopen_parens == 0) * (top_position >= beam.stack.stack_size - 2))
+            +
+            # otherwise, requires one room.
+            ((nopen_parens > 0) * (top_position >= beam.stack.stack_size - 1))
+        ).unsqueeze(-1) * shift_mask
+
+        nt_mask = (action_order >= self.action_dict.nt_begin_id()).view(1, 1, -1)
+        prev_is_nt = prev_actions >= self.action_dict.nt_begin_id()
+        nt_mask = (
+            prev_is_nt
+            + (top_position == 0)
+            +
+            # prohibit nt version of pre_nt_reduce_mask (reduce is prohibited except empty buffer)
+            (pre_nt_reduce_mask * (pointer == sent_lengths))
+            +
+            # reduce is allowed after nt, so minimal room for stack is 1.
+            (top_position >= beam.stack.stack_size - 1)
+            +
+            # +3 for the same reason as top-down parser; +1 for final finish.
+            (beam.actions.size(2) - beam.actions_pos < (sent_lengths - beam.stack.pointer + beam.nopen_parens + 4))
+            +
+            # shift->nt is prohibited when shifted token is an (unfinished) subword
+            (prev_is_subword_mask * (prev_actions == self.action_dict.a2i["SHIFT"]))
+        ).unsqueeze(-1) * nt_mask
+
+        pad_mask = (action_order == self.action_dict.padding_idx).view(1, 1, -1)
+        finished_mask = (
+            (prev_actions == self.action_dict.finish_action()) + (prev_actions == self.action_dict.padding_idx)
+        ).unsqueeze(-1)
+        beam_width_mask = (
+            torch.arange(beam.beam_size, device=reduce_mask.device).unsqueeze(0) >= beam.beam_widths.unsqueeze(1)
+        ).unsqueeze(-1)
+
+        return reduce_mask + finish_mask + shift_mask + nt_mask + pad_mask + finished_mask + beam_width_mask

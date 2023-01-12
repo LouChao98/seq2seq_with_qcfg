@@ -57,7 +57,7 @@ class MultiTask(PrTask):
             self.sizes = sizes
         else:
             assert self.sizes == sizes
-        return torch.cat(lambdas, dim=1)
+        return torch.cat(lambdas, dim=1).detach().requires_grad_()
 
     def process_constraint(self, pred, constraints):
         output = []
@@ -69,10 +69,8 @@ class MultiTask(PrTask):
     def build_constrained_dist(self, pred, lambdas, constraints, entropy_reg=None):
         pred = copy(pred)
         offset = 0
-        for task, size in zip(self.tasks, self.sizes):
-            dist = task.build_constrained_dist(
-                pred, lambdas[:, offset : offset + size], constraints[:, offset : offset + size], None
-            )
+        for task, size, constraint in zip(self.tasks, self.sizes, constraints):
+            dist = task.build_constrained_dist(pred, lambdas[:, offset : offset + size], constraint, None)
             pred.dist = dist
             offset += size
         if entropy_reg is not None and entropy_reg > 0:
@@ -87,15 +85,13 @@ class MultiTask(PrTask):
         return dist
 
     def calc_e(self, pred, constraints):
-        offset = 0
         e = []
-        for task, size in zip(self.tasks, self.sizes):
-            e.append(task.calc_e(pred, constraints[:, offset : offset + size]))
-            offset += size
+        for task, size, constraint in zip(self.tasks, self.sizes, constraints):
+            e.append(task.calc_e(pred, constraint))
         return torch.cat(e, dim=1)
 
     def lambda_simplex_constraint(self):
-        c = [task.lambda_simplex_constraint for task in self.tasks]
+        c = [task.lambda_simplex_constraint() for task in self.tasks]
         assert all(item is None for item in c)
 
 

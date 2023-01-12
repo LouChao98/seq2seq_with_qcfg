@@ -9,3 +9,6 @@ rule_soft_constraint:
 rule_soft_constraint_solver:
   _target_: src.models.posterior_regularization.linear.UngroundedPRLineSearchSolver
   b: 2
+
+pt_span_range: [1, 1000]
+nt_span_range: [1, 1000]

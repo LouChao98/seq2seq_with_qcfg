@@ -252,7 +252,14 @@ class DecompBase:
             output["span"] = spans
 
         if need_event:
-            output["event"] = {k: params[k].grad for k in self.KEYS} | {"trace": trace.grad}
+            grads = {}
+            for k, is_in_log_space in zip(self.KEYS, self.LOGSPACE):
+                if is_in_log_space:
+                    grads[k] = params[k].grad.detach()
+                else:
+                    grads[k] = (params[k].grad * self.params[k]).detach()
+
+            output["event"] = grads | {"trace": trace.grad}
 
         return output
 
@@ -467,9 +474,10 @@ class DecompSamplerBase:
         preds = []
         for b in range(self.batch_size):
             samples, types, status = self.sample_impl(*self.get_params(b), **self.get_kwargs())
-            if (cnt := sum(item == _REACHLIMIT for item in status)) > 0:
+            half = len(status) // 2
+            if (cnt := sum(item == _REACHLIMIT for item in status)) > half:
                 log.warning(f"{cnt} trials are terminated due to REACHLIMIT")
-            if (cnt := sum(item == _SONMASK for item in status)) > 0:
+            if (cnt := sum(item == _SONMASK for item in status)) > half:
                 log.warning(f"{cnt} trials are terminated due to SONMASK")
             samples = [
                 (sample, type_)

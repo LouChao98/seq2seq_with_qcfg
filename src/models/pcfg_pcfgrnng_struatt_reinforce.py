@@ -1,5 +1,6 @@
 import logging
 import operator
+import os
 from copy import deepcopy
 from functools import partial
 from io import StringIO
@@ -8,6 +9,7 @@ from typing import Any, List, Optional
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from hydra.utils import instantiate
 from pytorch_memlab import profile_every
 
@@ -270,6 +272,7 @@ class PcfgPcfgrnngReinforceModel(GeneralSeq2SeqEnd2EndStruAttModule):
     def forward_generate(self, batch, get_baseline=False):
         # actually predict the target sequence
         src_ids, src_lens = batch["src_ids"], batch["src_lens"]
+        tgt_ids, tgt_lens = batch["tgt_ids"], batch["tgt_lens"]
 
         dist = self.parser(src_ids, src_lens)
         term_m = dist.marginal["term"]
@@ -282,8 +285,26 @@ class PcfgPcfgrnngReinforceModel(GeneralSeq2SeqEnd2EndStruAttModule):
         tgt_pred = self.decoder.prepare_sampler(tgt_pred, batch["src"], src_ids)
         y_preds = self.decoder.generate(tgt_pred)
 
+        self.rnng.setup_nt(tgt_pred.nt_features, tgt_pred.nt_num_nodes)
+        self.rnng.generate(batch_size=len(src_ids), max_length=30, beam_size=5, device=src_ids.device)
+
         if get_baseline:
-            # TODO this always be ppl. but scores_on_predicted can be others
+
+            t = self.decoder.observe_x(tgt_pred, tgt_ids, tgt_lens)
+            self.rnng.setup_nt(t.nt_features, t.nt_num_nodes)
+            action_ids, stack_size_argmax = self.rnng.make_batch(t.dist.decoded, tgt_lens, tgt_ids.device)
+            ll, _, _, _ = self.rnng(tgt_ids, action_ids, max(stack_size_argmax))
+            rnng_baseline_ppl = np.exp(ll.detach().cpu().numpy() / np.array(tgt_lens)).tolist()
+
+            pb = [item[0] for item in y_preds]
+            pb = self.datamodule.collator(pb)
+            pb = self.datamodule.transfer_batch_to_device(pb, src_ids.device, 0)
+            pt = self.decoder.observe_x(tgt_pred, pb["tgt_ids"], pb["tgt_lens"])
+            self.rnng.setup_nt(pt.nt_features, pt.nt_num_nodes)
+            action_ids, stack_size_argmax = self.rnng.make_batch(pt.dist.decoded, pb["tgt_lens"], src_ids.device)
+            ll, _, _, _ = self.rnng(pb["tgt_ids"], action_ids, max(stack_size_argmax))
+            rnng_ppl = np.exp(ll.detach().cpu().numpy() / np.array(pb["tgt_lens"])).tolist()
+
             observed = {
                 "x": batch["tgt_ids"],
                 "lengths": batch["tgt_lens"],
@@ -291,11 +312,19 @@ class PcfgPcfgrnngReinforceModel(GeneralSeq2SeqEnd2EndStruAttModule):
                 "nt_copy": batch.get("copy_phrase"),
             }
             tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
-            baseline = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(batch["tgt_lens"])).tolist()
+            baseline = np.exp(tgt_pred.dist.nll.detach().cpu().numpy() / np.array(tgt_lens)).tolist()
         else:
+            rnng_baseline_ppl = None
+            rnng_ppl = None
             baseline = None
 
-        return {"pred": [item[0] for item in y_preds], "score": [item[1] for item in y_preds], "baseline": baseline}
+        return {
+            "pred": [item[0] for item in y_preds],
+            "score": [item[1] for item in y_preds],
+            "rnng_score": rnng_ppl,
+            "baseline": baseline,
+            "rnng_baseline": rnng_baseline_ppl,
+        }
 
     def print_prediction(self, batch, handler=None, batch_size=1):
         training_state = self.training
@@ -314,6 +343,71 @@ class PcfgPcfgrnngReinforceModel(GeneralSeq2SeqEnd2EndStruAttModule):
             handler("Alignment:\n" + "\n".join(map(lambda x: f"  {x[0]} - {x[1]} {x[2]}", alg)))
             handler("=" * 79)
         self.train(training_state)
+
+    def save_detailed_predictions(self, outputs, path=None):
+        if path is None:
+            path = "detailed_predict_on_test.txt"
+            if os.path.exists(path):
+                for i in range(2, 1000):
+                    path = f"detailed_predict_on_test_{i}.txt"
+                    if not os.path.exists(path):
+                        break
+        log.info(f"Writing to {os.path.abspath(path)}")
+        if dist.is_initialized() and (ws := dist.get_world_size()):
+            if len(self.datamodule.data_test) % ws != 0:
+                log.warning(
+                    "Do NOT report the above metrics because you are using"
+                    "DDP and the size of the testset is odd, which means"
+                    "there is one sample counted twice due to the"
+                    "DistributedSampler. Run evaluation on the"
+                    "predict_on_test.txt file"
+                )
+            merged = [None] * ws
+            dist.all_gather_object(merged, outputs)
+            if self.global_rank == 0:
+                outputs = sum(merged, [])
+
+        if self.global_rank == 0:
+            preds = []
+            for inst in outputs:
+                preds_batch = inst["detailed"]
+                id_batch = inst["id"].tolist()
+                preds.extend(zip(id_batch, preds_batch))
+            preds.sort(key=lambda x: x[0])
+
+            # remove duplicate
+            to_remove = []
+            for i in range(1, len(preds)):
+                if preds[i - 1][0] == preds[i][0]:
+                    to_remove.append(i)
+            for i in reversed(to_remove):
+                del preds[i]
+
+            # check missing
+            if not (preds[0][0] == 0 and preds[-1][0] == len(preds) - 1):
+                log.warning(f"There are some missing examples. Last id={preds[-1][0]}. Len={len(preds)}")
+
+            with open(path, "w") as f:
+                for id_, inst in preds:
+                    # f.write(f"{id_}:\t")
+                    f.write(">>> [Parse on gold target sequence] " + ">" * 33)
+                    f.write("\n")
+                    f.write(f"Score:\t{inst[1]}")
+                    f.write("\n")
+                    f.write(f"Rnng Score:\t{inst[4]}")
+                    f.write("\n")
+                    f.write(inst[0])
+                    f.write("\n")
+                    f.write("-" * 70)
+                    f.write("\n")
+                    f.write(f"Score:\t{inst[3]}")
+                    f.write("\n")
+                    f.write(f"Rnng Score:\t{inst[5]}")
+                    f.write("\n")
+                    f.write(inst[2])
+                    f.write("\n")
+                    f.write("<<< [Parse on predicted sequence] " + "<" * 35)
+                    f.write("\n\n")
 
     def on_train_epoch_start(self) -> None:
         return super().on_train_epoch_start()
@@ -425,6 +519,7 @@ class PcfgPcfgrnngReinforceModel(GeneralSeq2SeqEnd2EndStruAttModule):
             self.print_prediction(batch, handler=partial(print, file=str_io), batch_size=None)
             parses_on_given = split_prediction_string(str_io.getvalue())
             scores_on_given = preds["baseline"]
+            rnng_scores_on_given = preds["rnng_baseline"]
             parses_on_predicted = []
             for pred in preds["pred"]:
                 _batch = self.datamodule.collator([pred])
@@ -433,10 +528,32 @@ class PcfgPcfgrnngReinforceModel(GeneralSeq2SeqEnd2EndStruAttModule):
                 self.print_prediction(_batch, handler=partial(print, file=str_io))
                 parses_on_predicted.extend(split_prediction_string(str_io.getvalue()))
             scores_on_predicted = preds["score"]
+            rnng_scores_on_predicted = preds["rnng_score"]
             assert (
-                len(parses_on_given) == len(scores_on_given) == len(parses_on_predicted) == len(scores_on_predicted)
-            ), (len(parses_on_given), len(scores_on_given), len(parses_on_predicted), len(scores_on_predicted))
-            detailed = list(zip(parses_on_given, scores_on_given, parses_on_predicted, scores_on_predicted))
+                len(parses_on_given)
+                == len(scores_on_given)
+                == len(parses_on_predicted)
+                == len(scores_on_predicted)
+                == len(rnng_scores_on_given)
+                == len(rnng_scores_on_predicted)
+            ), (
+                len(parses_on_given),
+                len(scores_on_given),
+                len(parses_on_predicted),
+                len(scores_on_predicted),
+                len(rnng_scores_on_given),
+                len(rnng_scores_on_predicted),
+            )
+            detailed = list(
+                zip(
+                    parses_on_given,
+                    scores_on_given,
+                    parses_on_predicted,
+                    scores_on_predicted,
+                    rnng_scores_on_given,
+                    rnng_scores_on_predicted,
+                )
+            )
         else:
             detailed = None
 

@@ -41,7 +41,7 @@ class UngroundedPRLineSearchSolver:
         if cparams[self.field].ndim != constraint_feature.ndim:
             # TODO: REMOVE DANGEROUS ASSUMPTION
             assert cparams[self.field].shape[2:] == constraint_feature.shape[1:]
-            constraint_feature = constraint_feature.unsqueeze(1)
+            constraint_feature = constraint_feature.unsqueeze(1).expand(cparams[self.field].shape)
         if self.b == 0 and shortcut:
             p = cparams[self.field].clone()
             p[constraint_feature > 0.1] = -1e9

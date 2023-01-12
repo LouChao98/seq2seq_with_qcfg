@@ -3,12 +3,12 @@ import operator
 from functools import partial
 from io import StringIO
 from itertools import chain
+from random import random
 from typing import Any, List, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
-import wandb
 from hydra.utils import instantiate
 from pytorch_lightning.profilers import PassThroughProfiler
 from pytorch_memlab import profile_every
@@ -16,10 +16,12 @@ from torch.autograd import grad
 from torch_scatter import scatter_mean
 from torchmetrics import Metric, MinMetric
 from transformers import AutoModel
+from transformers.models.roformer.modeling_roformer import RoFormerSinusoidalPositionalEmbedding
 
+import wandb
 from src.models.base import ModelBase
-from src.models.posterior_regularization.general import NeqNT, NeqPT
-from src.models.posterior_regularization.pr import compute_pr
+from src.models.posterior_regularization.general import NeqNT, NeqPT, NoManyToOneNT, NoManyToOnePT
+from src.models.posterior_regularization.pr import MultiTask, compute_pr
 from src.models.src_parser.base import SrcParserBase
 from src.models.struct.semiring import LogSemiring
 from src.models.tgt_parser.base import NO_COPY_SPAN, TgtParserBase
@@ -55,13 +57,17 @@ class GeneralSeq2SeqModule(ModelBase):
         load_tgt_parser_from_checkpoint=None,
         param_initializer="xavier_uniform",
         real_val_every_n_epochs=5,
+        visualize_every_n_steps=0,
         export_detailed_prediction=True,
         # extension
         warmup_pcfg=0,
         warmup_qcfg=0,
+        tgt_annealing=None,
         length_calibrate=False,
         pr_pt_neq_reg=0.0,
         pr_nt_neq_reg=0.0,
+        pr_neq_impl=1,
+        pr_args=None,
         noisy_spans_reg=0.0,
         noisy_spans_num=0.0,
         parser_entropy_reg=0.0,
@@ -71,11 +77,14 @@ class GeneralSeq2SeqModule(ModelBase):
         soft_constraint_loss_raml=False,
         mini_target=False,
         mini_pcfg=False,
+        positional_emb_before_tree_enc=False,
     ):
-        # real_val_every_n_epochs = 1
         assert warmup_pcfg <= warmup_qcfg
         self.warmup = warmup_pcfg
         super().__init__()
+        if tgt_annealing is not None:
+            log.warning("Tgt annealing is activated.")
+            self.add_dynamic_cfg("|tgt_annealing", tgt_annealing)
         self.save_hyperparameters(logger=False)
 
     def setup(self, stage: Optional[str] = None, datamodule=None) -> None:
@@ -125,6 +134,15 @@ class GeneralSeq2SeqModule(ModelBase):
         if self.hparams.mini_pcfg:
             self.dummy_node_emb = nn.Parameter(torch.randn(3, self.tree_encoder.get_output_dim()))
 
+        if self.datamodule.hparams.get("emphasize"):
+            assert self.embedding is not None
+            self.emphasize_emb = nn.Embedding(3, self.embedding.weight.shape[1])
+
+        if self.hparams.positional_emb_before_tree_enc:
+            self.position_emb = RoFormerSinusoidalPositionalEmbedding(
+                datamodule.hparams.get("max_src_len", 60), self.encoder.get_output_dim()
+            )
+
         self.setup_patch(stage, self.datamodule)
 
         if wandb.run is not None:
@@ -155,8 +173,8 @@ class GeneralSeq2SeqModule(ModelBase):
                     continue
                 if param.dim() > 1:
                     init_func(param)
-                elif "norm" not in name.lower():
-                    nn.init.zeros_(param)
+                # elif "norm" not in name.lower():
+                #     nn.init.zeros_(param)
 
         if self.hparams.load_src_parser_from_checkpoint is not None:
             ...
@@ -173,6 +191,9 @@ class GeneralSeq2SeqModule(ModelBase):
         x = []
         if self.embedding is not None:
             h = self.embedding(src_ids)
+            if hasattr(self, "emphasize_emb"):
+                eh = self.emphasize_emb(batch["emphasize"])
+                h = h + eh
             x.append(h)
         if self.pretrained is not None:
             h = self.pretrained(**batch["transformer_inputs"])[0]
@@ -189,7 +210,17 @@ class GeneralSeq2SeqModule(ModelBase):
             x.append(out)
         x = torch.cat(x, dim=-1) if len(x) > 1 else x[0]
         x = self.encoder(x, src_lens)
+
+        if self.hparams.positional_emb_before_tree_enc:
+            pos_emb = self.position_emb(x.shape[1]).unsqueeze(0)
+            x = x + pos_emb
         return x
+
+    def on_train_epoch_start(self) -> None:
+        super().on_train_epoch_start()
+        if self.hparams.tgt_annealing is not None:
+            self.decoder.temperature = self.hparams.tgt_annealing
+            self.log("train/tgt_annealing", self.hparams.tgt_annealing)
 
     @report_ids_when_err
     @profile_every(5, enable=False)
@@ -215,6 +246,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
         with self.profiler.profile("src_encoding"):
             x = self.encode(batch)
+            # x = x.detach().requires_grad_()  # For debug: cross instance reference
             # span labels are discarded (set to -1)
             node_features, node_spans = self.tree_encoder(x, src_lens, spans=src_spans)
 
@@ -278,14 +310,27 @@ class GeneralSeq2SeqModule(ModelBase):
                 logging_vals["noisy_spans"] = l
                 noisy_span_loss = e * l
 
-            if (e := self.hparams.pr_pt_neq_reg) > 0:
-                l = compute_pr(tgt_pred, None, NeqPT())
-                logging_vals["pr_neq_pt"] = l
+            pr_args = {} if self.hparams.pr_args is None else self.hparams.pr_args
+
+            if self.hparams.pr_neq_impl == 1:
+                neq_pt, neq_nt = NeqPT, NeqNT
+            else:
+                neq_pt, neq_nt = NoManyToOnePT, NoManyToOneNT
+
+            if (e1 := self.hparams.pr_pt_neq_reg) > 0 and (e2 := self.hparams.pr_nt_neq_reg) > 0 and e1 == e2:
+                l = compute_pr(tgt_pred, (None, None), MultiTask(neq_pt(), neq_nt()), **pr_args)
+                logging_vals["pr_neq_pt_nt"] = l
                 pr_neq_pt_reg = l * e
-            if (e := self.hparams.pr_nt_neq_reg) > 0:
-                l = compute_pr(tgt_pred, None, NeqNT())
-                logging_vals["pr_neq_nt"] = l
-                pr_neq_nt_reg = l * e
+
+            else:
+                if (e := self.hparams.pr_pt_neq_reg) > 0:
+                    l = compute_pr(tgt_pred, None, neq_pt(), **pr_args)
+                    logging_vals["pr_neq_pt"] = l
+                    pr_neq_pt_reg = l * e
+                if (e := self.hparams.pr_nt_neq_reg) > 0:
+                    l = compute_pr(tgt_pred, None, neq_nt(), **pr_args)
+                    logging_vals["pr_neq_nt"] = l
+                    pr_neq_nt_reg = l * e
 
             if (prior_alignment := batch.get("prior_alignment")) is not None:
                 prior_alignment = prior_alignment.transpose(1, 2)
@@ -324,6 +369,16 @@ class GeneralSeq2SeqModule(ModelBase):
                 # TODO refactor this
                 tgt_loss = tgt_loss + tgt_pred.vq_commit_loss
                 logging_vals["commit_loss"] = tgt_pred.vq_commit_loss
+
+            if hasattr(tgt_pred, "score_reg_loss"):
+                tgt_loss = tgt_loss + tgt_pred.score_reg_loss
+                logging_vals["score_reg_loss"] = tgt_pred.score_reg_loss
+
+            if hasattr(tgt_pred, "loss"):
+                tgt_loss = tgt_loss + tgt_pred.loss
+
+            if hasattr(tgt_pred, "log"):
+                logging_vals.update(tgt_pred.log)
 
         return {
             "decoder": tgt_loss
@@ -375,6 +430,8 @@ class GeneralSeq2SeqModule(ModelBase):
         if self.current_epoch < self.hparams.warmup_pcfg:
             node_features = apply_to_nested_tensor(node_features, lambda x: torch.zeros_like(x))
 
+        # self.decoder.use_fast = False
+
         tgt_pred = self.decoder(node_features, node_spans)
         tgt_pred = self.decoder.observe_x(tgt_pred, **observed)
 
@@ -399,6 +456,8 @@ class GeneralSeq2SeqModule(ModelBase):
         for snt, tgt_spans_inst in zip(batch["tgt"], tgt_spans):
             tree = annotate_snt_with_brackets(snt, tgt_spans_inst)
             tgt_annotated.append(tree)
+
+        # self.decoder.use_fast = True
 
         num_pt_spans = max(len(item) for item in pt_spans)
         num_nt_spans = max(len(item) for item in nt_spans)
@@ -502,7 +561,14 @@ class GeneralSeq2SeqModule(ModelBase):
         self.train(training_state)
 
     def training_step(self, batch: Any, batch_idx: int, *, forward_prediction=None):
+        # self.print(f'{len(batch["src_lens"])} - {max(batch["src_lens"])} - {max(batch["tgt_lens"])}')
+
         output = forward_prediction if forward_prediction is not None else self(batch)
+
+        # # For debug: cross instance reference
+        # output['decoder'][2].backward()
+        # g = output['runtime']['seq_encoded'].grad.flatten(1).sum(1)
+
         loss_decoder = output["decoder"].mean()
         loss_encoder = output["encoder"].mean()
         loss = loss_encoder + loss_decoder
@@ -515,7 +581,10 @@ class GeneralSeq2SeqModule(ModelBase):
         if "log" in output:
             self.log_dict({"train/" + k: v.mean() for k, v in output["log"].items()})
 
-        if batch_idx == 0:
+        if batch_idx == 0 or (
+            self.hparams.visualize_every_n_steps > 0
+            and (self.trainer.global_step + 1) % self.hparams.visualize_every_n_steps == 0
+        ):
             self.print_prediction(batch)
 
         return {"loss": loss}
@@ -532,7 +601,9 @@ class GeneralSeq2SeqModule(ModelBase):
         loss = loss_encoder + loss_decoder
         self.val_metric(output["tgt_nll"], batch["tgt_lens"])
 
-        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0 and self.current_epoch > self.warmup:
+        if self.trainer.sanity_checking or (
+            (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0 and self.current_epoch >= self.warmup
+        ):
             predicted = self.test_step(batch, batch_idx=None)
         else:
             predicted = {}
@@ -551,7 +622,9 @@ class GeneralSeq2SeqModule(ModelBase):
         self.print("val/epoch", str(self.current_epoch + 1))
         self.print("val/ppl", str(ppl))
 
-        if (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0 and self.current_epoch > self.warmup:
+        if self.trainer.sanity_checking or (
+            (self.current_epoch + 1) % self.hparams.real_val_every_n_epochs == 0 and self.current_epoch > self.warmup
+        ):
             acc = self.test_metric.compute()
             if not isinstance(acc, dict):
                 acc = {"result": acc}
@@ -598,7 +671,9 @@ class GeneralSeq2SeqModule(ModelBase):
             parses_on_given = split_prediction_string(str_io.getvalue())
             scores_on_given = preds["baseline"]
             parses_on_predicted = []
-            for pred in preds["pred"]:
+            for i, pred in enumerate(preds["pred"]):
+                if (emp := batch.get("emphasize")) is not None:
+                    pred["emp"] = emp[i, : len(pred["src"])]
                 _batch = self.datamodule.collator([pred])
                 _batch = self.datamodule.transfer_batch_to_device(_batch, device, 0)
                 str_io = StringIO()

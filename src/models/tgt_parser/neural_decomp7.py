@@ -8,18 +8,23 @@ from supar.modules.affine import Biaffine, Triaffine
 
 from ..components.common import MultiResidualLayer
 from ..struct.decomp7 import Decomp7, Decomp7Sampler
+from ..struct.decomp7_fast import Decomp7Fast, Decomp7FastSampler
 from .base import TgtParserBase, TgtParserPrediction
 
 log = logging.getLogger(__file__)
 
 
-def normalize(t: torch.Tensor):
-    shape = t.shape
-    return t.flatten(-2).softmax(-1).view(shape)
-
-
 class NeuralDecomp7TgtParser(TgtParserBase):
-    def __init__(self, cpd_rank=32, vocab=100, dim=256, num_layers=3, src_dim=256, **kwargs):
+    def __init__(
+        self,
+        cpd_rank=32,
+        vocab=100,
+        dim=256,
+        num_layers=3,
+        src_dim=256,
+        use_fast=False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
 
         self.vocab = vocab
@@ -27,6 +32,7 @@ class NeuralDecomp7TgtParser(TgtParserBase):
         self.src_dim = src_dim
         self.num_layers = num_layers
         self.cpd_rank = cpd_rank
+        self.use_fast = use_fast
 
         self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -94,19 +100,16 @@ class NeuralDecomp7TgtParser(TgtParserBase):
         roots = F.log_softmax(roots, 1)
 
         # A->BC
+        reg = 0
         all_node_emb = torch.cat([nt_node_emb, pt_node_emb], 1)
-        # all_state_emb = torch.cat([nt_state_emb, pt_state_emb], 1)
-        rule_head = self.rule_mlp_parent(nt_emb).softmax(-1)
+        rule_head = self.rule_mlp_parent(nt_emb)
+        if self.score_regularziation > 0:
+            reg += torch.norm(rule_head)
+        rule_head = rule_head.softmax(-1)
 
         i = self.root_mlp_i(nt_node_emb)
         j = self.root_mlp_j(all_node_emb)
         k = self.root_mlp_k(all_node_emb)
-        rule_slr = torch.einsum(
-            "rab,xia,xjkb->xrijk",
-            self.rijk_weight,
-            F.leaky_relu(i),
-            F.leaky_relu(j[:, :, None] + k[:, None, :]),
-        )
 
         num = max(self.nt_states, self.pt_states)
         if num != self.pt_states:
@@ -121,6 +124,14 @@ class NeuralDecomp7TgtParser(TgtParserBase):
         rj_b_pt = self.rj_b_pt(j[:, nt_num_nodes:], pt_state_emb)
         rk_c_nt = self.rk_c_nt(k[:, :nt_num_nodes], nt_state_emb)
         rk_c_pt = self.rk_c_pt(k[:, nt_num_nodes:], pt_state_emb)
+
+        if self.score_regularziation > 0:
+            reg += torch.norm(rj_b_nt) + torch.norm(rj_b_pt) + torch.norm(rk_c_nt) + torch.norm(rk_c_pt)
+            rj_b_nt = rj_b_nt.clone()
+            rj_b_pt = rj_b_pt.clone()
+            rk_c_nt = rk_c_nt.clone()
+            rk_c_pt = rk_c_pt.clone()
+
         if self.cpd_rank == 1:
             rj_b_nt = rj_b_nt.unsqueeze(1)
             rj_b_pt = rj_b_pt.unsqueeze(1)
@@ -132,12 +143,28 @@ class NeuralDecomp7TgtParser(TgtParserBase):
         elif num != self.nt_states:
             rj_b_nt[..., self.nt_states :] = self.neg_huge
             rk_c_nt[..., self.nt_states :] = self.neg_huge
-        rj_b_nt = rj_b_nt.log_softmax(-1)
-        rj_b_pt = rj_b_pt.log_softmax(-1)
-        rk_c_nt = rk_c_nt.log_softmax(-1)
-        rk_c_pt = rk_c_pt.log_softmax(-1)
+        if self.use_fast:
+            rj_b_nt = rj_b_nt.softmax(-1)
+            rj_b_pt = rj_b_pt.softmax(-1)
+            rk_c_nt = rk_c_nt.softmax(-1)
+            rk_c_pt = rk_c_pt.softmax(-1)
+        else:
+            rj_b_nt = rj_b_nt.log_softmax(-1)
+            rj_b_pt = rj_b_pt.log_softmax(-1)
+            rk_c_nt = rk_c_nt.log_softmax(-1)
+            rk_c_pt = rk_c_pt.log_softmax(-1)
         rule_left = torch.cat([rj_b_nt, rj_b_pt], dim=2)
         rule_right = torch.cat([rk_c_nt, rk_c_pt], dim=2)
+
+        rule_slr = torch.einsum(
+            "rab,xia,xjkb->xrijk",
+            self.rijk_weight,
+            F.leaky_relu(i),
+            F.leaky_relu(j[:, :, None] + k[:, None, :]),
+        )
+        if self.score_regularziation > 0:
+            reg += torch.norm(rule_slr)
+            rule_slr = rule_slr.clone()
 
         # fmt: off
         nt_mask = torch.arange(nt_num_nodes, device=device).unsqueeze(0) \
@@ -185,23 +212,30 @@ class NeuralDecomp7TgtParser(TgtParserBase):
             nt_states=self.nt_states,
             nt_nodes=nt_spans,
             nt_num_nodes=nt_num_nodes,
+            nt_features=nt_node_features,
             pt=pt,
             pt_states=self.pt_states,
             pt_nodes=pt_spans,
             pt_num_nodes=pt_num_nodes,
+            pt_features=pt_node_features,
             params=params,
             device=device,
         )
+
+        if self.score_regularziation > 0:
+            pred.score_reg_loss = reg
         return pred
 
     def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:
         pred = super().observe_x(pred, x, lengths, inplace, **kwargs)
-        pred.dist = Decomp7(pred.posterior_params, pred.lengths, **pred.common())
+        pred.dist = (Decomp7Fast if self.use_fast else Decomp7)(pred.posterior_params, pred.lengths, **pred.common())
         return pred
 
     def prepare_sampler(self, pred: TgtParserPrediction, src, src_ids, inplace=True) -> TgtParserPrediction:
         pred = super().prepare_sampler(pred, src, src_ids, inplace)
-        pred.sampler = Decomp7Sampler(pred.params, **pred.common(), **self.sampler_common())
+        pred.sampler = (Decomp7FastSampler if self.use_fast else Decomp7Sampler)(
+            pred.params, **pred.common(), **self.sampler_common()
+        )
         return pred
 
     def post_process_nt_constraint(self, constraint, device):

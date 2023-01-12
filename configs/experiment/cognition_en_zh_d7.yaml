@@ -1,0 +1,46 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  # - /model/decoder/constraint: fp_hard_sh
+  - override /datamodule: cognition_en_zh
+  - override /model: pcfg_pcfg_reinforce
+  - override /model/parser: tnpcfg_fast
+  - override /model/decoder: decomp7
+  - override /model/test_metric: sbleu_zh
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "cognition_en_zh"
+
+trainer:
+  max_epochs: 20
+  accumulate_grad_batches: 16
+  gradient_clip_val: 3
+  max_time: "01:16:00:00"
+
+datamodule:
+  copy_mode: none
+  force_src_same_length: true
+
+model:
+  real_val_every_n_epochs: 30
+
+  decoder:
+    use_fast: true
+    nt_states: 14
+    pt_states: 14
+    use_copy: false
+    generation_max_length: 30
+    generation_num_samples: 100
+
+logger:
+  wandb:
+    project: "cognition_en_zh"

@@ -1,8 +1,6 @@
 import logging
 import math
 import random
-import warnings
-from collections import defaultdict
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass
@@ -14,7 +12,6 @@ import torch.nn as nn
 from hydra.utils import instantiate
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
-from vector_quantize_pytorch import VectorQuantize
 
 from src.datamodules.datamodule import _DataModule
 from src.utils.fn import apply_to_nested_tensor
@@ -170,8 +167,10 @@ class TgtParserBase(nn.Module):
         rule_soft_constraint_solver=None,
         rule_reweight_constraint=None,
         rule_reweight_test_only=False,
+        simple_rl_loss=False,
         score_normalization_method="none",
         score_normalization_scale=1.0,
+        score_regularziation=0.0,
         generation_criteria: str = "ppl",
         generation_max_length: int = 40,
         generation_max_actions: int = 80,
@@ -195,8 +194,11 @@ class TgtParserBase(nn.Module):
         self.rule_reweight_constraint: Optional[RuleConstraintBase] = instantiate(rule_reweight_constraint)
         self.rule_reweight_test_only = rule_reweight_test_only
 
+        self.simple_rl_loss = simple_rl_loss
+
         self.score_normalization_method = score_normalization_method
         self.score_normalization_scale = score_normalization_scale
+        self.score_regularziation = score_regularziation
 
         assert generation_criteria in ("ppl", "likelihood", "contrastive", "freq", "none")
 
@@ -225,7 +227,7 @@ class TgtParserBase(nn.Module):
             score = self.score_normalization_scale * score
 
         elif self.score_normalization_method == "clamp":
-            score = uni_dir_differentiable_clamp(score - score.mean(dims, keepdim=True), -5, 5)
+            score = uni_dir_differentiable_clamp(score - score.mean(dims, keepdim=True), -20, 20)
         elif self.score_normalization_method == "none":
             pass
         else:
@@ -262,12 +264,22 @@ class TgtParserBase(nn.Module):
         return self.rule_soft_constraint_solver(pred, constraint_feature)
 
     def get_rl_loss(self, pred: TgtParserPrediction, ent_reg):
+        if self.simple_rl_loss:
+            reward = self.rule_soft_constraint.get_weight_from_pred(pred)
+            if "rule" in pred.dist.params:
+                dist = pred.dist.spawn(params={"rule": pred.dist.params["rule"] + reward})
+            else:
+                dist = pred.dist.spawn(params={"slr": pred.dist.params["slr"] * reward.exp().unsqueeze(1)})
+            return dist.nll
         assert ent_reg > 0, "model.decoder_entropy_reg should be > 0"
         # log pow(partition, 1/(len-1))
         partition = pred.dist.partition / (torch.tensor(pred.lengths, device=pred.device) - 1)
         reward = self.rule_soft_constraint.get_weight_from_pred(pred)
         reward = reward + partition[:, None, None, None] - np.log(ent_reg)
-        dist = pred.dist.spawn(params={"rule": pred.dist.params["rule"] + reward})
+        if "rule" in pred.dist.params:
+            dist = pred.dist.spawn(params={"rule": pred.dist.params["rule"] + reward})
+        else:
+            dist = pred.dist.spawn(params={"slr": pred.dist.params["slr"] * reward.exp().unsqueeze(1)})
         return dist.nll
 
     def get_raml_loss(self, pred: TgtParserPrediction):
@@ -438,6 +450,28 @@ class TgtParserBase(nn.Module):
             preds_.append(expanded_batch)
         return preds_
 
+    def _get_dataloader(self, batch):
+        if hasattr(self.datamodule, "get_batch_sampler"):
+            batch_sampler = self.datamodule.get_batch_sampler(batch, "test")
+        else:
+            batch_sampler = None
+        if batch_sampler is not None:
+            loader = DataLoader(
+                dataset=batch,
+                batch_sampler=batch_sampler,
+                collate_fn=self.datamodule.collator,
+                num_workers=self.datamodule.hparams.get("num_workers", 0),
+            )
+        else:
+            batch_size = self.generation_ppl_batch_size
+            loader = DataLoader(
+                dataset=batch,
+                batch_size=batch_size,
+                collate_fn=self.datamodule.collator,
+                num_workers=self.datamodule.hparams.get("num_workers", 0),
+            )
+        return loader
+
     @torch.no_grad()
     def choose_samples_by_ppl(self, preds, pred: TgtParserPrediction, **kwargs):
 
@@ -447,13 +481,7 @@ class TgtParserBase(nn.Module):
         new_preds = []
         pred = copy(pred).clear()
         for bidx, preds_batch in enumerate(preds):
-            batch_size = pred.batch_size if self.generation_ppl_batch_size is None else self.generation_ppl_batch_size
-            loader = DataLoader(
-                dataset=preds_batch,
-                batch_size=batch_size,
-                collate_fn=self.datamodule.collator,
-                num_workers=self.datamodule.hparams.get("num_workers", 0),
-            )
+            loader = self._get_dataloader(preds_batch)
             ppl = np.full((len(preds_batch),), 1e9)
 
             for batch in loader:
@@ -488,8 +516,7 @@ class TgtParserBase(nn.Module):
         new_preds = []
         pred = copy(pred).clear()
         for bidx, preds_batch in enumerate(preds):
-            batch_size = pred.batch_size if self.generation_ppl_batch_size is None else self.generation_ppl_batch_size
-            loader = DataLoader(dataset=preds_batch, batch_size=batch_size, collate_fn=self.datamodule.collator)
+            loader = self._get_dataloader(preds_batch)
             nll = np.full((len(preds_batch),), 1e9)
 
             for batch in loader:
@@ -520,8 +547,7 @@ class TgtParserBase(nn.Module):
         new_preds = []
         pred = copy(pred).clear()
         for bidx, preds_batch in enumerate(preds):
-            batch_size = pred.batch_size if self.generation_ppl_batch_size is None else self.generation_ppl_batch_size
-            loader = DataLoader(dataset=preds_batch, batch_size=batch_size, collate_fn=self.datamodule.collator)
+            loader = self._get_dataloader(preds_batch)
             criteria = np.full((len(preds_batch),), 1e9)
 
             for batch in loader:

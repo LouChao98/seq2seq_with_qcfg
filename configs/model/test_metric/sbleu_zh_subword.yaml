@@ -1,0 +1,3 @@
+_target_: src.utils.metric.SacreBLEUScore
+lang: zh
+has_subword: true

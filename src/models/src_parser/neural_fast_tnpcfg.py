@@ -107,8 +107,14 @@ class NeuralFastTNPCFGSrcParser(SrcParserBase):
     def marginals(self, x, lengths, dist: Optional[Decomp1Fast] = None, extra_scores=None):
         raise NotImplementedError
 
+    @torch.enable_grad()
     def sample(self, x, lengths, dist: Optional[Decomp1Fast] = None, extra_scores=None):
-        raise NotImplementedError
+        if dist is None:
+            dist = self(x, lengths, extra_scores)
+
+        output = dist.sample_one(need_span=True, need_event=True)
+        logprobs = dist.score(output["event"])
+        return output, logprobs - dist.partition
 
     def gumbel_sample(self, x, lengths, temperature, dist: Optional[Decomp1Fast] = None, extra_scores=None):
         raise NotImplementedError

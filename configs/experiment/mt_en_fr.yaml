@@ -1,10 +1,8 @@
 # @package _global_
 
 defaults:
-  # - /model/decoder/constraint: fp_hard_sh
   - override /datamodule: mt_en_fr
   - override /model: pcfg_pcfg_reinforce
-  # - override /model/decoder: decomp1_skeleton
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -29,6 +27,8 @@ model:
     use_copy: false
     generation_max_length: 30
     generation_num_samples: 100
+    generation_ppl_batch_size: 4
+
   optimizer:
     args:
       lr: 1.0e-3

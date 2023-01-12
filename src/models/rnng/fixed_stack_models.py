@@ -434,8 +434,8 @@ class BeamItems(ExpandableStorage):
         super(BeamItems, self).__init__()
         self.batch_size = stack.batch_size
         self.beam_size = stack.beam_size
-        self.stack = stack
-        self.stack_state = stack_state
+        self.stack: FixedStack = stack
+        self.stack_state: StackState = stack_state
 
         if particle_filter:
             assert initial_K > 0
@@ -458,9 +458,7 @@ class BeamItems(ExpandableStorage):
 
         self.action_path = ActionPath(self.batch_size, self.beam_size, max_actions, self.beam_widths.device)
 
-        self.finished = self.beam_widths.new_zeros(
-            (self.batch_size, self.beam_size),
-        )
+        self.finished = self.beam_widths.new_zeros((self.batch_size, self.beam_size))
 
         self.attrs = ["gen_ll", "finished"]
 
@@ -636,6 +634,76 @@ class BeamItems(ExpandableStorage):
         self.action_path.add(actions, self.active_idxs())
 
 
+class ActionPathForGeneration(ExpandableStorage):
+    def __init__(self, batch_size, beam_size, max_actions, device):
+        super(ActionPathForGeneration, self).__init__()
+        self.actions = torch.full((batch_size, beam_size, max_actions), -1, dtype=torch.long, device=device)
+        self.shifted_tokens = self.actions.new_zeros(batch_size, max_actions)
+        self.actions_pos = self.actions.new_zeros(batch_size, beam_size)
+        self.attrs = ["actions", "actions_pos", "shifted_tokens"]
+
+    def prev_actions(self):
+        return self.actions.gather(2, self.actions_pos.unsqueeze(-1)).squeeze(-1)  # (batch_size, beam_size)
+
+    def nbest_parses(self, beam_widths, gen_ll, tgt_batch=None):
+        widths = beam_widths.cpu().numpy()
+        actions = self.actions.cpu().numpy()
+        shifted_tokens = self.shifted_tokens.cpu().numpy()
+        actions_pos = self.actions_pos.cpu().numpy()
+
+        def tree_actions(batch, beam):
+            return (actions[batch, beam, 1 : actions_pos[batch, beam] + 1].tolist(), gen_ll[batch, beam].item())
+
+        def batch_actions(batch):
+            return [tree_actions(batch, i) for i in range(widths[batch])]
+
+        def tree_shifted_tokens(batch, beam):
+            return (
+                shifted_tokens[batch, beam, 1 : actions_pos[batch, beam] + 1].tolist(),
+                gen_ll[batch, beam].item(),
+            )
+
+        def batch_shifted_tokens(batch):
+            return [tree_shifted_tokens(batch, i) for i in range(widths[batch])]
+
+        if tgt_batch is not None:
+            return batch_actions(tgt_batch), batch_shifted_tokens(tgt_batch)
+        else:
+            a = [batch_actions(b) for b in range(len(widths))]
+            t = [batch_shifted_tokens(b) for b in range(len(widths))]
+            return a, t
+
+    def move_beams(self, self_idxs, source: "ActionPathForGeneration", source_idxs):
+        self.actions[self_idxs] = source.actions[source_idxs]
+        self.shifted_tokens[self_idxs] = source.shifted_tokens[source_idxs]
+        self.actions_pos[self_idxs] = source.actions_pos[source_idxs]
+
+    def sort_by(self, sort_idx):
+        self.actions = torch.gather(self.actions, 1, sort_idx.unsqueeze(-1).expand(self.actions.size()))
+        self.shifted_tokens = torch.gather(
+            self.shifted_tokens, 1, sort_idx.unsqueeze(-1).expand(self.shifted_tokens.size())
+        )
+        self.actions_pos = torch.gather(self.actions_pos, 1, sort_idx)
+
+    def add(self, actions, tokens, active_idxs):
+        self.actions_pos[active_idxs] += 1
+        self.shifted_tokens[active_idxs + (self.actions_pos[active_idxs],)] = tokens[active_idxs]
+        self.actions[active_idxs + (self.actions_pos[active_idxs],)] = actions[active_idxs]
+
+
+class BeamItemsForGeneration(BeamItems):
+    def __init__(self, stack, stack_state, max_actions=500, beam_is_empty=False, particle_filter=False, initial_K=0):
+        super().__init__(stack, stack_state, max_actions, beam_is_empty, particle_filter, initial_K)
+        self.action_path = ActionPathForGeneration(
+            self.batch_size, self.beam_size, max_actions, self.beam_widths.device
+        )
+
+    def do_action(self, actions, tokens, action_dict):
+        # We need to use "unupdated" action_path for updating stack_state.
+        self.stack_state.update_nt_counts(actions, action_dict, self.action_path)
+        self.action_path.add(actions, tokens, self.active_idxs())
+
+
 class RNNGCell(nn.Module):
     """
     RNNGCell receives next action and input word embedding, do action, and returns next updated hidden states.
@@ -686,6 +754,54 @@ class RNNGCell(nn.Module):
             shifted_embs = torch.gather(word_vecs[shift_batches[0]], 1, shift_idx).squeeze(1).to(new_input.dtype)
             stack.do_shift(shift_batches, shifted_embs, subword_end_mask)
             new_input[shift_batches] = shifted_embs
+
+        if nt_batches[0].size(0) > 0:
+            nt_ids = (actions - self.action_dict.nt_begin_id()).clamp(0)
+            nt_embs = self.nt_emb(nt_ids.unsqueeze(1)).to(new_input.dtype).squeeze(1)[nt_batches]
+            stack.do_nt(nt_batches, nt_embs, nt_ids[nt_batches])
+            new_input[nt_batches] = nt_embs
+
+        if reduce_batches[0].size(0) > 0:
+            children, ch_lengths, reduced_nt, reduced_nt_ids = stack.collect_reduced_children(reduce_batches)
+            if isinstance(self.composition, AttentionComposition):
+                hidden_head = stack.hidden_head(batches=reduce_batches)[:, :, -1]
+                stack_h = self.output(hidden_head)
+            else:
+                stack_h = None
+            new_child, _, _ = self.composition(
+                children, ch_lengths, reduced_nt, reduced_nt_ids, stack_h, reduce_batches[0]
+            )
+            stack.do_reduce(reduce_batches, new_child)
+            new_input[reduce_batches] = new_child.to(new_input.dtype)
+
+        # Input for rnn should be (beam_size, input_size). During beam search, new_input has different size.
+        new_hidden, new_cell = self.stack_rnn(
+            new_input.view(-1, self.input_size), (stack.hidden_head(1), stack.cell_head(1))
+        )
+
+        stack.update_hidden(new_hidden, new_cell)
+
+        return stack.hidden_head()[..., -1]
+
+    def forward_one_step(self, word_vecs, actions, stack, subword_end_mask=None):
+        """
+        Similar to update_stack_rnn.
+
+        :param word_vecs: (batch_size, input_size)
+        :param actions: (batch_size, 1)
+        """
+
+        reduce_batches = (actions == self.action_dict.a2i["REDUCE"]).nonzero(as_tuple=True)
+        nt_batches = (actions >= self.action_dict.nt_begin_id()).nonzero(as_tuple=True)
+        shift_batches = (actions == self.action_dict.a2i["SHIFT"]).nonzero(as_tuple=True)
+
+        new_input = stack.trees.new_zeros(stack.hiddens.size()[:-3] + (self.input_size,))
+
+        # First fill in trees. Then, gather those added elements in a column, which become
+        # the input to stack_rnn.
+        if shift_batches[0].size(0) > 0:
+            stack.do_shift(shift_batches, word_vecs, subword_end_mask)
+            new_input[shift_batches] = word_vecs
 
         if nt_batches[0].size(0) > 0:
             nt_ids = (actions - self.action_dict.nt_begin_id()).clamp(0)
@@ -1221,14 +1337,13 @@ class FixedStackRNNG(nn.Module):
         # reduce_mask[i,j,k]=True means k is a not allowed reduce action for (i,j).
         reduce_mask = (action_order == self.action_dict.a2i["REDUCE"]).view(1, 1, -1)
         reduce_mask = (
+            # root span but there are words unread. can not close the span.
             ((beam.nopen_parens == 1) * (beam.stack.pointer < sent_lengths))
-            +
             # prev is nt => cannot reduce immediately after nt
-            (beam.prev_actions() >= self.action_dict.nt_begin_id())
+            + (beam.prev_actions() >= self.action_dict.nt_begin_id())
             + (beam.stack.top_position < 2)
-            +
             # only shift is allowed when prev is subword
-            prev_is_subword_mask
+            + prev_is_subword_mask
         ).unsqueeze(-1) * reduce_mask
 
         # nt_mask[i,j,k]=True means k is a not allowed nt action for (i,j).
@@ -1236,18 +1351,15 @@ class FixedStackRNNG(nn.Module):
         nt_mask = (
             (beam.nopen_parens >= self.max_open_nts)
             + (beam.ncons_nts >= self.max_cons_nts)
-            +
             # Check the storage of beam.actions, which is bounded beforehand.
             # Theoretically +1 seems sufficient (for rhs); extra +2 is for saving cases
             # where other actions (reduce/shift) are prohibited for some reasons.
-            (beam.actions.size(2) - beam.actions_pos < (sent_lengths - beam.stack.pointer + beam.nopen_parens + 3))
-            +
+            + (beam.actions.size(2) - beam.actions_pos < (sent_lengths - beam.stack.pointer + beam.nopen_parens + 3))
             # Check the storage of fixed stack size (we need minimally two additional
             # elements to process arbitrary future structure).
-            (beam.stack.top_position >= beam.stack.stack_size - 2)
-            +
+            + (beam.stack.top_position >= beam.stack.stack_size - 2)
             # only shift is allowed when prev is subword
-            prev_is_subword_mask
+            + prev_is_subword_mask
         ).unsqueeze(-1) * nt_mask
 
         shift_mask = (action_order == self.action_dict.a2i["SHIFT"]).view(1, 1, -1)
@@ -1351,3 +1463,284 @@ class FixedStackRNNG(nn.Module):
         end_action_mask = action_id == self.action_dict.finish_action()
         end_action_mask = end_action_mask * pre_final_mask
         return end_action_mask
+
+    def generate(
+        self,
+        batch_size,
+        max_length,
+        beam_size,
+        word_beam_size=0,
+        shift_size=0,
+        stack_size_bound=100,
+        device="cpu",
+    ):
+        self.eval()
+
+        if (
+            hasattr(self.rnng.composition, "batch_index")
+            and self.rnng.composition.batch_index.size(0) < batch_size * beam_size
+        ):
+            self.rnng.composition.batch_index = torch.arange(0, batch_size * beam_size, device=device)
+
+        if word_beam_size <= 0:
+            word_beam_size = beam_size
+
+        beam, word_completed_beam = self.build_beam_items_generate(
+            batch_size, max_length, beam_size, shift_size, stack_size_bound=stack_size_bound, device=device
+        )
+
+        parses = [None] * batch_size
+        tokens = [None] * batch_size
+
+        for pointer in range(max_length + 1):
+            self.beam_step_generate(batch_size, max_length, pointer, beam, word_completed_beam, shift_size, device)
+
+        for b in batch_size:
+            parses[b], tokens[b] = beam.nbest_parses(b)
+
+        return parses, tokens
+
+    def build_beam_items_generate(
+        self,
+        batch_size,
+        max_length,
+        beam_size,
+        shift_size,
+        particle=False,
+        K=0,
+        stack_size_bound=100,
+        device="cpu",
+    ):
+        if stack_size_bound <= 0:
+            stack_size = max(100, max_length + 10)
+        else:
+            # stack_size = min(int(max_length*2.5), stack_size_bound)
+            stack_size = min(max_length + 20, stack_size_bound)
+        stack_size = math.ceil(stack_size / 8) * 8  # force to be multiple of 8.
+
+        iemb = self.rnng.initial_emb(torch.zeros(batch_size, dtype=torch.long, device=device))
+        initial_hidden = self.rnng.stack_rnn(iemb, None)
+
+        stack_unfinished, state_unfinished = self.new_beam_stack_with_state(initial_hidden, stack_size, beam_size)
+        # The rationale behind (+shift_size*5) for beam size for finished BeamItems is
+        # that # steps between words would probably be ~5 in most cases. Forcing to save shifts
+        # after this many steps seems to be unnecessary.
+        stack_word_finished, state_word_finished = self.new_beam_stack_with_state(
+            initial_hidden, stack_size, min(beam_size * 2, beam_size + shift_size * 5)
+        )
+        max_actions = max(100, max_length * 5)
+        return (
+            BeamItemsForGeneration(stack_unfinished, state_unfinished, max_actions, False, particle, K),
+            BeamItemsForGeneration(stack_word_finished, state_word_finished, max_actions, True, particle, K),
+        )
+
+    def beam_step_generate(
+        self,
+        batch_size,
+        max_length,
+        pointer,
+        beam: BeamItemsForGeneration,
+        word_completed_beam: BeamItemsForGeneration,
+        shift_size,
+        device,
+    ):
+        beam_size = beam.beam_size
+        (successors, word_completed_successors, added_forced_completions), next_x = self.get_successors_generate(
+            batch_size, max_length, pointer, beam, beam_size, shift_size, device
+        )
+
+        # tuple of ((batch_idxs, beam_idxs), next_actions, total_scores)
+        assert len(successors) == len(word_completed_successors) == 3
+
+        if word_completed_successors[0][0].size(0) > 0:
+            comp_idxs = tuple(word_completed_successors[0][:2])
+            # Add elements to word_completed_beam
+            # This assumes that returned scores are total scores rather than the current action scores.
+            moved_idxs = word_completed_beam.move_items_from(beam, comp_idxs, new_gen_ll=word_completed_successors[2])
+
+        new_beam_idxs, _ = beam.reconstruct(successors[0][:2])
+        beam.gen_ll[new_beam_idxs] = successors[2]
+        actions = successors[1].new_full((batch_size, beam_size), self.action_dict.padding_idx)
+        actions[new_beam_idxs] = successors[1]
+        word_vecs = self.emb(next_x)
+        self.rnng(word_vecs, actions, beam.stack, torch.ones_like(next_x))
+        beam.do_action(actions, next_x, self.action_dict)
+
+        return added_forced_completions, word_vecs, actions == self.action_dict.a2i["SHIFT"]
+
+    def get_successors_generate(
+        self, batch_size, max_length, pointer, beam: BeamItems, beam_size, shift_size, device
+    ):
+        next_x = pointer < max_length
+        invalid_action_mask = self.invalid_action_mask_generate(beam, max_length)
+
+        log_probs, next_x = self.action_log_probs_generate(
+            beam.stack, invalid_action_mask, next_x
+        )  # (batch, beam, n_actions)
+        # scores for inactive beam items (outside active_idx) are -inf on log_probs so we need
+        # not worry about values in gen_ll outside active_idx.
+        log_probs += beam.gen_ll.unsqueeze(-1)
+
+        return (
+            self.scores_to_successors_generate(
+                batch_size, max_length, pointer, beam, log_probs, beam_size, shift_size, device
+            ),
+            next_x,
+        )
+
+    def invalid_action_mask_generate(self, beam, max_length):  # , subword_end_mask):
+        """Return a tensor where mask[i,j,k]=True means action k is not allowed for beam (i,j)."""
+        action_order = torch.arange(self.num_actions, device=beam.nopen_parens.device)
+
+        prev_pointer = beam.stack.pointer - 1
+        prev_pointer[prev_pointer == -1] = 0
+        # prev_is_subword_mask = (beam.stack.pointer > 0) * (subword_end_mask.gather(1, prev_pointer) == 0)
+        # reduce_mask[i,j,k]=True means k is a not allowed reduce action for (i,j).
+        reduce_mask = (action_order == self.action_dict.a2i["REDUCE"]).view(1, 1, -1)
+        reduce_mask = (
+            # prev is nt => cannot reduce immediately after nt
+            (beam.prev_actions() >= self.action_dict.nt_begin_id())
+            + (beam.stack.top_position < 2)
+            # only shift is allowed when prev is subword
+            # + prev_is_subword_mask
+        ).unsqueeze(-1) * reduce_mask
+
+        # nt_mask[i,j,k]=True means k is a not allowed nt action for (i,j).
+        nt_mask = (action_order >= self.action_dict.nt_begin_id()).view(1, 1, -1)
+        nt_mask = (
+            # if some actions are performed and no more open parens, the sequence is finished.
+            (beam.nopen_parens == 0) * (beam.actions_pos > 0)
+            + (beam.nopen_parens >= self.max_open_nts)
+            + (beam.ncons_nts >= self.max_cons_nts)
+            # Check the storage of beam.actions, which is bounded beforehand.
+            # Theoretically +1 seems sufficient (for rhs); extra +2 is for saving cases
+            # where other actions (reduce/shift) are prohibited for some reasons.
+            + (beam.actions.size(2) - beam.actions_pos < (max_length - beam.stack.pointer + beam.nopen_parens + 3))
+            # Check the storage of fixed stack size (we need minimally two additional
+            # elements to process arbitrary future structure).
+            + (beam.stack.top_position >= beam.stack.stack_size - 2)
+            # only shift is allowed when prev is subword
+            # + prev_is_subword_mask
+        ).unsqueeze(-1) * nt_mask
+
+        shift_mask = (action_order == self.action_dict.a2i["SHIFT"]).view(1, 1, -1)
+        shift_mask = (beam.stack.top_position >= beam.stack.stack_size - 1).unsqueeze(-1) * shift_mask
+
+        # all actions other than nt are invalid;
+        # except_nt_mask[i,j,k]=True means k (not nt) is not allowed for (i,j).
+        except_nt_mask = (action_order < self.action_dict.nt_begin_id()).view(1, 1, -1)
+        except_nt_mask = (beam.nopen_parens == 0).unsqueeze(-1) * except_nt_mask
+
+        except_reduce_mask = (action_order != self.action_dict.a2i["REDUCE"]).view(1, 1, -1)
+        except_reduce_mask = (beam.stack.pointer == max_length).unsqueeze(-1) * except_reduce_mask
+
+        pad_mask = (action_order == self.action_dict.padding_idx).view(1, 1, -1)
+        finished_mask = ((beam.actions_pos > 0) * (beam.nopen_parens == 0)).unsqueeze(-1)
+        beam_width_mask = (
+            torch.arange(beam.beam_size, device=reduce_mask.device).unsqueeze(0) >= beam.beam_widths.unsqueeze(1)
+        ).unsqueeze(-1)
+
+        return (
+            reduce_mask
+            + nt_mask
+            + shift_mask
+            + except_nt_mask
+            + except_reduce_mask
+            + pad_mask
+            + finished_mask
+            + beam_width_mask
+        )
+
+    def action_log_probs_generate(self, stack: FixedStack, invalid_action_mask, can_next):
+        hiddens = self.rnng.output(stack.hidden_head()[:, :, -1])  # (beam*batch, hidden_size)
+        # fp16 is cancelled here before softmax (I want to keep precision in final probablities).
+        action_logit = self.action_mlp(hiddens).view(invalid_action_mask.size()).float()  # (beam, batch, num_actions)
+        action_logit[invalid_action_mask] = -float("inf")
+
+        log_probs = F.log_softmax(action_logit, -1)  # (batch_size, beam_size, num_actions)
+        log_probs[torch.isnan(log_probs)] = -float("inf")
+
+        if can_next:  # shift is valid for next action
+            word_logit = self.vocab_mlp(hiddens).float()  # (batch*beam, vocab_size)
+            word_logit[:, self.padding_idx] = -float("inf")
+            shift_idx = self.action_dict.a2i["SHIFT"]
+
+            # next_x = next_x.unsqueeze(1).expand(-1, log_probs.size(1)).clone().view(-1)  # (batch*beam)
+            next_x = word_logit.argmax(1)
+
+            word_log_probs = self.word_criterion(word_logit, next_x) * -1.0  # (batch_size*beam_size)
+            word_log_probs = word_log_probs.view(log_probs.size(0), log_probs.size(1))
+            log_probs[:, :, shift_idx] += word_log_probs
+
+            next_x = next_x.view(log_probs.shape[:2])
+        else:
+            next_x = None
+
+        return log_probs, next_x
+
+    def scores_to_successors_generate(
+        self, batch_size, max_length, pointer, beam, total_scores, beam_size, shift_size, device
+    ):
+        num_actions = total_scores.size(2)
+        total_scores = total_scores.view(total_scores.size(0), -1)
+        sorted_scores, sort_idx = torch.sort(total_scores, descending=True)
+
+        beam_id = sort_idx // num_actions
+        action_id = sort_idx % num_actions
+
+        valid_action_mask = sorted_scores != -float("inf")
+
+        end_action_mask = ((pointer < max_length).unsqueeze(1) * action_id == self.action_dict.a2i["SHIFT"]) + (
+            (pointer == max_length).unsqueeze(1) * self._parse_finish_mask(beam, action_id, beam_id)
+        )
+
+        end_action_mask = valid_action_mask * end_action_mask
+        no_end_action_mask = valid_action_mask * (end_action_mask != 1)
+
+        within_beam_end_action_idx = end_action_mask[:, :beam_size].nonzero(as_tuple=True)
+        within_beam_num_end_actions = bincount_and_supply(within_beam_end_action_idx[0], batch_size)  # (batch_size)
+        # max num of forcefully shifted actions (actual number is upperbounded by active actions).
+        num_to_be_forced_completions = torch.maximum(
+            torch.tensor([0], device=device).expand(batch_size), shift_size - within_beam_num_end_actions
+        )  # (batch_size)
+
+        outside_end_action_mask = end_action_mask[:, beam_size:]
+        outside_end_action_idx = outside_end_action_mask.nonzero(as_tuple=True)
+        # outside_end_action_idx[0] may be [0, 0, 0, 1, 2, 2]
+        # num_forced_completions might be [0, 1, 0];
+        # pick up only 4th element, i.e., make a mask [F, F, F, T, F, F]
+        #
+        # strategy:
+        #  outside_num_end_actions: [3, 1, 2]
+        #  order: [[0, 1, 2], [0, 1, 2], [0, 1, 2]]
+        #  size_recover_mask: [[T, T, T], [T, F, F], [T, T, F]]
+        #  forced_completion_mask: [[F, F, F], [T, F, F], [F, F, F]]
+        #  filter_mask: [F, F, F, T, F, F]
+        outside_num_end_actions = bincount_and_supply(outside_end_action_idx[0], batch_size)
+        order = torch.arange(outside_num_end_actions.max(), device=device)
+        size_recover_mask = order < outside_num_end_actions.unsqueeze(1)
+        forced_completion_mask = order < num_to_be_forced_completions.unsqueeze(1)
+        filter_mask = forced_completion_mask.view(-1)[size_recover_mask.view(-1)]
+        outside_end_action_idx = (outside_end_action_idx[0][filter_mask], outside_end_action_idx[1][filter_mask])
+
+        outside_end_action_mask[:] = 0
+        outside_end_action_mask[outside_end_action_idx] = 1
+
+        num_forced_completions = bincount_and_supply(outside_end_action_idx[0], batch_size)
+
+        end_successor_idx = torch.cat([end_action_mask[:, :beam_size], outside_end_action_mask], dim=1).nonzero(
+            as_tuple=True
+        )
+        no_end_successor_idx = no_end_action_mask[:, :beam_size].nonzero(as_tuple=True)
+
+        def successor_idx_to_successors(successor_idx):
+            next_beam_ids = beam_id[successor_idx]
+            next_action_ids = action_id[successor_idx]
+            next_scores = sorted_scores[successor_idx]
+            return (successor_idx[0], next_beam_ids), next_action_ids, next_scores
+
+        return (
+            successor_idx_to_successors(no_end_successor_idx),
+            successor_idx_to_successors(end_successor_idx),
+            num_forced_completions,
+        )

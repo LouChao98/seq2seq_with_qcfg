@@ -33,7 +33,8 @@ class _UniDirDifferentiableClamp(torch.autograd.Function):
         return grad_output, None, None
 
 
-def uni_dir_differentiable_clamp(a, min, max):
+def uni_dir_differentiable_clamp(a: torch.Tensor, min, max):
+    return a.detach().clamp(min=min, max=max) + a - a.detach()
     return _UniDirDifferentiableClamp.apply(a, min, max)
 
 

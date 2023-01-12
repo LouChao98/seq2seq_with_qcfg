@@ -1,0 +1,17 @@
+_target_: src.models.tgt_parser.neural_decomp7_2.NeuralDecomp7Impl2TgtParser
+_recursive_: false
+
+# base
+pt_states: 8
+nt_states: 8
+pt_span_range: [1, 1]
+nt_span_range: [2, 1000]
+use_copy: true
+generation_max_length: 40
+generation_num_samples: 10
+generation_ppl_batch_size: 1
+
+# NeuralQCFGTgtParser
+dim: 512
+num_layers: 3
+cpd_rank: 64

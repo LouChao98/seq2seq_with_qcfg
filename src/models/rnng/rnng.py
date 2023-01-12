@@ -210,3 +210,23 @@ class GeneralRNNG(torch.nn.Module):
             return_beam_history=False,
             stack_size_bound=max_stack_size,
         )
+
+    def generate(
+        self,
+        batch_size,
+        max_length,
+        beam_size,
+        word_beam_size=0,
+        shift_size=0,
+        stack_size_bound=100,
+        device="cpu",
+    ):
+        return self.model.generate(
+            batch_size,
+            max_length,
+            beam_size,
+            word_beam_size,
+            shift_size,
+            stack_size_bound,
+            device,
+        )

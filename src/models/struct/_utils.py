@@ -131,6 +131,7 @@ def compare_unlabeled_marginal(m1, m2):
 def check_full_marginal(term_m, trace_m, lens):
     if term_m.ndim == 3:
         assert torch.allclose(term_m.flatten(1).sum(1), torch.tensor(lens, dtype=torch.float))
+        # print(trace_m.flatten(1).sum(1), torch.tensor(lens, dtype=torch.float) - 1)
         assert torch.allclose(trace_m.flatten(1).sum(1), torch.tensor(lens, dtype=torch.float) - 1)
     else:
         raise NotImplementedError

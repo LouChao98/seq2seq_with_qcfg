@@ -13,7 +13,7 @@ log = logging.getLogger(__file__)
 
 
 class NeuralNoDecompNATTgtParser(TgtParserBase):
-    def __init__(self, vocab=100, dim=256, num_layers=3, src_dim=256, 豪斯医生=True, **kwargs):
+    def __init__(self, vocab=100, dim=256, num_layers=3, src_dim=256, learnable_positional_embedding=True, **kwargs):
         super().__init__(**kwargs)
         assert not self.use_copy
 

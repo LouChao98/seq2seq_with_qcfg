@@ -1,4 +1,5 @@
 from collections import defaultdict
+from copy import deepcopy
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -12,6 +13,7 @@ class USimpleHierarchy(RuleConstraintBase):
     def get_mask(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
         assert nt_num_nodes == pt_num_nodes
         assert pt_spans == nt_spans
+        nt_spans = deepcopy(nt_spans)
         nt_spans[0] += [(0, 0, -999)] * (nt_num_nodes - len(nt_spans[0]))
         nt_spans = pad_sequence(
             [torch.tensor([(l, r) for l, r, t in item]) for item in nt_spans],
