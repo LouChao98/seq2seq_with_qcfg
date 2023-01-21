@@ -4,7 +4,7 @@ defaults:
   - none
 
 rule_soft_constraint:
-  _target_: src.models.constraint.folded.FPenaltyDepthAndNonIntersection
+  _target_: src.models.constraint.fully_parameterized.FPPenaltyDepthAndNonIntersection
   upwards_score: 0.1
   stay_score: 0.9
   intersect_score: 0.1
@@ -12,4 +12,4 @@ rule_soft_constraint:
   pt_temperature: 1.
 
 rule_hard_constraint:
-  _target_: src.models.constraint.folded.FSimpleHierarchy
+  _target_: src.models.constraint.fully_parameterized.FPSimpleHierarchy

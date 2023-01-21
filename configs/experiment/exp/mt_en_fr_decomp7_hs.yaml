@@ -1,16 +1,19 @@
 # @package _global_
 
 defaults:
+  - /model/decoder/constraint: folded_reward_depthX_hard_sh
   - override /datamodule: mt_en_fr
   - override /model: pcfg_pcfg_reinforce
-  - override /callbacks: default
+  - override /model/encoder: lstm
+  - override /model/decoder: decomp7_impl3
+  - override /callbacks: default_hparams_search
   - override /logger: wandb
   - override /trainer: default
 
 name: "mt_en_fr"
 
 trainer:
-  max_epochs: 40
+  max_epochs: 20
   accumulate_grad_batches: 8
   gradient_clip_val: 3
 
@@ -18,15 +21,20 @@ datamodule:
   copy_mode: none
   batch_size: 4
   eval_batch_size: 4
-  vocab_min_freq: 1
+  vocab_min_freq: 2
+  force_src_same_length: true
 
 model:
+  decoder_entropy_reg: 0.1
+  soft_constraint_loss_rl: true
+  visualize_every_n_steps: 400
   encoder:
     hidden_size: 512
-
+    num_layers: 2
   decoder:
-    nt_states: 14
-    pt_states: 14
+    nt_states: 32
+    pt_states: 32
+    cpd_rank: 256
     use_copy: false
     generation_max_length: 30
     generation_num_samples: 100

@@ -1,0 +1,65 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - /model/decoder/constraint: folded_reward_depthX
+  - override /datamodule: chr_en
+  - override /model: pcfg_pcfg_reinforce
+  - override /model/encoder: lstm
+  - override /model/parser: tnpcfg_fast
+  - override /model/decoder: decomp7
+  - override /model/test_metric: sbleu
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "chr_en"
+
+trainer:
+  max_epochs: 30
+  accumulate_grad_batches: 8
+  gradient_clip_val: 3
+  max_time: "01:16:00:00"
+
+datamodule:
+  copy_mode: none
+  force_src_same_length: true
+  vocab_min_freq: 2
+  batch_size: 4
+  eval_batch_size: 4
+
+model:
+  real_val_every_n_epochs: 5
+  decoder_entropy_reg: 0.1
+  soft_constraint_loss_rl: true
+
+  encoder:
+    dropout: 0.1
+    hidden_size: 512
+    output_size: 512
+    num_layers: 3
+
+  decoder:
+    use_fast: true
+    use_copy: false
+    nt_states: 20
+    pt_states: ${.nt_states}
+    cpd_rank: 200
+    generation_max_length: 40
+    generation_num_samples: 100
+    generation_ppl_batch_size: 2
+
+    rule_soft_constraint:
+      nt_temperature: 1.
+      pt_temperature: 1.
+      intersect_score: 0.1
+
+logger:
+  wandb:
+    project: "chr_en"

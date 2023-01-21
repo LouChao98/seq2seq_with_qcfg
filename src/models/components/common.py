@@ -92,3 +92,15 @@ class SharedDropout(nn.Module):
     @staticmethod
     def get_mask(x: torch.Tensor, p: float) -> torch.FloatTensor:
         return x.new_empty(x.shape).bernoulli_(1 - p) / (1 - p)
+
+
+def l2norm(t):
+    return F.normalize(t, p=2, dim=-1)
+
+
+def orthogonal_loss_fn(t):
+    # eq (2) from https://arxiv.org/abs/2112.00384
+    n = t.shape[0]
+    normed_codes = l2norm(t)
+    cosine_sim = torch.einsum("i d, j d -> i j", normed_codes, normed_codes)
+    return (cosine_sim**2).sum() / (n**2) - (1 / n)

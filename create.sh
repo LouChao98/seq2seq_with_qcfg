@@ -3,3 +3,4 @@ conda install pyg -c pyg
 conda install numpy numba matplotlib seaborn pandas nltk scikit-learn ipython ipywidgets networkx rich black
 
 pip install python-dotenv pyswip hydra-core wandb transformers datasets pytorch_memlab pytorch-lightning torch-struct pre-commit vector-quantize-pytorch supar
+pip install -qU git+https://github.com/harvardnlp/pytorch-struct

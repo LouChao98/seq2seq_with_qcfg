@@ -1,0 +1,38 @@
+# @package _global_
+
+defaults:
+  - override /datamodule: styleptb_aem
+  - override /model: pcfg_pcfg_reinforce
+  - override /model/decoder: decomp7_impl3
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+name: "styleptb"
+
+datamodule:
+  force_src_same_length: true
+
+model:
+  decoder:
+    cpd_rank: 200
+    nt_states: 4
+    pt_states: ${.nt_states}
+    use_fast: true
+    tie_emb: false
+
+  optimizer:
+    groups:
+      - pattern: decoder\..*
+        lr: 1.0e-5
+    args:
+      lr: 1.0e-3
+
+trainer:
+  max_epochs: 50
+  accumulate_grad_batches: 1
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: "styleptb"

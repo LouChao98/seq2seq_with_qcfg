@@ -1,0 +1,17 @@
+_target_: src.datamodules.scan_datamodule.SCANDataModule
+
+train_file: ${data_dir}/SCAN/tasks_train_simple.txt
+dev_file: ${data_dir}/SCAN/tasks_test_simple.txt
+test_file: ${data_dir}/SCAN/tasks_test_simple.txt
+
+# train_file: ${data_dir}/SCAN/debug.txt
+# dev_file: ${data_dir}/SCAN/debug.txt
+# test_file: ${data_dir}/SCAN/debug.txt
+
+batch_size: 8
+eval_batch_size: 8
+num_workers: ${in_debugger:0,4}
+pin_memory: false
+
+cache_dir: ${data_dir}/cache
+enable_cache: false

@@ -1,6 +1,7 @@
 # @package _global_
 
 defaults:
+  - /model/decoder/constraint: fp_reward_depthX_hard_sh
   - override /datamodule: mt_en_fr
   - override /model: pcfg_pcfg_reinforce
   - override /callbacks: default
@@ -21,6 +22,9 @@ datamodule:
   vocab_min_freq: 1
 
 model:
+  soft_constraint_loss_rl: true
+  decoder_entropy_reg: 0.1
+
   encoder:
     hidden_size: 512
 
@@ -31,6 +35,14 @@ model:
     generation_max_length: 30
     generation_num_samples: 100
     generation_ppl_batch_size: 4
+
+    always_apply_reward: false
+    simple_rl_loss: false
+    rule_soft_constraint:
+      nt_temperature: 1.
+      pt_temperature: ${.nt_temperature}
+      intersect_score: 0.1
+      stay_score: 0.9
 
   optimizer:
     args:

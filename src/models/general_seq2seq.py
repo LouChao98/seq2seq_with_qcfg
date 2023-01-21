@@ -1,5 +1,6 @@
 import logging
 import operator
+import time
 from functools import partial
 from io import StringIO
 from itertools import chain
@@ -140,7 +141,7 @@ class GeneralSeq2SeqModule(ModelBase):
 
         if self.hparams.positional_emb_before_tree_enc:
             self.position_emb = RoFormerSinusoidalPositionalEmbedding(
-                datamodule.hparams.get("max_src_len", 60), self.encoder.get_output_dim()
+                self.datamodule.hparams.get("max_src_len", 60), self.encoder.get_output_dim()
             )
 
         self.setup_patch(stage, self.datamodule)
@@ -173,8 +174,8 @@ class GeneralSeq2SeqModule(ModelBase):
                     continue
                 if param.dim() > 1:
                     init_func(param)
-                # elif "norm" not in name.lower():
-                #     nn.init.zeros_(param)
+                elif "norm" not in name.lower():
+                    nn.init.zeros_(param)
 
         if self.hparams.load_src_parser_from_checkpoint is not None:
             ...
@@ -212,15 +213,22 @@ class GeneralSeq2SeqModule(ModelBase):
         x = self.encoder(x, src_lens)
 
         if self.hparams.positional_emb_before_tree_enc:
-            pos_emb = self.position_emb(x.shape[1]).unsqueeze(0)
+            pos_emb = self.position_emb(x.shape[:2])
             x = x + pos_emb
         return x
 
     def on_train_epoch_start(self) -> None:
+        torch.cuda.reset_peak_memory_stats()
+        self._start_time = time.time()
         super().on_train_epoch_start()
         if self.hparams.tgt_annealing is not None:
             self.decoder.temperature = self.hparams.tgt_annealing
             self.log("train/tgt_annealing", self.hparams.tgt_annealing)
+
+    def on_train_epoch_end(self) -> None:
+        print("Time(s):", time.time() - self._start_time)
+        print("Mem(GB):", torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024)
+        return super().on_train_epoch_end()
 
     @report_ids_when_err
     @profile_every(5, enable=False)

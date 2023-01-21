@@ -21,9 +21,6 @@ datamodule:
   vocab_min_freq: 1
 
 model:
-  encoder:
-    hidden_size: 512
-
   decoder:
     nt_states: 14
     pt_states: 14
@@ -35,6 +32,9 @@ model:
   optimizer:
     args:
       lr: 1.0e-3
+    groups:
+      - pattern: decoder\.
+        lr: 1.0e-4
 
 logger:
   wandb:

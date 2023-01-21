@@ -223,11 +223,15 @@ class TgtParserBase(nn.Module):
 
         elif self.score_normalization_method == "zscore":
             mean_, std_ = torch.std_mean(score, dims, keepdim=True)
-            score = score - mean_ / std_
+            score = (score - mean_) / (std_ + 1e-6)
             score = self.score_normalization_scale * score
 
         elif self.score_normalization_method == "clamp":
-            score = uni_dir_differentiable_clamp(score - score.mean(dims, keepdim=True), -20, 20)
+            score = uni_dir_differentiable_clamp(
+                score - score.mean(dims, keepdim=True),
+                -self.score_normalization_scale,
+                self.score_normalization_scale,
+            )
         elif self.score_normalization_method == "none":
             pass
         else:
@@ -709,7 +713,7 @@ class TgtParserBase(nn.Module):
             else:
                 constraint_scores = self.get_init_nt_constraint(batch_size, n, max_nt_spans)
 
-            root = root.clone().view(batch_size, self.nt_states, -1)
+            root = root.clone().view(batch_size, nt // max_nt_spans, -1)
             root[:, -1] = self.neg_huge
             root = root.view(batch_size, -1)
 

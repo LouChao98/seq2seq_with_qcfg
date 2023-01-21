@@ -3,6 +3,7 @@
 defaults:
   - override /datamodule: mt_en_fr
   - override /model: pcfg_pcfg_reinforce
+  - override /model/decoder: decomp1
   - override /callbacks: default
   - override /logger: wandb
   - override /trainer: default
@@ -18,16 +19,20 @@ datamodule:
   copy_mode: none
   batch_size: 4
   eval_batch_size: 4
-  vocab_min_freq: 1
+  vocab_min_freq: 2
 
 model:
+  decoder_entropy_reg: 0.1
+
   encoder:
     hidden_size: 512
 
   decoder:
     nt_states: 14
-    pt_states: 14
+    pt_states: ${.nt_states}
+    cpd_rank: 100
     use_copy: false
+    use_fast: true
     generation_max_length: 30
     generation_num_samples: 100
     generation_ppl_batch_size: 4

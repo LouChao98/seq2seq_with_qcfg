@@ -1,0 +1,17 @@
+_target_: src.datamodules.tsv_datamodule.TSVDataModule
+
+train_file: ${data_dir}/benchmark/40.tsv
+dev_file: ${data_dir}/benchmark/40.tsv
+test_file: ${data_dir}/benchmark/40.tsv
+
+copy_mode: "none"
+max_src_len: 60
+vocab_min_freq: 1
+
+batch_size: 8
+eval_batch_size: 8 # ${in_debugger:2,6}
+num_workers: ${in_debugger:0,4}
+pin_memory: false
+
+cache_dir: ${data_dir}/cache
+enable_cache: false

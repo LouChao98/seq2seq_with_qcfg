@@ -4,11 +4,10 @@
 # python train.py experiment=example
 
 defaults:
-  - /model/decoder/constraint: fp_hard_sh
   - override /datamodule: scan
   - override /model: pcfg_pcfg_reinforce
   - override /model/encoder: empty
-  - override /model/decoder: nodecomp
+  - override /model/decoder: decomp1
   - override /model/test_metric: bleu1234_and_exact
   - override /callbacks: default
   - override /logger: wandb
@@ -34,9 +33,18 @@ model:
     dim: 256
     nt_states: 10 # src_nt_states in origin impl
     pt_states: 1 # src_pt_states in origin impl
+    cpd_rank: 100
     use_copy: false
+    use_fast: true
     generation_max_length: 60
     generation_ppl_batch_size: 5
+
+  optimizer:
+    groups:
+      - pattern: decoder\..*
+        lr: 1.0e-4
+    args:
+      lr: 5.0e-4
 
 trainer:
   max_epochs: 10

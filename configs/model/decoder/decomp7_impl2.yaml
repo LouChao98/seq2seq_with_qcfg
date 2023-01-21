@@ -15,3 +15,5 @@ generation_ppl_batch_size: 1
 dim: 512
 num_layers: 3
 cpd_rank: 64
+use_fast: false
+tie_r: true

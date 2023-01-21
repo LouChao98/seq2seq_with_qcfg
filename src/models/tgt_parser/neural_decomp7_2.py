@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from supar.modules.affine import Biaffine, Triaffine
 
 from ..components.common import MultiResidualLayer
 from ..struct.decomp7 import Decomp7, Decomp7Sampler
@@ -44,8 +43,6 @@ class NeuralDecomp7Impl2TgtParser(TgtParserBase):
         self.vocab_out = MultiResidualLayer(dim, dim, out_dim=vocab, num_layers=num_layers)
 
         self.rule_mlp_parent = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
-        self.rule_mlp_left = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
-        self.rule_mlp_right = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
         self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)

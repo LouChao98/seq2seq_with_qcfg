@@ -1,0 +1,39 @@
+# @package _global_
+
+defaults:
+  - override /datamodule: benchmark
+  - override /model: pcfg_pcfg_reinforce
+  - override /model/decoder: decomp1
+  - override /callbacks: ~
+  - override /logger: tensorboard
+  - override /trainer: default
+
+name: "benchmark"
+
+trainer:
+  max_epochs: 1
+  accumulate_grad_batches: 1
+  gradient_clip_val: -1
+  limit_val_batches: 0.0
+  num_sanity_val_steps: 1
+
+datamodule:
+  copy_mode: none
+  batch_size: 8
+  eval_batch_size: 8
+  vocab_min_freq: 1
+
+model:
+  decoder:
+    nt_states: 50
+    pt_states: 50
+    cpd_rank: 200
+    use_copy: false
+    use_fast: true
+    generation_max_length: 2
+    generation_num_samples: 1
+    generation_ppl_batch_size: 1
+
+  optimizer:
+    args:
+      lr: 5.0e-4

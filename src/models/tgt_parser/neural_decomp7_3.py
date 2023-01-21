@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from supar.modules.affine import Biaffine, Triaffine
 
-from ..components.common import MultiResidualLayer
+from ..components.common import MultiResidualLayer, orthogonal_loss_fn
 from ..struct.decomp7 import Decomp7, Decomp7Sampler, convert_decomp7_to_pcfg
 from ..struct.decomp7_fast import Decomp7Fast, Decomp7FastSampler
 from .base import TgtParserBase, TgtParserPrediction
@@ -23,6 +23,11 @@ class NeuralDecomp7Impl3TgtParser(TgtParserBase):
         num_layers=3,
         src_dim=256,
         use_fast=False,
+        orthogonal_reg=0.0,
+        decomposed_rijk=False,
+        decomposed_rijk_rank=48,
+        tie_emb=True,
+        use_layernorm=True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -33,6 +38,8 @@ class NeuralDecomp7Impl3TgtParser(TgtParserBase):
         self.num_layers = num_layers
         self.cpd_rank = cpd_rank
         self.use_fast = use_fast
+        self.orthogonal_reg = orthogonal_reg
+        self.decomposed_rijk = decomposed_rijk
 
         self.src_nt_emb = nn.Parameter(torch.empty(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
@@ -43,8 +50,6 @@ class NeuralDecomp7Impl3TgtParser(TgtParserBase):
         self.vocab_out = MultiResidualLayer(dim, dim, out_dim=vocab, num_layers=num_layers)
 
         self.rule_mlp_parent = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
-        self.rule_mlp_left = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
-        self.rule_mlp_right = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
         self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)
@@ -55,22 +60,32 @@ class NeuralDecomp7Impl3TgtParser(TgtParserBase):
         self.rk_c_nt = MultiResidualLayer(dim, dim, out_dim=self.nt_states, num_layers=num_layers)
         self.rk_c_pt = MultiResidualLayer(dim, dim, out_dim=self.pt_states, num_layers=num_layers)
 
-        self.rj_b_nt.out_linear.weight = self.src_nt_emb
-        self.rj_b_pt.out_linear.weight = self.src_pt_emb
-        self.rk_c_nt.out_linear.weight = self.src_nt_emb
-        self.rk_c_pt.out_linear.weight = self.src_pt_emb
+        if tie_emb:
+            self.rj_b_nt.out_linear.weight = self.src_nt_emb
+            self.rj_b_pt.out_linear.weight = self.src_pt_emb
+            self.rk_c_nt.out_linear.weight = self.src_nt_emb
+            self.rk_c_pt.out_linear.weight = self.src_pt_emb
 
-        self.rijk_weight = nn.Parameter(torch.empty(cpd_rank, dim, dim))
+        if self.decomposed_rijk:
+            self.rijk_weight1 = nn.Parameter(torch.empty(cpd_rank, dim, decomposed_rijk_rank))
+            self.rijk_weight2 = nn.Parameter(torch.empty(cpd_rank, dim, decomposed_rijk_rank))
+        else:
+            self.rijk_weight = nn.Parameter(torch.empty(cpd_rank, dim, dim))
 
-        self.ln1 = nn.LayerNorm(dim)
-        self.ln2 = nn.LayerNorm(dim)
-        self.ln3 = nn.LayerNorm(dim)
+        self.ln1 = nn.LayerNorm(dim) if use_layernorm else nn.Identity()
+        self.ln2 = nn.LayerNorm(dim) if use_layernorm else nn.Identity()
+        self.ln3 = nn.LayerNorm(dim) if use_layernorm else nn.Identity()
         self.reset_parameters()
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.src_nt_emb.data)
-        nn.init.xavier_uniform_(self.src_nt_emb.data)
-        nn.init.xavier_uniform_(self.rijk_weight.data)
+        nn.init.xavier_uniform_(self.src_pt_emb.data)
+        if self.decomposed_rijk:
+            nn.init.xavier_uniform_(self.rijk_weight1)
+            nn.init.xavier_uniform_(self.rijk_weight2)
+        else:
+            nn.init.xavier_uniform_(self.rijk_weight.data)
+
         nn.init.xavier_uniform_(self.r_emb.data)
 
     def forward(self, node_features, spans, **kwargs):
@@ -113,7 +128,6 @@ class NeuralDecomp7Impl3TgtParser(TgtParserBase):
 
         # A->BC
         reg = 0
-
         all_node_emb = torch.cat([nt_node_emb, pt_node_emb], 1)
         rule_head = self.rule_mlp_parent(nt_emb)
         if self.score_regularziation > 0:
@@ -126,10 +140,10 @@ class NeuralDecomp7Impl3TgtParser(TgtParserBase):
 
         num = max(self.nt_states, self.pt_states)
 
-        rj_b_nt = self.rj_b_nt(self.r_emb[None, :, None, :] + j[:, None, :nt_num_nodes])
-        rj_b_pt = self.rj_b_pt(self.r_emb[None, :, None, :] + j[:, None, nt_num_nodes:])
-        rk_c_nt = self.rk_c_nt(self.r_emb[None, :, None, :] + k[:, None, :nt_num_nodes])
-        rk_c_pt = self.rk_c_pt(self.r_emb[None, :, None, :] + k[:, None, nt_num_nodes:])
+        rj_b_nt = self.score_normalize(self.rj_b_nt(self.r_emb[None, :, None, :] + j[:, None, :nt_num_nodes]), -1)
+        rj_b_pt = self.score_normalize(self.rj_b_pt(self.r_emb[None, :, None, :] + j[:, None, nt_num_nodes:]), -1)
+        rk_c_nt = self.score_normalize(self.rk_c_nt(self.r_emb[None, :, None, :] + k[:, None, :nt_num_nodes]), -1)
+        rk_c_pt = self.score_normalize(self.rk_c_pt(self.r_emb[None, :, None, :] + k[:, None, nt_num_nodes:]), -1)
 
         if self.score_regularziation > 0:
             reg += torch.norm(rj_b_nt) + torch.norm(rj_b_pt) + torch.norm(rk_c_nt) + torch.norm(rk_c_pt)
@@ -137,13 +151,6 @@ class NeuralDecomp7Impl3TgtParser(TgtParserBase):
             rj_b_pt = rj_b_pt.clone()
             rk_c_nt = rk_c_nt.clone()
             rk_c_pt = rk_c_pt.clone()
-
-        if num != self.pt_states:
-            rj_b_pt[..., self.pt_states :] = self.neg_huge
-            rk_c_pt[..., self.pt_states :] = self.neg_huge
-        elif num != self.nt_states:
-            rj_b_nt[..., self.nt_states :] = self.neg_huge
-            rk_c_nt[..., self.nt_states :] = self.neg_huge
         if self.use_fast:
             rj_b_nt = rj_b_nt.softmax(-1)
             rj_b_pt = rj_b_pt.softmax(-1)
@@ -157,12 +164,12 @@ class NeuralDecomp7Impl3TgtParser(TgtParserBase):
         rule_left = torch.cat([rj_b_nt, rj_b_pt], dim=2)
         rule_right = torch.cat([rk_c_nt, rk_c_pt], dim=2)
 
-        rule_slr = torch.einsum(
-            "rab,xia,xjkb->xrijk",
-            self.rijk_weight,
-            F.leaky_relu(i),
-            F.leaky_relu(j[:, :, None] + k[:, None, :]),
-        )
+        if self.decomposed_rijk:
+            wx = torch.einsum("bxi,oit->boxt", i, self.rijk_weight1)
+            wy = torch.einsum("bmnj,ojt->bomnt", j[:, :, None] + k[:, None, :], self.rijk_weight2)
+            rule_slr = torch.einsum("boxt,bomnt->boxmn", wx, wy)
+        else:
+            rule_slr = torch.einsum("rab,xia,xjkb->xrijk", self.rijk_weight, i, j[:, :, None] + k[:, None, :])
 
         if self.score_regularziation > 0:
             reg += torch.norm(rule_slr)
@@ -227,6 +234,14 @@ class NeuralDecomp7Impl3TgtParser(TgtParserBase):
         if self.score_regularziation > 0:
             pred.score_reg_loss = reg
 
+        if self.orthogonal_reg > 0:
+            orthogonal_loss = (
+                orthogonal_loss_fn(self.src_nt_emb)
+                + orthogonal_loss_fn(self.src_pt_emb)
+                + orthogonal_loss_fn(self.r_emb)
+            )
+            pred.loss = self.orthogonal_reg * orthogonal_loss
+            pred.log = {"orthogonal_loss": orthogonal_loss}
         return pred
 
     def observe_x(self, pred: TgtParserPrediction, x, lengths, inplace=True, **kwargs) -> TgtParserPrediction:

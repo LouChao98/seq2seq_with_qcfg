@@ -1,0 +1,54 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: chr_en
+  - override /model: pcfg_pcfg_reinforce
+  - override /model/decoder: decomp1
+  - override /model/encoder: lstm
+  - override /model/test_metric: sbleu
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+name: "chr_en" # _${hydra:runtime.choices.model/decoder}"
+
+datamodule:
+  force_src_same_length: true
+  vocab_min_freq: 2
+  batch_size: 4
+  eval_batch_size: 2
+
+model:
+  decoder_entropy_reg: 0.1
+  encoder:
+    dropout: 0.1
+    hidden_size: 512
+    output_size: 512
+    num_layers: 2
+
+  decoder:
+    nt_span_range: [1, 1000]
+    use_copy: false
+    use_fast: true
+    cpd_rank: 200
+    nt_states: 100
+    pt_states: ${.nt_states}
+    generation_max_length: 40
+    generation_num_samples: 100
+    generation_ppl_batch_size: 2
+
+trainer:
+  max_epochs: 50
+  accumulate_grad_batches: 8
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: "chr_en"

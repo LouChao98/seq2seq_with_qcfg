@@ -34,17 +34,15 @@ class NeuralDecomp7TgtParser(TgtParserBase):
         self.cpd_rank = cpd_rank
         self.use_fast = use_fast
 
-        self.src_nt_emb = nn.Parameter(torch.randn(self.nt_states, dim))
+        self.src_nt_emb = nn.Parameter(torch.empty(self.nt_states, dim))
         self.src_nt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
-        self.src_pt_emb = nn.Parameter(torch.randn(self.pt_states, dim))
+        self.src_pt_emb = nn.Parameter(torch.empty(self.pt_states, dim))
         self.src_pt_node_mlp = MultiResidualLayer(src_dim, dim, num_layers=num_layers)
 
         self.root_mlp_child = nn.Linear(dim, 1, bias=False)
         self.vocab_out = MultiResidualLayer(dim, dim, out_dim=vocab, num_layers=num_layers)
 
         self.rule_mlp_parent = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
-        self.rule_mlp_left = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
-        self.rule_mlp_right = MultiResidualLayer(dim, dim, out_dim=cpd_rank, num_layers=num_layers)
         self.root_mlp_i = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_j = MultiResidualLayer(dim, dim, num_layers=num_layers)
         self.root_mlp_k = MultiResidualLayer(dim, dim, num_layers=num_layers)
@@ -58,7 +56,7 @@ class NeuralDecomp7TgtParser(TgtParserBase):
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.src_nt_emb.data)
-        nn.init.xavier_uniform_(self.src_nt_emb.data)
+        nn.init.xavier_uniform_(self.src_pt_emb.data)
         nn.init.xavier_uniform_(self.rijk_weight.data)
 
     def forward(self, node_features, spans, **kwargs):

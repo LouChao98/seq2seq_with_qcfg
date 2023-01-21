@@ -129,8 +129,8 @@ class FPenaltyDepth(RuleConstraintBase):
         self.stay_score = np.log(stay_score)
         self.nt_temperature = nt_temperature
         self.pt_temperature = pt_temperature
-        self.nt_score = -np.linspace(0, 99 / nt_temperature, 100)
-        self.pt_score = -np.linspace(0, 99 / pt_temperature, 100)
+        self.nt_score = (-np.linspace(0, 99, 100) + np.log(np.linspace(1, 100, 100))) / nt_temperature
+        self.pt_score = (-np.linspace(0, 99, 100) + np.log(np.linspace(1, 100, 100))) / pt_temperature
 
     def get_weight(self, batch_size, pt_states, nt_states, pt_num_nodes, nt_num_nodes, pt_spans, nt_spans, device):
         nt = nt_num_nodes

@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 import numpy as np
 import torch
+from nltk.tokenize import WordPunctTokenizer
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
@@ -45,6 +46,7 @@ class TSVDataModule(_DataModule):
         double_length_bucket_rate: bool = 1.1,
         num_workers: int = 0,
         pin_memory: bool = False,
+        use_nltk_tokenizer: bool = False,
         ###
         debug_1=False,  # set target sequence to even length.
         debug_2=False,
@@ -53,6 +55,8 @@ class TSVDataModule(_DataModule):
         assert copy_mode in ("none", "token", "phrase")
         super().__init__(**kwargs)
         self.save_hyperparameters(logger=False)
+
+        self.nltk_tokenizer = WordPunctTokenizer()
 
         with self.trace_persistent_variables():
             self.src_vocab: Optional[Vocabulary] = None
@@ -124,8 +128,12 @@ class TSVDataModule(_DataModule):
 
     def process_line(self, line: str):
         src, tgt = line.split("\t")
-        src = src.strip().split()
-        tgt = tgt.strip().split()
+        if self.hparams.use_nltk_tokenizer:
+            src = self.nltk_tokenizer.tokenize(src)
+            tgt = self.nltk_tokenizer.tokenize(tgt)
+        else:
+            src = src.strip().split()
+            tgt = tgt.strip().split()
 
         if self.hparams.emphasize:
             assert src[-2] == ";"
@@ -322,10 +330,10 @@ class TSVDataModule(_DataModule):
         return loader
 
     def get_batch_sampler(self, dataset, phase):
-
+        force_src_same_length = self.hparams.force_src_same_length or (phase != "train")
         if self.hparams.use_double_length_bucket:
 
-            if self.hparams.force_src_same_length:
+            if force_src_same_length:
                 length_bucket = defaultdict(list)
                 for i, item in enumerate(dataset):
                     length_bucket[len(item["src"])].append(i)
@@ -368,7 +376,7 @@ class TSVDataModule(_DataModule):
             assert size > 100, f"Current size({size}) is too small."
             return BucketedSampler(buckets, size, shuffle=phase == "train" and not is_under_debugger())
 
-        if self.hparams.force_src_same_length:
+        if force_src_same_length:
             size = self.hparams.batch_size if phase == "train" else self.hparams.eval_batch_size
             return ByLengthSampler([len(item["src"]) for item in dataset], size)
 

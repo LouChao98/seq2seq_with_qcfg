@@ -1,0 +1,19 @@
+_target_: src.datamodules.tsv_datamodule.TSVDataModule
+
+train_file: ${data_dir}/chr-en/train_chr-en.txt
+dev_file: ${data_dir}/chr-en/dev_chr-en.txt
+test_file: ${data_dir}/chr-en/test_chr-en.txt
+
+copy_mode: "none"
+max_src_len: 25
+max_tgt_len: 25
+vocab_min_freq: 2
+use_nltk_tokenizer: true
+
+batch_size: 8
+eval_batch_size: 2 # ${in_debugger:2,6}
+num_workers: ${in_debugger:0,4}
+pin_memory: false
+
+cache_dir: ${data_dir}/cache
+enable_cache: false

@@ -1,0 +1,21 @@
+# @package _global_
+
+defaults:
+  - override /callbacks: null
+  - override /logger: tensorboard
+
+trainer:
+  max_epochs: 1
+  accumulate_grad_batches: 1
+  gradient_clip_val: -1
+  val_check_interval: -1
+  num_sanity_val_steps: 1
+
+model:
+  decoder:
+    generation_max_length: 2
+    generation_num_samples: 1
+    generation_ppl_batch_size: 1
+
+datamodule:
+  batch_size: 1

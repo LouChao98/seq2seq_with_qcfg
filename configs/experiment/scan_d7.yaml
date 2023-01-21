@@ -4,11 +4,11 @@
 # python train.py experiment=example
 
 defaults:
-  - /model/decoder/constraint: fp_hard_sh
+  - /model/decoder/constraint: folded_hard_sh
   - override /datamodule: scan
   - override /model: pcfg_pcfg_reinforce
   - override /model/encoder: empty
-  - override /model/decoder: nodecomp
+  - override /model/decoder: decomp7
   - override /model/test_metric: bleu1234_and_exact
   - override /callbacks: default
   - override /logger: wandb
@@ -24,6 +24,7 @@ datamodule:
   batch_size: 8
   eval_batch_size: 8
   max_src_len: 100
+  force_src_same_length: true
 
 model:
   embedding:

@@ -1,0 +1,31 @@
+# @package _global_
+
+defaults:
+  - override /datamodule: styleptb
+  - override /model: pcfg_pcfg_reinforce
+  - override /model/decoder: decomp1
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+name: "styleptb"
+
+datamodule:
+  force_src_same_length: true
+
+model:
+  decoder_entropy_reg: 0.1
+
+  decoder:
+    cpd_rank: 100
+    nt_states: 32
+    pt_states: ${.nt_states}
+
+trainer:
+  max_epochs: 50
+  accumulate_grad_batches: 1
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: "styleptb"

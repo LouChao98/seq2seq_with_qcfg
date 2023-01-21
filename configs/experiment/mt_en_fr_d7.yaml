@@ -1,0 +1,69 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /datamodule: mt_en_fr
+  - override /model: pcfg_pcfg_reinforce
+  # - override /model: tnpcfg_fast
+  - override /model/decoder: decomp7
+  - override /callbacks: default
+  - override /logger: wandb
+  - override /trainer: default
+
+name: "mt_en_fr"
+
+datamodule:
+  force_src_same_length: true
+  vocab_min_freq: 1
+  batch_size: 8
+  eval_batch_size: 8 # ${in_debugger:2,6}
+
+model:
+  decoder_entropy_reg: 0.1
+
+  decoder:
+    cpd_rank: 196
+    nt_states: 32
+    pt_states: ${.nt_states}
+    use_fast: true
+    use_copy: false
+    generation_max_length: 30
+    generation_num_samples: 100
+    generation_ppl_batch_size: 4
+
+  optimizer:
+    args:
+      lr: 5.0e-4
+
+trainer:
+  max_epochs: 40
+  accumulate_grad_batches: 4
+  gradient_clip_val: 3
+
+logger:
+  wandb:
+    project: "mt_en_fr"
+# method: bayes
+# program: train_wandb_sweep.py
+# metric:
+#   goal: maximize
+#   name: test/bleu-4
+# parameters:
+#   experiment:
+#     value: mt_en_fr_d7_final_hs
+#   model.decoder.cpd_rank:
+#     values: [ 50, 100, 200, 300 ]
+#   model.decoder.nt_states:
+#     values: [ 8, 16, 32, 64 ]
+#   model.decoder.tie_emb:
+#     values: [ true, false ]
+#   model.decoder.decomposed_rijk:
+#     values: [ true, false ]
+#   model.optimizer.groups.0.lr:
+#     values: [ 1.0e-5, 1.0e-4, 5.0e-4 ]
+#   model.optimizer.args.lr:
+#     values: [ 1.0e-4, 5.0e-4, 1.0e-3 ]
+#   model.encoder.num_layers:
+#     values: [ 1, 2 ]
