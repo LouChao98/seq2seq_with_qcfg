@@ -6,6 +6,7 @@ play*.py
 wrong*.py
 !eval.sh
 !create.sh
+/fairseq/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

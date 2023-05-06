@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from src.datamodules.components.sampler import ByLengthSampler
 from src.datamodules.components.vocab import Vocabulary
 from src.datamodules.datamodule import _DataModule
 
@@ -23,6 +24,7 @@ class SCANDataModule(_DataModule):
         eval_batch_size: int = 64,
         num_workers: int = 0,
         pin_memory: bool = False,
+        force_src_same_length: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -101,39 +103,84 @@ class SCANDataModule(_DataModule):
             )
         return processed
 
-    def train_dataloader(self):
-        loader = DataLoader(
-            dataset=self.data_train,
-            batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
-            collate_fn=self.collator,
-            shuffle=True,
-        )
+    def get_batch_sampler(self, dataset, phase):
+        force_src_same_length = self.hparams.force_src_same_length or (phase != "train")
+
+        if force_src_same_length:
+            size = self.hparams.batch_size if phase == "train" else self.hparams.eval_batch_size
+            return ByLengthSampler([len(item["src"]) for item in dataset], size)
+
+        return None  # fallback to instance samplers
+
+    def train_dataloader(
+        self,
+    ):
+        shuffle = True
+        collator = self.collator
+        batch_sampler = self.get_batch_sampler(self.data_train, "train")
+        if batch_sampler is not None:
+            loader = DataLoader(
+                dataset=self.data_train,
+                batch_sampler=batch_sampler,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=collator,
+            )
+        else:
+            loader = DataLoader(
+                dataset=self.data_train,
+                batch_size=self.hparams.batch_size,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=collator,
+                shuffle=shuffle,
+            )
         logger.info(f"Train dataloader: {len(loader)}")
         return loader
 
     def val_dataloader(self):
-        loader = DataLoader(
-            dataset=self.data_val,
-            batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
-            collate_fn=self.collator,
-            shuffle=False,
-        )
+        batch_sampler = self.get_batch_sampler(self.data_val, "val")
+        if batch_sampler is not None:
+            loader = DataLoader(
+                dataset=self.data_val,
+                batch_sampler=batch_sampler,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collator,
+            )
+        else:
+            loader = DataLoader(
+                dataset=self.data_val,
+                batch_size=self.hparams.batch_size,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collator,
+                shuffle=False,
+            )
         logger.info(f"Val dataloader: {len(loader)}")
         return loader
 
     def test_dataloader(self):
-        return DataLoader(
-            dataset=self.data_test,
-            batch_size=self.hparams.eval_batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
-            collate_fn=self.collator,
-            shuffle=False,
-        )
+        batch_sampler = self.get_batch_sampler(self.data_test, "test")
+        if batch_sampler is not None:
+            loader = DataLoader(
+                dataset=self.data_test,
+                batch_sampler=batch_sampler,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collator,
+            )
+        else:
+            loader = DataLoader(
+                dataset=self.data_test,
+                batch_size=self.hparams.eval_batch_size,
+                num_workers=self.hparams.num_workers,
+                pin_memory=self.hparams.pin_memory,
+                collate_fn=self.collator,
+                shuffle=False,
+            )
+        logger.info(f"Test dataloader: {len(loader)}")
+        return loader
 
     def collator(self, data):
         tgt_lens = [len(inst["tgt_ids"]) for inst in data]
