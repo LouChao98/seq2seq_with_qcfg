@@ -1,5 +1,9 @@
 # Seq2Seq + QCFG
 
+The code of our ACL2023 paper "Improving Grammar-based Sequence-to-Sequence Modeling with Decomposition and Constraints".
+
+This is the dev code containing lots of unrelated and experimental code. We will clean this repo soon.
+
 The code heavily uses two packages:
 * `pytorch-lightning` for most of workflows, https://www.pytorchlightning.ai/
 * `hydra` for configuration, https://hydra.cc/
